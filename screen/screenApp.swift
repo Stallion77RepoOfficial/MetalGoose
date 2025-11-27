@@ -4,8 +4,10 @@ import SwiftUI
 struct ScreenApp: App {
     var body: some Scene {
         WindowGroup {
+            // Ana görünümü başlat
             RootView()
         }
-        .windowStyle(.hiddenTitleBar)
+        .windowStyle(.hiddenTitleBar) // Başlık çubuğunu gizle
+        .windowResizability(.contentSize) // Pencere içeriğe göre boyutlansın
     }
 }

@@ -3,27 +3,20 @@ import ScreenCaptureKit
 
 final class CaptureSettings: ObservableObject {
     enum ScalingMode: String, CaseIterable, Identifiable {
-        case fit
-        case fill
-        case integer
+        case aspectFit = "Aspect Fit"
+        case integer = "Integer Scaling"
+        case fullscreen = "Fullscreen Stretch"
         
         var id: String { rawValue }
     }
     
-    @Published var selectedDisplay: SCDisplay?
-    @Published var selectedWindow: SCWindow?
+    // UI Bindings
+    @Published var scalingMode: ScalingMode = .aspectFit
+    @Published var sharpenAmount: Double = 0.5 // Default sharpness
+    @Published var targetFPS: Int = 60
+    @Published var showFPS: Bool = true
     
-    @Published var scalingMode: ScalingMode = .fit
-    @Published var integerScale: Int = 2
-    @Published var enableFrameGeneration: Bool = false
-    @Published var frameGenerationRatio: Double = 0.0 // represents +1.0 in UI label (0..2)
-    @Published var showFullscreenOverlayOnRun: Bool = true
-    @Published var downscaleFactor: Double = 1.0 // 0.5..1.0 in UI
-    @Published var sharpenAmount: Double = 0.0 // 0..1
-    @Published var showFPSCounter: Bool = false
-    
-    func clamp() {
-        // Placeholder for future clamping logic if needed
-    }
+    // Internal States
+    @Published var selectedWindowID: CGWindowID?
+    @Published var selectedDisplayID: CGDirectDisplayID?
 }
-

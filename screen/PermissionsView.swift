@@ -1,143 +1,98 @@
-// PermissionsView.swift
-// A simple macOS SwiftUI view to request Accessibility and Screen Recording permissions
-
 import SwiftUI
 import AppKit
-import ScreenCaptureKit
 
-#if os(macOS)
 struct PermissionsView: View {
-    @State private var accessibilityGranted: Bool = PermissionsChecker.isAccessibilityGranted
-    @State private var screenRecordingGranted: Bool = PermissionsChecker.isScreenRecordingGranted
+    @State private var axGranted = AXIsProcessTrusted()
+    @State private var recGranted = false // SCKit needs explicit check flow
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Gerekli İzinler")
-                .font(.title2)
-                .bold()
-
-            PermissionRow(title: "Erişilebilirlik", subtitle: "Klavye ve fare ile hedef pencereye tıklamak için gereklidir.", granted: accessibilityGranted) {
-                PermissionsChecker.requestAccessibility()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    accessibilityGranted = PermissionsChecker.isAccessibilityGranted
-                    NotificationCenter.default.post(name: .permissionsShouldRefresh, object: nil)
+        VStack(spacing: 30) {
+            Text("Required Permissions")
+                .font(.system(size: 24, weight: .bold, design: .rounded))
+            
+            VStack(spacing: 15) {
+                PermissionRow(
+                    title: "Accessibility",
+                    description: "Required to forward mouse and keyboard inputs to the game.",
+                    isGranted: axGranted
+                ) {
+                    let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                    AXIsProcessTrustedWithOptions(options)
+                }
+                
+                PermissionRow(
+                    title: "Screen Recording",
+                    description: "Required to capture the game window.",
+                    isGranted: recGranted
+                ) {
+                    // KRİTİK DÜZELTME: Yerel izin penceresini tetikler.
+                    if #available(macOS 10.15, *) {
+                        CGRequestScreenCaptureAccess()
+                    }
+                    
+                    // Kullanıcıya rehberlik etmesi için Ayarlar penceresini aç
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenRecording") {
+                        NSWorkspace.shared.open(url)
+                    }
                 }
             }
-
-            PermissionRow(title: "Ekran Kaydı", subtitle: "Yakalama için zorunludur. macOS yeniden başlatma isteyebilir.", granted: screenRecordingGranted) {
-                PermissionsChecker.requestScreenRecording()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    screenRecordingGranted = PermissionsChecker.isScreenRecordingGranted
-                    NotificationCenter.default.post(name: .permissionsShouldRefresh, object: nil)
-                }
-            }
-
-            if accessibilityGranted && screenRecordingGranted {
-                HStack {
-                    Spacer()
-                    Text("Press Run to Start")
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .transition(.opacity)
+            .padding()
+            .background(Color.black.opacity(0.2))
+            .cornerRadius(12)
+            
+            if axGranted && recGranted {
+                Text("Press Run to Start")
+                    .font(.title2)
+                    .fontWeight(.heavy)
+                    .foregroundColor(.green)
+                    .padding()
+                    .transition(.scale)
+            } else {
+                Text("Please grant permissions to continue")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
-        .padding(20)
-        .frame(minWidth: 360)
-        .onAppear {
-            refreshStates()
+        .padding(40)
+        .frame(width: 500, height: 400)
+        .onAppear { checkPermissions() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            checkPermissions()
         }
     }
-
-    private func refreshStates() {
-        accessibilityGranted = PermissionsChecker.isAccessibilityGranted
-        screenRecordingGranted = PermissionsChecker.isScreenRecordingGranted
+    
+    func checkPermissions() {
+        axGranted = AXIsProcessTrusted()
+        // Ekran Kaydı iznini kontrol et
+        recGranted = CGPreflightScreenCaptureAccess()
     }
 }
 
-private struct PermissionRow: View {
-    var title: String
-    var subtitle: String? = nil
-    var granted: Bool
-    var action: () -> Void
-
+struct PermissionRow: View {
+    let title: String
+    let description: String
+    let isGranted: Bool
+    let action: () -> Void
+    
     var body: some View {
-        HStack(spacing: 12) {
-            StatusIcon(granted: granted)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.headline)
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+        HStack {
+            Image(systemName: isGranted ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundColor(isGranted ? .green : .red)
+                .font(.title2)
+            
+            VStack(alignment: .leading) {
+                Text(title).font(.headline)
+                Text(description).font(.caption).foregroundColor(.gray)
             }
             Spacer()
-            Button(granted ? "Verildi" : "Ayarları Aç") {
-                action()
+            
+            if !isGranted {
+                Button("Grant") { action() }
+                    .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(granted ? .green : .red)
-            .disabled(granted)
         }
         .padding(10)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Color.white.opacity(0.05))
+        .cornerRadius(8)
     }
 }
-
-private struct StatusIcon: View {
-    var granted: Bool
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(granted ? Color.green : Color.red)
-                .frame(width: 20, height: 20)
-            Image(systemName: granted ? "checkmark" : "xmark")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white)
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-enum PermissionsChecker {
-    static var isAccessibilityGranted: Bool {
-        // AXIsProcessTrustedWithOptions does not provide status without prompting.
-        // For status-only, use AXIsProcessTrusted; returns true if already granted.
-        AXIsProcessTrusted()
-    }
-
-    static var isScreenRecordingGranted: Bool {
-        // ScreenCaptureKit doesn't expose a direct status API. The canonical way
-        // is to check if the app is listed as allowed via CGPreflightScreenCaptureAccess
-        // (10.15+) or try to create a stream and handle failure. Use CG API here.
-        if #available(macOS 10.15, *) {
-            return CGPreflightScreenCaptureAccess()
-        } else {
-            return false
-        }
-    }
-
-    static func requestAccessibility() {
-        // Open System Settings -> Privacy & Security -> Accessibility
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-        NSWorkspace.shared.open(url)
-        // Optionally request with options (shows prompt if possible)
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        AXIsProcessTrustedWithOptions(options)
-    }
-
-    static func requestScreenRecording() {
-        // Open System Settings -> Privacy & Security -> Screen Recording
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenRecording") {
-            NSWorkspace.shared.open(url)
-        }
-        if #available(macOS 10.15, *) {
-            CGRequestScreenCaptureAccess()
-        }
-    }
-}
-#endif
