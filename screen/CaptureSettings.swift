@@ -1,22 +1,20 @@
 import SwiftUI
-import ScreenCaptureKit
 
-final class CaptureSettings: ObservableObject {
-    enum ScalingMode: String, CaseIterable, Identifiable {
-        case aspectFit = "Aspect Fit"
-        case integer = "Integer Scaling"
-        case fullscreen = "Fullscreen Stretch"
-        
+class CaptureSettings: ObservableObject {
+    @Published var scaleFactor: Float = 2.0
+    @Published var qualityMode: QualityMode = .quality
+    
+    enum QualityMode: String, CaseIterable, Identifiable {
+        case performance = "PERFORMANCE"
+        case balanced = "BALANCED"
+        case quality = "QUALITY"
         var id: String { rawValue }
     }
     
-    // UI Bindings
-    @Published var scalingMode: ScalingMode = .aspectFit
-    @Published var sharpenAmount: Double = 0.5 // Default sharpness
-    @Published var targetFPS: Int = 60
-    @Published var showFPS: Bool = true
+    @Published var frameGenRatio: Int = 2
     
-    // Internal States
-    @Published var selectedWindowID: CGWindowID?
-    @Published var selectedDisplayID: CGDirectDisplayID?
+    // Performance Overlay Options
+    @Published var showMetalHUD: Bool = false
+    
+    static let shared = CaptureSettings()
 }

@@ -4,10 +4,12 @@ import SwiftUI
 struct ScreenApp: App {
     var body: some Scene {
         WindowGroup {
-            // Ana görünümü başlat
-            RootView()
+            if AXIsProcessTrusted() && CGPreflightScreenCaptureAccess() {
+                ContentView()
+            } else {
+                PermissionsView()
+            }
         }
-        .windowStyle(.hiddenTitleBar) // Başlık çubuğunu gizle
-        .windowResizability(.contentSize) // Pencere içeriğe göre boyutlansın
+        .windowStyle(.hiddenTitleBar)
     }
 }
