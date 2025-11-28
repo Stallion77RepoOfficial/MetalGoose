@@ -10,8 +10,7 @@ struct MetalGooseApp: App {
                 PermissionsView()
             }
         }
-        .defaultSize(width: 450, height: 500)
-        .windowResizability(.contentSize)
         .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 900, height: 600)
     }
 }

@@ -1,18 +1,73 @@
 import SwiftUI
+import Vision
+import MetalFX
+import VideoToolbox
 
 class CaptureSettings: ObservableObject {
-    @Published var scaleFactor: Float = 2.0
-    @Published var qualityMode: QualityMode = .quality
-    @Published var showFPSOverlay: Bool = false
+    static let shared = CaptureSettings()
     
-    enum QualityMode: String, CaseIterable, Identifiable {
-        case performance = "PERFORMANCE"
-        case balanced = "BALANCED"
-        case quality = "QUALITY"
+    // --- PROFILES ---
+    @Published var selectedProfile: String = "Default"
+    
+    // --- SCALING OPTIONS ---
+    enum ScalingType: String, CaseIterable, Identifiable {
+        case metalFX = "MetalFX (AI Upscale)"
+        case integer = "Integer (Pixel Art)"
+        case bicubic = "Bicubic (Soft)"
         var id: String { rawValue }
     }
     
-    @Published var frameGenRatio: Int = 2
+    enum QualityMode: String, CaseIterable, Identifiable {
+        case performance = "Performance"
+        case balanced = "Balanced"
+        case quality = "Quality"
+        var id: String { rawValue }
+    }
     
-    static let shared = CaptureSettings()
+    @Published var scalingType: ScalingType = .metalFX
+    @Published var qualityMode: QualityMode = .quality
+    @Published var scaleFactor: Float = 2.0
+    
+    // --- FRAME GENERATION ---
+    enum FrameGenMode: String, CaseIterable, Identifiable {
+        case off = "Off"
+        case x2 = "MGFG 2.0 (x2)"
+        case x3 = "MGFG 3.0 (x3)"
+        var id: String { rawValue }
+    }
+    
+    @Published var frameGenMode: FrameGenMode = .x2
+    
+    // --- CURSOR & HUD ---
+    @Published var captureCursor: Bool = true
+    @Published var clipCursor: Bool = false
+    @Published var showFPS: Bool = true
+    @Published var vsync: Bool = true
+    @Published var maxLatency: Int = 1
+}
+
+// Kalite Profili Yapısı
+struct QualityProfile {
+    let flowAccuracy: VNGenerateOpticalFlowRequest.ComputationAccuracy
+    let scalerMode: MTLFXSpatialScalerColorProcessingMode
+    let vtScalingMode: CFString
+}
+
+extension CaptureSettings.QualityMode {
+    var profile: QualityProfile {
+        switch self {
+        case .performance:
+            return QualityProfile(flowAccuracy: .low,
+                                  scalerMode: .linear,
+                                  vtScalingMode: kVTScalingMode_Normal)
+        case .balanced:
+            return QualityProfile(flowAccuracy: .medium,
+                                  scalerMode: .perceptual,
+                                  vtScalingMode: kVTScalingMode_Letterbox)
+        case .quality:
+            return QualityProfile(flowAccuracy: .high,
+                                  scalerMode: .hdr,
+                                  vtScalingMode: kVTScalingMode_Trim)
+        }
+    }
 }

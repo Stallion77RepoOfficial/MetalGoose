@@ -1,45 +1,43 @@
-import Foundation
 import MetalKit
 import MetalFX
 import Vision
-import VideoToolbox
 import CoreVideo
 import QuartzCore
+import AppKit
 
 final class Renderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
-    private weak var view: MTKView?
     var textureCache: CVMetalTextureCache?
-    private let frameLock = NSLock()
-    private var pendingBuffer: CVPixelBuffer?
-    private let frameProcessor = FrameProcessor()
     
-    // MetalFX
+    // Pipelines
+    var flowPipeline: MTLComputePipelineState?
+    var integerPipeline: MTLComputePipelineState?
+    var bicubicPipeline: MTLComputePipelineState?
+    var renderPipeline: MTLRenderPipelineState?
+    
+    // Processor & Scaler
+    private let frameProcessor = FrameProcessor()
     var spatialScaler: MTLFXSpatialScaler?
     var spatialScalerDesc: MTLFXSpatialScalerDescriptor?
     
-    // Vision / Frame Gen
+    // Vision
     let sequenceHandler = VNSequenceRequestHandler()
-    var flowPipeline: MTLComputePipelineState?
     
     // State
     var settings: CaptureSettings
     var prevTexture: MTLTexture?
     var prevBuffer: CVPixelBuffer?
     var privateOutputTexture: MTLTexture?
+    weak var hostView: MTKView?
     private var fpsLayer: CATextLayer?
-    private weak var overlayContentView: NSView?
-    private var showFPSOverlay = false
-    private var lastFrameTimestamp: CFAbsoluteTime?
-    private var smoothedFPS: Double = 0
-    private let maxFlowPixels: Int = 16_777_216 // 4096^2 guard for Vision
+    private var lastFPSTimestamp: CFTimeInterval = CACurrentMediaTime()
+    private var smoothedFPS: Double = 0.0
     
     // Window Tracking
     var overlayWindow: NSWindow?
     var trackedWindowID: CGWindowID = 0
     var trackingTimer: Timer?
-    private var trackingFailureCount = 0
     
     init?(metalKitView: MTKView, settings: CaptureSettings) {
         guard let dev = MTLCreateSystemDefaultDevice(),
@@ -48,215 +46,188 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.device = dev
         self.commandQueue = queue
         self.settings = settings
-        self.view = metalKitView
         
         super.init()
         
+        self.hostView = metalKitView
+        
         metalKitView.device = dev
+        metalKitView.isPaused = false
+        metalKitView.enableSetNeedsDisplay = true
+        metalKitView.preferredFramesPerSecond = settings.vsync ? 60 : 0
         metalKitView.framebufferOnly = false
         metalKitView.colorPixelFormat = .bgra8Unorm
         metalKitView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         metalKitView.delegate = self
         metalKitView.layer?.isOpaque = false
-        metalKitView.isPaused = true
-        metalKitView.enableSetNeedsDisplay = true
+        setupHUDLayerIfNeeded(on: metalKitView)
         
         CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
-        
         setupPipelines()
-    }
-
-    func enqueue(buffer: CVPixelBuffer) {
-        frameLock.lock()
-        pendingBuffer = buffer
-        frameLock.unlock()
-        DispatchQueue.main.async { [weak self] in
-            self?.view?.draw()
-        }
-    }
-
-    private func nextBuffer() -> CVPixelBuffer? {
-        frameLock.lock()
-        defer { frameLock.unlock() }
-        let buffer = pendingBuffer
-        pendingBuffer = nil
-        return buffer
     }
     
     func setupPipelines() {
         guard let lib = try? device.makeDefaultLibrary(bundle: .main) else { return }
-        if let fn = lib.makeFunction(name: "flow_warp") {
-            flowPipeline = try? device.makeComputePipelineState(function: fn)
-        }
-    }
-    
-    // MARK: - Window Tracking Logic
-    func startTracking(windowID: CGWindowID, overlay: NSWindow) {
-        self.trackedWindowID = windowID
-        self.overlayWindow = overlay
         
-        // Check window position 60 times a second
-        DispatchQueue.main.async {
-            self.trackingTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { [weak self] _ in
-                self?.updateOverlayPosition()
-            }
-        }
-    }
-    
-    func stopTracking() {
-        trackingTimer?.invalidate()
-        trackingTimer = nil
-    }
-    
-    private func updateOverlayPosition() {
-        guard let overlay = overlayWindow else { return }
+        if let fn = lib.makeFunction(name: "flow_warp") { flowPipeline = try? device.makeComputePipelineState(function: fn) }
+        if let fn = lib.makeFunction(name: "integer_scale") { integerPipeline = try? device.makeComputePipelineState(function: fn) }
+        if let fn = lib.makeFunction(name: "bicubic_scale") { bicubicPipeline = try? device.makeComputePipelineState(function: fn) }
         
-        // Get window info using CoreGraphics
-        let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], trackedWindowID) as? [[String: Any]]
+        let pipeDesc = MTLRenderPipelineDescriptor()
+        pipeDesc.vertexFunction = lib.makeFunction(name: "texture_vertex")
+        pipeDesc.fragmentFunction = lib.makeFunction(name: "texture_fragment")
+        pipeDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
+        pipeDesc.colorAttachments[0].isBlendingEnabled = true
+        pipeDesc.colorAttachments[0].rgbBlendOperation = .add
+        pipeDesc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        pipeDesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        renderPipeline = try? device.makeRenderPipelineState(descriptor: pipeDesc)
+    }
+    
+    func processAndRender(buffer: CVPixelBuffer, view: MTKView) {
+        setupHUDLayerIfNeeded(on: view)
+        // 1. FRAME PROCESSOR STEP (VideoToolbox Scaling/Converting)
+        let profile = settings.qualityMode.profile
+        let processedBuffer = frameProcessor.prepare(buffer: buffer, scalingMode: profile.vtScalingMode)
         
-        if let info = list?.first,
-           let boundsDict = info[kCGWindowBounds as String] as? [String: CGFloat] {
-            
-            trackingFailureCount = 0
-            
-            let x = boundsDict["X"] ?? 0
-            let y = boundsDict["Y"] ?? 0
-            let w = boundsDict["Width"] ?? 100
-            let h = boundsDict["Height"] ?? 100
-            
-            // Convert to macOS coordinates (Bottom-Left origin)
-            let screenH = NSScreen.main?.frame.height ?? 1080
-            let newY = screenH - (y + h)
-            
-            let newFrame = CGRect(x: x, y: newY, width: w, height: h)
-            
-            // Update position only if changed
-            if overlay.frame != newFrame {
-                overlay.setFrame(newFrame, display: true, animate: false)
-            }
-            
-            // Ensure overlay stays visible and on top
-            if !overlay.isVisible {
-                overlay.orderFront(nil)
-            }
-            // Periodically bring to front to handle other overlays or focus changes
-            overlay.orderFront(nil)
-            
-        } else {
-            // Window might be closed or temporarily unavailable (e.g. during Alt-Tab or Space switch)
-            // We allow a grace period before giving up
-            trackingFailureCount += 1
-            if trackingFailureCount > 300 { // ~5 seconds at 60Hz
-                stopTracking()
-                overlay.orderOut(nil)
-            }
-        }
-    }
-    
-    // MARK: - Rendering
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        spatialScaler = nil
-        privateOutputTexture = nil
-    }
-    
-    func draw(in view: MTKView) {
-        guard let buffer = nextBuffer() else { return }
-          let profile = settings.qualityMode.profile
-          let workingBuffer = frameProcessor.prepare(buffer: buffer,
-                                       scaleFactor: settings.scaleFactor,
-                                       scalingMode: profile.vtScalingMode)
-          guard let drawable = view.currentDrawable,
+        guard let drawable = view.currentDrawable,
               let cmdBuffer = commandQueue.makeCommandBuffer(),
-              let srcTex = createTexture(from: workingBuffer) else { return }
+              let srcTex = createTexture(from: processedBuffer) else { return }
         
         var texToScale = srcTex
         
-        // 1. Frame Generation
-          if let pTex = prevTexture,
-              let pBuf = prevBuffer,
-              shouldRunFrameGeneration(buffer: workingBuffer) {
-            let request = VNGenerateOpticalFlowRequest(targetedCVPixelBuffer: workingBuffer, options: [:])
-            request.computationAccuracy = profile.flowAccuracy
-            request.outputPixelFormat = kCVPixelFormatType_TwoComponent32Float
-            
-            try? sequenceHandler.perform([request], on: pBuf, orientation: .up)
-            
-            if let res = request.results?.first,
-               let flowTex = createTexture(from: res.pixelBuffer) {
-                
-                let midTexDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: srcTex.width, height: srcTex.height, mipmapped: false)
-                midTexDesc.usage = [.shaderRead, .shaderWrite]
-                
-                if let midTex = device.makeTexture(descriptor: midTexDesc),
-                   let enc = cmdBuffer.makeComputeCommandEncoder(),
-                   let pipe = flowPipeline {
-                    
-                    enc.setComputePipelineState(pipe)
-                    enc.setTexture(pTex, index: 0)
-                    enc.setTexture(srcTex, index: 1)
-                    enc.setTexture(flowTex, index: 2)
-                    enc.setTexture(midTex, index: 3)
-                    var t: Float = 0.5
-                    enc.setBytes(&t, length: 4, index: 0)
-                    
-                    let w = pipe.threadExecutionWidth
-                    let h = pipe.maxTotalThreadsPerThreadgroup / w
-                    let grids = MTLSize(width: (srcTex.width + w - 1)/w, height: (srcTex.height + h - 1)/h, depth: 1)
-                    enc.dispatchThreadgroups(grids, threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
-                    enc.endEncoding()
-                    
-                    texToScale = midTex
+        // 2. FRAME GENERATION (Vision)
+        if settings.frameGenMode != .off, let pTex = prevTexture, let pBuf = prevBuffer {
+            // Ensure size/format match to avoid Vision assertions
+            let w0 = CVPixelBufferGetWidth(processedBuffer)
+            let h0 = CVPixelBufferGetHeight(processedBuffer)
+            let w1 = CVPixelBufferGetWidth(pBuf)
+            let h1 = CVPixelBufferGetHeight(pBuf)
+            let f0 = CVPixelBufferGetPixelFormatType(processedBuffer)
+            let f1 = CVPixelBufferGetPixelFormatType(pBuf)
+            if w0 == w1, h0 == h1, f0 == f1 {
+                let request = VNGenerateOpticalFlowRequest(targetedCVPixelBuffer: processedBuffer, options: [:])
+                request.computationAccuracy = profile.flowAccuracy
+                request.outputPixelFormat = kCVPixelFormatType_TwoComponent32Float
+
+                let handler = VNSequenceRequestHandler()
+                do {
+                    try handler.perform([request], on: pBuf, orientation: .up)
+                    if let res = request.results?.first, let flowTex = createTexture(from: res.pixelBuffer) {
+                        let midDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: srcTex.width, height: srcTex.height, mipmapped: false)
+                        midDesc.usage = [.shaderRead, .shaderWrite]
+
+                        if let midTex = device.makeTexture(descriptor: midDesc),
+                           let enc = cmdBuffer.makeComputeCommandEncoder(),
+                           let pipe = flowPipeline {
+
+                            enc.setComputePipelineState(pipe)
+                            enc.setTexture(pTex, index: 0)
+                            enc.setTexture(srcTex, index: 1)
+                            enc.setTexture(flowTex, index: 2)
+                            enc.setTexture(midTex, index: 3)
+                            var t: Float = 0.5
+                            enc.setBytes(&t, length: 4, index: 0)
+
+                            let w = pipe.threadExecutionWidth
+                            let h = pipe.maxTotalThreadsPerThreadgroup / w
+                            let grids = MTLSize(width: (srcTex.width + w - 1)/w, height: (srcTex.height + h - 1)/h, depth: 1)
+                            enc.dispatchThreadgroups(grids, threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+                            enc.endEncoding()
+
+                            texToScale = midTex
+                        }
+                    }
+                } catch {
+                    // Skip MGFG on Vision error
                 }
+            } else {
+                // Mismatch in size/format; skip MGFG for this frame
             }
         }
         
         prevTexture = srcTex
-        prevBuffer = workingBuffer
+        prevBuffer = processedBuffer
         
-        // 2. MetalFX Upscaling
-        let targetWidth = drawable.texture.width
-        let targetHeight = drawable.texture.height
+        // 3. UPSCALING (MetalFX or Shader)
+        let dstTex = drawable.texture
         
-        if privateOutputTexture == nil ||
-            privateOutputTexture?.width != targetWidth ||
-            privateOutputTexture?.height != targetHeight {
+        if settings.scalingType == .metalFX {
+            setupMetalFX(src: texToScale, dst: dstTex, profile: profile)
             
-            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: drawable.texture.pixelFormat, width: targetWidth, height: targetHeight, mipmapped: false)
-            desc.storageMode = .private
-            desc.usage = [.shaderRead, .shaderWrite, .renderTarget]
-            privateOutputTexture = device.makeTexture(descriptor: desc)
-        }
-        
-        guard let outputTex = privateOutputTexture else { return }
-        
-        setupMetalFX(src: texToScale, dst: outputTex, profile: profile)
-        
-        if let scaler = spatialScaler {
-            scaler.colorTexture = texToScale
-            scaler.outputTexture = outputTex
-            scaler.encode(commandBuffer: cmdBuffer)
+            // Private Texture kontrolü
+            if privateOutputTexture == nil || privateOutputTexture?.width != dstTex.width || privateOutputTexture?.height != dstTex.height {
+                let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: dstTex.pixelFormat, width: dstTex.width, height: dstTex.height, mipmapped: false)
+                desc.storageMode = .private
+                desc.usage = [.shaderRead, .shaderWrite, .renderTarget]
+                privateOutputTexture = device.makeTexture(descriptor: desc)
+            }
             
-            if let blit = cmdBuffer.makeBlitCommandEncoder() {
-                blit.copy(from: outputTex, to: drawable.texture)
-                blit.endEncoding()
+            if let scaler = spatialScaler, let outTex = privateOutputTexture {
+                scaler.colorTexture = texToScale
+                scaler.outputTexture = outTex
+                scaler.encode(commandBuffer: cmdBuffer)
+                
+                let blit = cmdBuffer.makeBlitCommandEncoder()
+                blit?.copy(from: outTex, to: dstTex)
+                blit?.endEncoding()
             }
         } else {
+            // Integer / Bicubic via compute into intermediate texture, then blit to drawable
+            // Ensure private output matches destination size
+            if privateOutputTexture == nil || privateOutputTexture?.width != dstTex.width || privateOutputTexture?.height != dstTex.height || privateOutputTexture?.pixelFormat != dstTex.pixelFormat {
+                let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: dstTex.pixelFormat, width: dstTex.width, height: dstTex.height, mipmapped: false)
+                desc.storageMode = .private
+                desc.usage = [.shaderRead, .shaderWrite, .renderTarget]
+                privateOutputTexture = device.makeTexture(descriptor: desc)
+            }
+            guard let outTex = privateOutputTexture else { return }
+
+            guard let enc = cmdBuffer.makeComputeCommandEncoder() else { return }
+            let pipe = (settings.scalingType == .integer) ? integerPipeline : bicubicPipeline
+
+            if let p = pipe {
+                enc.setComputePipelineState(p)
+                enc.setTexture(texToScale, index: 0)
+                enc.setTexture(outTex, index: 1)
+
+                if settings.scalingType == .integer {
+                    var factor = settings.scaleFactor
+                    enc.setBytes(&factor, length: 4, index: 0)
+                }
+
+                let w = p.threadExecutionWidth
+                let h = p.maxTotalThreadsPerThreadgroup / w
+                let grids = MTLSize(width: (outTex.width + w - 1)/w, height: (outTex.height + h - 1)/h, depth: 1)
+                enc.dispatchThreadgroups(grids, threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+            }
+            enc.endEncoding()
+
             if let blit = cmdBuffer.makeBlitCommandEncoder() {
-                blit.copy(from: texToScale, to: drawable.texture)
+                blit.copy(from: outTex, to: dstTex)
                 blit.endEncoding()
             }
         }
         
         cmdBuffer.present(drawable)
+        cmdBuffer.addCompletedHandler { [weak self] _ in
+            guard let self = self else { return }
+            let now = CACurrentMediaTime()
+            let dt = now - self.lastFPSTimestamp
+            self.lastFPSTimestamp = now
+            let inst = dt > 0 ? (1.0 / dt) : 0.0
+            self.smoothedFPS = self.smoothedFPS == 0 ? inst : (self.smoothedFPS * 0.85 + inst * 0.15)
+            if self.settings.showFPS, let layer = self.fpsLayer {
+                DispatchQueue.main.async {
+                    layer.string = String(format: "FPS: %.0f", self.smoothedFPS)
+                }
+            }
+        }
         cmdBuffer.commit()
-        recordFrameTiming()
     }
     
     func setupMetalFX(src: MTLTexture, dst: MTLTexture, profile: QualityProfile) {
-        if spatialScaler == nil ||
-            spatialScalerDesc?.inputWidth != src.width ||
-            spatialScalerDesc?.outputWidth != dst.width ||
-            spatialScalerDesc?.colorProcessingMode != profile.scalerMode {
+        if spatialScaler == nil || spatialScalerDesc?.outputWidth != dst.width || spatialScalerDesc?.colorProcessingMode != profile.scalerMode {
             let desc = MTLFXSpatialScalerDescriptor()
             desc.inputWidth = src.width
             desc.inputHeight = src.height
@@ -271,157 +242,127 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
     }
     
+    private func setupHUDLayerIfNeeded(on view: MTKView) {
+        guard settings.showFPS else {
+            fpsLayer?.removeFromSuperlayer()
+            fpsLayer = nil
+            return
+        }
+        if fpsLayer == nil {
+            let layer = CATextLayer()
+            layer.contentsScale = view.window?.backingScaleFactor ?? (view.layer?.contentsScale ?? 2.0)
+            layer.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+            layer.fontSize = 12
+            layer.alignmentMode = .left
+            layer.foregroundColor = NSColor.white.cgColor
+            layer.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+            layer.cornerRadius = 4
+            layer.masksToBounds = true
+            layer.string = "FPS: --"
+            let h: CGFloat = 20
+            layer.frame = CGRect(x: 8, y: (view.bounds.height - h - 8), width: 120, height: h)
+            view.layer?.addSublayer(layer)
+            fpsLayer = layer
+        }
+    }
+    
     private func createTexture(from buffer: CVPixelBuffer) -> MTLTexture? {
         var cvTex: CVMetalTexture?
         let w = CVPixelBufferGetWidth(buffer)
         let h = CVPixelBufferGetHeight(buffer)
-        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache!, buffer, nil, .bgra8Unorm, w, h, 0, &cvTex)
+        guard let cache = textureCache else { return nil }
+        let cvFormat = CVPixelBufferGetPixelFormatType(buffer)
+        let metalFormat: MTLPixelFormat
+        switch cvFormat {
+        case kCVPixelFormatType_32BGRA:
+            metalFormat = .bgra8Unorm
+        case kCVPixelFormatType_TwoComponent32Float:
+            metalFormat = .rg32Float
+        default:
+            metalFormat = .bgra8Unorm
+        }
+        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, buffer, nil, metalFormat, w, h, 0, &cvTex)
         return cvTex.flatMap { CVMetalTextureGetTexture($0) }
     }
     
+    // Tracking & Overlay
     func createOverlayWindow(targetFrame: CGRect) -> NSWindow {
-        let win = NSWindow(contentRect: targetFrame, styleMask: .borderless, backing: .buffered, defer: false)
-        win.backgroundColor = .clear
-        win.isOpaque = false
-        win.hasShadow = false
-        win.level = .screenSaver
-        win.ignoresMouseEvents = true
-        win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let container = NSView(frame: CGRect(origin: .zero, size: targetFrame.size))
-        container.translatesAutoresizingMaskIntoConstraints = true
-        container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.clear.cgColor
-        if let metalView = view {
-            metalView.frame = container.bounds
-            metalView.autoresizingMask = [.width, .height]
-            container.addSubview(metalView)
-        }
-        win.contentView = container
-        overlayContentView = container
-        fpsLayer?.removeFromSuperlayer()
-        fpsLayer = nil
-        return win
+        let panel = NSPanel(contentRect: targetFrame,
+                            styleMask: [.nonactivatingPanel, .borderless],
+                            backing: .buffered,
+                            defer: false)
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.level = .floating
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .stationary]
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = false
+        return panel
     }
-
-    func setFPSOverlay(enabled: Bool) {
-        showFPSOverlay = enabled
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.ensureFPSLayer()?.isHidden = !enabled
-        }
-    }
-
-    private func recordFrameTiming() {
-        let now = CFAbsoluteTimeGetCurrent()
-        if let last = lastFrameTimestamp {
-            let delta = now - last
-            guard delta > 0 else {
-                lastFrameTimestamp = now
-                return
-            }
-            let fps = 1.0 / delta
-            smoothedFPS = smoothedFPS == 0 ? fps : (smoothedFPS * 0.85 + fps * 0.15)
-            if showFPSOverlay {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
-                    self.updateFPSOverlay(text: String(format: "MG FPS %.1f", self.smoothedFPS))
-                }
+    
+    func startTracking(windowID: CGWindowID, overlay: NSWindow) {
+        self.trackedWindowID = windowID
+        self.overlayWindow = overlay
+        DispatchQueue.main.async {
+            self.trackingTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { [weak self] _ in
+                self?.updateOverlayPosition()
             }
         }
-        lastFrameTimestamp = now
     }
-
-    private func ensureFPSLayer() -> CATextLayer? {
-        guard let hostView = overlayContentView ?? view else { return nil }
-        if hostView.layer == nil {
-            hostView.wantsLayer = true
+    
+    func stopTracking() {
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+    }
+    
+    deinit {
+        trackingTimer?.invalidate()
+    }
+    
+    private func updateOverlayPosition() {
+        guard let overlay = overlayWindow else { return }
+        guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], trackedWindowID) as? [[String: Any]],
+              let info = list.first,
+              let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] else {
+            stopTracking()
+            overlay.orderOut(nil)
+            return
         }
-        if let layer = fpsLayer {
-            // Ensure layer is always on top
-            if layer.superlayer != hostView.layer {
-                layer.removeFromSuperlayer()
-                hostView.layer?.addSublayer(layer)
-            } else {
-                // Re-add to bring to front
-                layer.removeFromSuperlayer()
-                hostView.layer?.addSublayer(layer)
-            }
-            return layer
+
+        let x = bounds["X"] ?? 0
+        let y = bounds["Y"] ?? 0
+        let w = bounds["Width"] ?? 100
+        let h = bounds["Height"] ?? 100
+
+        // Compute union rect of all screens in Cocoa coordinates
+        let union = NSScreen.screens.reduce(NSRect.null) { $0.union($1.frame) }
+        let cocoaX = union.minX + x
+        let cocoaY = union.maxY - (y + h)
+        let newFrame = CGRect(x: cocoaX, y: cocoaY, width: w, height: h)
+
+        if overlay.frame != newFrame {
+            overlay.setFrame(newFrame, display: true, animate: false)
         }
-        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .bold)
-        let layer = CATextLayer()
-        layer.string = "MG FPS --"
-        layer.font = font
-        layer.fontSize = font.pointSize
-        layer.foregroundColor = NSColor.green.cgColor
-        layer.backgroundColor = NSColor.black.withAlphaComponent(0.75).cgColor
-        layer.alignmentMode = .left
-        layer.cornerRadius = 6
-        layer.masksToBounds = true
-        layer.contentsScale = hostView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
-        layer.zPosition = 1000
-        hostView.layer?.addSublayer(layer)
-        fpsLayer = layer
-        layoutFPSLayer(withText: "MG FPS --")
-        return layer
     }
-
-    private func updateFPSOverlay(text: String) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        guard let layer = ensureFPSLayer() else { 
-            CATransaction.commit()
-            return 
-        }
-        layer.string = text
-        layoutFPSLayer(withText: text)
-        CATransaction.commit()
+    
+    // Resource cleanup for safe shutdown
+    func cleanup() {
+        stopTracking()
+        prevTexture = nil
+        prevBuffer = nil
+        privateOutputTexture = nil
+        spatialScaler = nil
+        spatialScalerDesc = nil
     }
-
-    private func layoutFPSLayer(withText text: String) {
-        guard let hostView = overlayContentView ?? view,
-              let layer = fpsLayer else { return }
-        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .bold)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        let size = (text as NSString).size(withAttributes: attrs)
-        let padding = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
-        let width = size.width + padding.left + padding.right
-        let height = size.height + padding.top + padding.bottom
-        let hostHeight = hostView.bounds.height
-        let y = max(8, hostHeight - height - 12)
-        layer.frame = CGRect(x: 12, y: y, width: width, height: height)
+    
+    // Delegate Stub
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        spatialScaler = nil
+        privateOutputTexture = nil
+        if let cache = textureCache { CVMetalTextureCacheFlush(cache, 0) }
     }
-
-    private func shouldRunFrameGeneration(buffer: CVPixelBuffer) -> Bool {
-        let width = CVPixelBufferGetWidth(buffer)
-        let height = CVPixelBufferGetHeight(buffer)
-        guard width > 0, height > 0 else { return false }
-        let pixels = width * height
-        return pixels <= maxFlowPixels
-    }
+    func draw(in view: MTKView) {}
 }
 
-struct QualityProfile {
-    let flowAccuracy: VNGenerateOpticalFlowRequest.ComputationAccuracy
-    let scalerMode: MTLFXSpatialScalerColorProcessingMode
-    let vtScalingMode: CFString
-}
-
-extension CaptureSettings.QualityMode {
-    var profile: QualityProfile {
-        switch self {
-        case .performance:
-            return QualityProfile(flowAccuracy: .low,
-                                  scalerMode: .linear,
-                                  vtScalingMode: kVTScalingMode_Normal)
-        case .balanced:
-            return QualityProfile(flowAccuracy: .medium,
-                                  scalerMode: .perceptual,
-                                  vtScalingMode: kVTScalingMode_Letterbox)
-        case .quality:
-            return QualityProfile(flowAccuracy: .high,
-                                  scalerMode: .hdr,
-                                  vtScalingMode: kVTScalingMode_Trim)
-        }
-    }
-}
