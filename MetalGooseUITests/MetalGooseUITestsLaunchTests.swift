@@ -1,13 +1,13 @@
 //
-//  screenUITestsLaunchTests.swift
-//  screenUITests
+//  MetalGooseUITestsLaunchTests.swift
+//  MetalGooseUITests
 //
 //  Created by Berke on 26.11.2025.
 //
 
 import XCTest
 
-final class screenUITestsLaunchTests: XCTestCase {
+final class MetalGooseUITestsLaunchTests: XCTestCase {
 
     override class var runsForEachTargetApplicationUIConfiguration: Bool {
         true

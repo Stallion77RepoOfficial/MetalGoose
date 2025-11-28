@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct ScreenApp: App {
+struct MetalGooseApp: App {
     var body: some Scene {
         WindowGroup {
             if AXIsProcessTrusted() && CGPreflightScreenCaptureAccess() {
@@ -10,6 +10,8 @@ struct ScreenApp: App {
                 PermissionsView()
             }
         }
+        .defaultSize(width: 450, height: 500)
+        .windowResizability(.contentSize)
         .windowStyle(.hiddenTitleBar)
     }
 }

@@ -12,37 +12,37 @@
 			containerPortal = 19FDA0B22ED66F9100F64E76 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 19FDA0B92ED66F9100F64E76;
-			remoteInfo = screen;
+			remoteInfo = MetalGoose;
 		};
 		19FDA0D32ED66F9100F64E76 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 19FDA0B22ED66F9100F64E76 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 19FDA0B92ED66F9100F64E76;
-			remoteInfo = screen;
+			remoteInfo = MetalGoose;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		19FDA0BA2ED66F9100F64E76 /* screen.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = screen.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		19FDA0C82ED66F9100F64E76 /* screenTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = screenTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		19FDA0D22ED66F9100F64E76 /* screenUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = screenUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		19FDA0BA2ED66F9100F64E76 /* MetalGoose.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MetalGoose.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		19FDA0C82ED66F9100F64E76 /* MetalGooseTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MetalGooseTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		19FDA0D22ED66F9100F64E76 /* MetalGooseUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MetalGooseUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		19FDA0BC2ED66F9100F64E76 /* screen */ = {
+		19FDA0BC2ED66F9100F64E76 /* MetalGoose */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = screen;
+			path = MetalGoose;
 			sourceTree = "<group>";
 		};
-		19FDA0CB2ED66F9100F64E76 /* screenTests */ = {
+		19FDA0CB2ED66F9100F64E76 /* MetalGooseTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = screenTests;
+			path = MetalGooseTests;
 			sourceTree = "<group>";
 		};
-		19FDA0D52ED66F9100F64E76 /* screenUITests */ = {
+		19FDA0D52ED66F9100F64E76 /* MetalGooseUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = screenUITests;
+			path = MetalGooseUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -75,9 +75,9 @@
 		19FDA0B12ED66F9100F64E76 = {
 			isa = PBXGroup;
 			children = (
-				19FDA0BC2ED66F9100F64E76 /* screen */,
-				19FDA0CB2ED66F9100F64E76 /* screenTests */,
-				19FDA0D52ED66F9100F64E76 /* screenUITests */,
+				19FDA0BC2ED66F9100F64E76 /* MetalGoose */,
+				19FDA0CB2ED66F9100F64E76 /* MetalGooseTests */,
+				19FDA0D52ED66F9100F64E76 /* MetalGooseUITests */,
 				19FDA0BB2ED66F9100F64E76 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -85,9 +85,9 @@
 		19FDA0BB2ED66F9100F64E76 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				19FDA0BA2ED66F9100F64E76 /* screen.app */,
-				19FDA0C82ED66F9100F64E76 /* screenTests.xctest */,
-				19FDA0D22ED66F9100F64E76 /* screenUITests.xctest */,
+				19FDA0BA2ED66F9100F64E76 /* MetalGoose.app */,
+				19FDA0C82ED66F9100F64E76 /* MetalGooseTests.xctest */,
+				19FDA0D22ED66F9100F64E76 /* MetalGooseUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -95,9 +95,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		19FDA0B92ED66F9100F64E76 /* screen */ = {
+		19FDA0B92ED66F9100F64E76 /* MetalGoose */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 19FDA0DC2ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "screen" */;
+			buildConfigurationList = 19FDA0DC2ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "MetalGoose" */;
 			buildPhases = (
 				19FDA0B62ED66F9100F64E76 /* Sources */,
 				19FDA0B72ED66F9100F64E76 /* Frameworks */,
@@ -108,18 +108,18 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				19FDA0BC2ED66F9100F64E76 /* screen */,
+				19FDA0BC2ED66F9100F64E76 /* MetalGoose */,
 			);
-			name = screen;
+			name = MetalGoose;
 			packageProductDependencies = (
 			);
-			productName = screen;
-			productReference = 19FDA0BA2ED66F9100F64E76 /* screen.app */;
+			productName = MetalGoose;
+			productReference = 19FDA0BA2ED66F9100F64E76 /* MetalGoose.app */;
 			productType = "com.apple.product-type.application";
 		};
-		19FDA0C72ED66F9100F64E76 /* screenTests */ = {
+		19FDA0C72ED66F9100F64E76 /* MetalGooseTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 19FDA0DF2ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "screenTests" */;
+			buildConfigurationList = 19FDA0DF2ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "MetalGooseTests" */;
 			buildPhases = (
 				19FDA0C42ED66F9100F64E76 /* Sources */,
 				19FDA0C52ED66F9100F64E76 /* Frameworks */,
@@ -131,18 +131,18 @@
 				19FDA0CA2ED66F9100F64E76 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				19FDA0CB2ED66F9100F64E76 /* screenTests */,
+				19FDA0CB2ED66F9100F64E76 /* MetalGooseTests */,
 			);
-			name = screenTests;
+			name = MetalGooseTests;
 			packageProductDependencies = (
 			);
-			productName = screenTests;
-			productReference = 19FDA0C82ED66F9100F64E76 /* screenTests.xctest */;
+			productName = MetalGooseTests;
+			productReference = 19FDA0C82ED66F9100F64E76 /* MetalGooseTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		19FDA0D12ED66F9100F64E76 /* screenUITests */ = {
+		19FDA0D12ED66F9100F64E76 /* MetalGooseUITests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 19FDA0E22ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "screenUITests" */;
+			buildConfigurationList = 19FDA0E22ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "MetalGooseUITests" */;
 			buildPhases = (
 				19FDA0CE2ED66F9100F64E76 /* Sources */,
 				19FDA0CF2ED66F9100F64E76 /* Frameworks */,
@@ -154,13 +154,13 @@
 				19FDA0D42ED66F9100F64E76 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				19FDA0D52ED66F9100F64E76 /* screenUITests */,
+				19FDA0D52ED66F9100F64E76 /* MetalGooseUITests */,
 			);
-			name = screenUITests;
+			name = MetalGooseUITests;
 			packageProductDependencies = (
 			);
-			productName = screenUITests;
-			productReference = 19FDA0D22ED66F9100F64E76 /* screenUITests.xctest */;
+			productName = MetalGooseUITests;
+			productReference = 19FDA0D22ED66F9100F64E76 /* MetalGooseUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
@@ -186,7 +186,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 19FDA0B52ED66F9100F64E76 /* Build configuration list for PBXProject "screen" */;
+			buildConfigurationList = 19FDA0B52ED66F9100F64E76 /* Build configuration list for PBXProject "MetalGoose" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -200,9 +200,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				19FDA0B92ED66F9100F64E76 /* screen */,
-				19FDA0C72ED66F9100F64E76 /* screenTests */,
-				19FDA0D12ED66F9100F64E76 /* screenUITests */,
+				19FDA0B92ED66F9100F64E76 /* MetalGoose */,
+				19FDA0C72ED66F9100F64E76 /* MetalGooseTests */,
+				19FDA0D12ED66F9100F64E76 /* MetalGooseUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -258,12 +258,12 @@
 /* Begin PBXTargetDependency section */
 		19FDA0CA2ED66F9100F64E76 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 19FDA0B92ED66F9100F64E76 /* screen */;
+			target = 19FDA0B92ED66F9100F64E76 /* MetalGoose */;
 			targetProxy = 19FDA0C92ED66F9100F64E76 /* PBXContainerItemProxy */;
 		};
 		19FDA0D42ED66F9100F64E76 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 19FDA0B92ED66F9100F64E76 /* screen */;
+			target = 19FDA0B92ED66F9100F64E76 /* MetalGoose */;
 			targetProxy = 19FDA0D32ED66F9100F64E76 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -392,21 +392,21 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = screen/screen.entitlements;
+				CODE_SIGN_ENTITLEMENTS = MetalGoose/MetalGoose.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = screen/Info.plist;
+				INFOPLIST_FILE = MetalGoose/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.screen;
+				PRODUCT_BUNDLE_IDENTIFIER = com.MetalGoose;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -419,21 +419,21 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = screen/screen.entitlements;
+				CODE_SIGN_ENTITLEMENTS = MetalGoose/MetalGoose.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = screen/Info.plist;
+				INFOPLIST_FILE = MetalGoose/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.screen;
+				PRODUCT_BUNDLE_IDENTIFIER = com.MetalGoose;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -450,11 +450,11 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.screenTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.MetalGooseTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/screen.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/screen";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MetalGoose.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MetalGoose";
 			};
 			name = Debug;
 		};
@@ -467,11 +467,11 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.screenTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.MetalGooseTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/screen.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/screen";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MetalGoose.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MetalGoose";
 			};
 			name = Release;
 		};
@@ -482,11 +482,11 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.screenUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.MetalGooseUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
-				TEST_TARGET_NAME = screen;
+				TEST_TARGET_NAME = MetalGoose;
 			};
 			name = Debug;
 		};
@@ -497,18 +497,18 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.screenUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.MetalGooseUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
-				TEST_TARGET_NAME = screen;
+				TEST_TARGET_NAME = MetalGoose;
 			};
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		19FDA0B52ED66F9100F64E76 /* Build configuration list for PBXProject "screen" */ = {
+		19FDA0B52ED66F9100F64E76 /* Build configuration list for PBXProject "MetalGoose" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				19FDA0DA2ED66F9100F64E76 /* Debug */,
@@ -517,7 +517,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		19FDA0DC2ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "screen" */ = {
+		19FDA0DC2ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "MetalGoose" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				19FDA0DD2ED66F9100F64E76 /* Debug */,
@@ -526,7 +526,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		19FDA0DF2ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "screenTests" */ = {
+		19FDA0DF2ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "MetalGooseTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				19FDA0E02ED66F9100F64E76 /* Debug */,
@@ -535,7 +535,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		19FDA0E22ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "screenUITests" */ = {
+		19FDA0E22ED66F9100F64E76 /* Build configuration list for PBXNativeTarget "MetalGooseUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				19FDA0E32ED66F9100F64E76 /* Debug */,

@@ -54,13 +54,7 @@ struct PermissionsView: View {
                             isGranted: recGranted,
                             color: DRAGON_RED
                         ) {
-                            // First, try to trigger the system prompt
-                            if !CGRequestScreenCaptureAccess() {
-                                // If it fails (already denied), open Settings
-                                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                                    NSWorkspace.shared.open(url)
-                                }
-                            }
+                            _ = CGRequestScreenCaptureAccess()
                         }
                     }
                     .padding()

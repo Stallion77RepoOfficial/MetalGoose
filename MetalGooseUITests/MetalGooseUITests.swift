@@ -1,13 +1,13 @@
 //
-//  screenUITests.swift
-//  screenUITests
+//  MetalGooseUITests.swift
+//  MetalGooseUITests
 //
 //  Created by Berke on 26.11.2025.
 //
 
 import XCTest
 
-final class screenUITests: XCTestCase {
+final class MetalGooseUITests: XCTestCase {
 
     override func setUpWithError() throws {
         // Put setup code here. This method is called before the invocation of each test method in the class.

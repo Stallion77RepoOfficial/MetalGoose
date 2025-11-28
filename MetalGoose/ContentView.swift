@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import MetalKit
 
 // GHIDRA/DRAGON THEME CONSTANTS
@@ -99,7 +100,7 @@ struct ContentView: View {
                                 Text("1.0x")
                                     .font(.system(.caption, design: .monospaced))
                                     .foregroundColor(.gray)
-                                Slider(value: $settings.scaleFactor, in: 1.0...3.0, step: 0.1)
+                                Slider(value: $settings.scaleFactor, in: 1.0...40.0, step: 0.1)
                                     .accentColor(DRAGON_RED)
                                 Text(String(format: "%.1fx", settings.scaleFactor))
                                     .font(.system(.body, design: .monospaced))
@@ -110,7 +111,7 @@ struct ContentView: View {
                         .padding()
                         .border(Color.gray.opacity(0.3), width: 1)
                         
-                        // Quality & HUD Control
+                        // Quality Control
                         VStack(alignment: .leading) {
                             Text("> RENDER_CONFIG:")
                                 .font(.system(.caption, design: .monospaced))
@@ -123,14 +124,18 @@ struct ContentView: View {
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
-                            .padding(.bottom, 10)
-                            
-                            Toggle(isOn: $settings.showMetalHUD) {
-                                Text("[ ENABLE_METAL_HUD_OVERLAY ]")
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundColor(TERMINAL_TEXT)
-                            }
-                            .toggleStyle(SwitchToggleStyle(tint: DRAGON_RED))
+                        }
+                        .padding()
+                        .border(Color.gray.opacity(0.3), width: 1)
+
+                        // FPS Overlay Toggle
+                        VStack(alignment: .leading) {
+                            Text("> SHOW_FPS_OVERLAY:")
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(DRAGON_RED)
+                            Toggle("", isOn: $settings.showFPSOverlay)
+                                .toggleStyle(SwitchToggleStyle(tint: DRAGON_RED))
+                                .labelsHidden()
                         }
                         .padding()
                         .border(Color.gray.opacity(0.3), width: 1)
@@ -157,6 +162,13 @@ struct ContentView: View {
             }
         }
         .frame(width: 450, height: 480)
+        .onReceive(engine.$currentFrame.compactMap { $0 }) { buffer in
+            guard isOverlayActive else { return }
+            renderer?.enqueue(buffer: buffer)
+        }
+        .onChange(of: settings.showFPSOverlay) { newValue in
+            renderer?.setFPSOverlay(enabled: newValue)
+        }
     }
     
     func startCountdown() {
@@ -181,13 +193,6 @@ struct ContentView: View {
             return
         }
         
-        // METAL HUD TOGGLE
-        if settings.showMetalHUD {
-            setenv("MTL_HUD_ENABLED", "1", 1)
-        } else {
-            unsetenv("MTL_HUD_ENABLED")
-        }
-        
         let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return }
         
@@ -206,31 +211,19 @@ struct ContentView: View {
         
         // Setup Renderer and Overlay
         let mtkView = MTKView()
-        self.renderer = Renderer(metalKitView: mtkView, settings: settings)
-        
-        let overlay = self.renderer?.createOverlayWindow(targetFrame: nsRect)
-        overlay?.contentView = mtkView
-        overlay?.orderFront(nil)
+        guard let renderer = Renderer(metalKitView: mtkView, settings: settings) else { return }
+        self.renderer = renderer
+        let overlay = renderer.createOverlayWindow(targetFrame: nsRect)
+        overlay.orderFront(nil)
         self.overlayWindow = overlay
         
         // START TRACKING
-        self.renderer?.startTracking(windowID: wid, overlay: overlay!)
+        renderer.startTracking(windowID: wid, overlay: overlay)
+        renderer.setFPSOverlay(enabled: settings.showFPSOverlay)
         
         Task {
             try? await engine.startCapture(targetWindowID: wid, scaleFactor: settings.scaleFactor)
             isOverlayActive = true
-            startRenderLoop(mtkView: mtkView)
-        }
-    }
-    
-    func startRenderLoop(mtkView: MTKView) {
-        Task {
-            while isOverlayActive {
-                if let frame = engine.currentFrame {
-                    renderer?.processAndRender(buffer: frame, view: mtkView)
-                }
-                try? await Task.sleep(nanoseconds: 1_000_000)
-            }
         }
     }
     
