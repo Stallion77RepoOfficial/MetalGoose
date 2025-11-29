@@ -2,6 +2,12 @@ import SwiftUI
 
 @main
 struct MetalGooseApp: App {
+    init() {
+        if #available(macOS 26.0, *) {
+            MetalCPPEnsureReady()
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             if #available(macOS 26.0, *) {
