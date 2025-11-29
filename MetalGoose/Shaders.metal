@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// MARK: - Yardımcı Fonksiyonlar
+// MARK: - Helper Functions
 inline float mnWeight(float x) {
     x = fabs(x);
     const float B = 1.0f/3.0f;
@@ -11,7 +11,7 @@ inline float mnWeight(float x) {
     return 0.0f;
 }
 
-// MARK: - 1. Frame Generation (Optik Akış Warp)
+// MARK: - 1. Frame Generation (Optical Flow Warp)
 kernel void flow_warp(
     texture2d<float, access::sample> src0 [[texture(0)]],
     texture2d<float, access::sample> src1 [[texture(1)]],
@@ -29,14 +29,14 @@ kernel void flow_warp(
     float4 fVal = flow.sample(s, uv);
     float2 v = fVal.rg;
 
-    // Basit Bidirectional Warp (İki yönlü kaydırma)
+    // Simple Bidirectional Warp
     float2 uv0 = uv - (v * t) / size;
     float2 uv1 = uv + (v * (1.0 - t)) / size;
 
     float4 c0 = src0.sample(s, uv0);
     float4 c1 = src1.sample(s, uv1);
 
-    // Karıştırma
+    // Mixing
     float4 finalColor = mix(c0, c1, t);
     finalColor.a = 1.0;
 
@@ -91,7 +91,7 @@ kernel void bicubic_scale(
     for (int j = -1; j <= 2; ++j) {
         for (int i = -1; i <= 2; ++i) {
             float2 uv = (base + float2(i, j) + 0.5f) / srcSize;
-            // 4x4 ağırlık hesaplama
+            // 4x4 weight calculation
             float w = ((i==-1)?wx.x:(i==0)?wx.y:(i==1)?wx.z:wx.w) * ((j==-1)?wy.x:(j==0)?wy.y:(j==1)?wy.z:wy.w);
             sum += w * src.sample(s, uv);
             wsum += w;
@@ -100,7 +100,7 @@ kernel void bicubic_scale(
     dst.write(sum / (wsum > 0.0 ? wsum : 1.0), gid);
 }
 
-// MARK: - 4. Render Pipeline (Ekrana Basma)
+// MARK: - 4. Render Pipeline (Display)
 struct VertexOut {
     float4 position [[position]];
     float2 texCoord;

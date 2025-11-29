@@ -14,19 +14,23 @@ final class FrameProcessor {
     
     init() {
         // Create the transfer session (hardware accelerated)
-        VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault, pixelTransferSessionOut: &transferSession)
+        let status = VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault, pixelTransferSessionOut: &transferSession)
+        if status != kCVReturnSuccess || transferSession == nil {
+            fatalError("Failed to create VTPixelTransferSession. Error code: \(status)")
+        }
     }
     
     /// Prepare the buffer, optionally scaling and fixing its format.
     func prepare(buffer: CVPixelBuffer, scalingMode: CFString) -> CVPixelBuffer {
-        guard let session = transferSession else { return buffer }
+        guard let session = transferSession else {
+            fatalError("VTPixelTransferSession is invalid.")
+        }
         
         let width = CVPixelBufferGetWidth(buffer)
         let height = CVPixelBufferGetHeight(buffer)
         
-        // If the buffer is already Metal-friendly (BGRA) and the size won't change, skip extra work.
-        // Many window captures differ, so we create a safe buffer every time.
-        
+        // Explicitly create a destination buffer.
+        // We do not fallback to the original buffer to ensure the format is strictly BGRA for MetalFX.
         var dstBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
             kCFAllocatorDefault,
@@ -38,16 +42,18 @@ final class FrameProcessor {
         )
         
         guard status == kCVReturnSuccess, let destination = dstBuffer else {
-            return buffer
+            fatalError("Failed to create CVPixelBuffer for frame processing. Error code: \(status)")
         }
         
         // Configure VideoToolbox transfer and scaling settings
         VTSessionSetProperty(session, key: kVTPixelTransferPropertyKey_ScalingMode, value: scalingMode)
         
         // Execute the transfer using the GPU/Media Engine path
-        VTPixelTransferSessionTransferImage(session, from: buffer, to: destination)
+        let transferStatus = VTPixelTransferSessionTransferImage(session, from: buffer, to: destination)
+        if transferStatus != kCVReturnSuccess {
+            fatalError("VTPixelTransferSession failed to transfer image. Error code: \(transferStatus)")
+        }
         
         return destination
     }
 }
-

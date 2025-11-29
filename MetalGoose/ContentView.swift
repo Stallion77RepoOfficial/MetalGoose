@@ -1,5 +1,6 @@
 import SwiftUI
 import MetalKit
+import ApplicationServices
 
 // DARK THEME PALETTE
 let BG_COLOR = Color(red: 0.1, green: 0.1, blue: 0.12)
@@ -23,6 +24,12 @@ struct ContentView: View {
     @State private var connectedSize: CGSize = .zero
     @State private var showAlert = false
     @State private var alertMessage = ""
+    
+    // Permissions state
+    @State private var axGranted: Bool = AXIsProcessTrusted()
+    @State private var recGranted: Bool = CGPreflightScreenCaptureAccess()
+    @State private var permTimer: Timer?
+    private var permissionsGranted: Bool { axGranted && recGranted }
     
     @State private var targetDisplayID: CGDirectDisplayID?
     @State private var mtkView: MTKView = MTKView()
@@ -76,10 +83,27 @@ struct ContentView: View {
             }
             .frame(width: 200)
             .background(Color.black.opacity(0.3))
+            .disabled(!permissionsGranted)
             
             // MAIN DASHBOARD
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    
+                    // PERMISSIONS BANNER
+                    if !permissionsGranted {
+                        PermissionBanner(
+                            axGranted: axGranted,
+                            recGranted: recGranted,
+                            requestAX: {
+                                let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                                AXIsProcessTrustedWithOptions(options)
+                            },
+                            requestREC: {
+                                _ = CGRequestScreenCaptureAccess()
+                            }
+                        )
+                        .padding(.bottom, 8)
+                    }
                     
                     // HEADER
                     HStack {
@@ -98,6 +122,7 @@ struct ContentView: View {
                         }
                     }
                     .padding(.bottom)
+                    .disabled(!permissionsGranted)
                     
                     // GRID LAYOUT
                     HStack(alignment: .top, spacing: 20) {
@@ -163,6 +188,7 @@ struct ContentView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
+                    .disabled(!permissionsGranted)
                 }
                 .padding(30)
             }
@@ -174,6 +200,16 @@ struct ContentView: View {
         }
         .background(BG_COLOR)
         .preferredColorScheme(.dark)
+        .onAppear {
+            permTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+                axGranted = AXIsProcessTrusted()
+                recGranted = CGPreflightScreenCaptureAccess()
+            }
+        }
+        .onDisappear {
+            permTimer?.invalidate()
+            permTimer = nil
+        }
         .onChange(of: settings.vsync, initial: false) { _, newValue in
             mtkView.preferredFramesPerSecond = newValue ? 60 : 0
         }
@@ -242,6 +278,12 @@ struct ContentView: View {
         mtkView.isPaused = false
         mtkView.enableSetNeedsDisplay = true
         mtkView.preferredFramesPerSecond = settings.vsync ? 60 : 0
+        mtkView.autoResizeDrawable = false
+        
+        if let win = overlayWindow {
+            mtkView.frame = CGRect(origin: .zero, size: nsRect.size)
+            mtkView.autoresizingMask = [.width, .height]
+        }
         
         let safeScale: CGFloat = (scale.isFinite && scale > 0) ? scale : 1.0
         mtkView.layer?.contentsScale = safeScale
@@ -258,13 +300,20 @@ struct ContentView: View {
             return
         }
         overlayWindow = renderer?.createOverlayWindow(targetFrame: nsRect)
+        if let win = overlayWindow {
+            mtkView.frame = CGRect(origin: .zero, size: nsRect.size)
+            mtkView.autoresizingMask = [.width, .height]
+        }
         overlayWindow?.contentView = mtkView
+        if let contentBounds = overlayWindow?.contentView?.bounds {
+            mtkView.frame = contentBounds
+        }
         overlayWindow?.orderFrontRegardless()
         NSApp.setActivationPolicy(.accessory); NSApp.deactivate()
         renderer?.startTracking(windowID: wid, pid: app.processIdentifier, overlay: overlayWindow!)
         
         Task { @MainActor in
-            // Determine target display for fallback (if available)
+            // Determine target display for overlay
             if let screen = NSScreen.screens.first(where: { $0.frame.contains(nsRect.origin) }) {
                 targetDisplayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
             }
@@ -373,6 +422,55 @@ struct ActionButtonStyle: ButtonStyle {
             .background(color.opacity(configuration.isPressed ? 0.7 : 1.0))
             .foregroundColor(.white).cornerRadius(8)
             .fontWeight(.bold)
+    }
+}
+
+struct PermissionBanner: View {
+    let axGranted: Bool
+    let recGranted: Bool
+    let requestAX: () -> Void
+    let requestREC: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                StatusPill(label: "Accessibility", ok: axGranted, action: requestAX)
+                StatusPill(label: "Screen Recording", ok: recGranted, action: requestREC)
+                Spacer()
+            }
+        }
+        .padding(12)
+        .background(Color.yellow.opacity(0.15))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8).stroke(Color.yellow.opacity(0.4), lineWidth: 1)
+        )
+        .cornerRadius(8)
+    }
+}
+
+struct StatusPill: View {
+    let label: String
+    let ok: Bool
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(ok ? "[ PASS ]" : "[ REQUIRED ]")
+                .foregroundColor(ok ? .green : .orange)
+                .font(.system(.caption, design: .monospaced))
+            Text(label)
+                .foregroundColor(.white)
+                .font(.caption)
+            if !ok {
+                Button("GRANT") { action() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.black.opacity(0.4))
+        .cornerRadius(6)
     }
 }
 

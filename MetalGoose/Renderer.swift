@@ -28,8 +28,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     var temporalDenoisedScalerDesc: MTLFXTemporalDenoisedScalerDescriptor?
     var frameInterpolator: MTLFXFrameInterpolator?
     var frameInterpolatorDesc: MTLFXFrameInterpolatorDescriptor?
+    
+    // Helper Textures
     var zeroMotionTexture: MTLTexture?
     var flatDepthTexture: MTLTexture?
+    
     var scalerHistoryNeedsReset: Bool = true
     var interpolatorHistoryNeedsReset: Bool = true
     var lastMetalFXMode: CaptureSettings.MetalFXMode
@@ -76,6 +79,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         metalKitView.device = dev
         metalKitView.isPaused = false
         metalKitView.enableSetNeedsDisplay = true
+        metalKitView.autoResizeDrawable = false
         metalKitView.preferredFramesPerSecond = settings.vsync ? 60 : 0
         metalKitView.framebufferOnly = false
         metalKitView.colorPixelFormat = .bgra8Unorm
@@ -84,39 +88,58 @@ final class Renderer: NSObject, MTKViewDelegate {
         metalKitView.layer?.isOpaque = false
         setupHUDLayerIfNeeded(on: metalKitView)
         
-        CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
+        if CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache) != kCVReturnSuccess {
+            fatalError("Failed to create CVMetalTextureCache")
+        }
+        
         setupPipelines()
     }
     
     func setupPipelines() {
-        guard let lib = try? device.makeDefaultLibrary(bundle: .main) else { return }
+        guard let lib = try? device.makeDefaultLibrary(bundle: .main) else {
+            fatalError("Failed to load default Metal library")
+        }
         
-        if let fn = lib.makeFunction(name: "flow_warp") { flowPipeline = try? device.makeComputePipelineState(function: fn) }
-        if let fn = lib.makeFunction(name: "integer_scale") { integerPipeline = try? device.makeComputePipelineState(function: fn) }
-        if let fn = lib.makeFunction(name: "bicubic_scale") { bicubicPipeline = try? device.makeComputePipelineState(function: fn) }
+        // Strict enforcement: Shader functions must exist.
+        guard let flowFn = lib.makeFunction(name: "flow_warp"),
+              let integerFn = lib.makeFunction(name: "integer_scale"),
+              let bicubicFn = lib.makeFunction(name: "bicubic_scale"),
+              let vertexFn = lib.makeFunction(name: "texture_vertex"),
+              let fragmentFn = lib.makeFunction(name: "texture_fragment") else {
+            fatalError("Required shader functions not found in library.")
+        }
         
-        let pipeDesc = MTLRenderPipelineDescriptor()
-        pipeDesc.vertexFunction = lib.makeFunction(name: "texture_vertex")
-        pipeDesc.fragmentFunction = lib.makeFunction(name: "texture_fragment")
-        pipeDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
-        pipeDesc.colorAttachments[0].isBlendingEnabled = true
-        pipeDesc.colorAttachments[0].rgbBlendOperation = .add
-        pipeDesc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
-        pipeDesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-        renderPipeline = try? device.makeRenderPipelineState(descriptor: pipeDesc)
+        do {
+            flowPipeline = try device.makeComputePipelineState(function: flowFn)
+            integerPipeline = try device.makeComputePipelineState(function: integerFn)
+            bicubicPipeline = try device.makeComputePipelineState(function: bicubicFn)
+            
+            let pipeDesc = MTLRenderPipelineDescriptor()
+            pipeDesc.vertexFunction = vertexFn
+            pipeDesc.fragmentFunction = fragmentFn
+            pipeDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            pipeDesc.colorAttachments[0].isBlendingEnabled = true
+            pipeDesc.colorAttachments[0].rgbBlendOperation = .add
+            pipeDesc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            pipeDesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            
+            renderPipeline = try device.makeRenderPipelineState(descriptor: pipeDesc)
+        } catch {
+            fatalError("Failed to create pipelines: \(error)")
+        }
     }
     
     func processAndRender(buffer: CVPixelBuffer, view: MTKView) {
         setupHUDLayerIfNeeded(on: view)
-        // 1. FRAME PROCESSOR STEP (VideoToolbox Scaling/Converting)
         let profile = settings.qualityMode.profile
         let processedBuffer = buffer
         
-          guard let drawable = view.currentDrawable,
-              let cmdBuffer = commandQueue.makeCommandBuffer(),
-              let srcTex = createTexture(from: processedBuffer) else { return }
-          let previousTexture = prevTexture
-          let previousBuffer = prevBuffer
+        guard let drawable = view.currentDrawable else { fatalError("Failed to acquire current drawable.") }
+        guard let cmdBuffer = commandQueue.makeCommandBuffer() else { fatalError("Failed to create command buffer.") }
+        guard let srcTex = createTexture(from: processedBuffer) else { fatalError("Failed to create source texture from pixel buffer.") }
+        
+        let previousTexture = prevTexture
+        let previousBuffer = prevBuffer
         
         if settings.metalFXMode != lastMetalFXMode {
             markAllTemporalHistoriesDirty()
@@ -131,33 +154,33 @@ final class Renderer: NSObject, MTKViewDelegate {
             markAllTemporalHistoriesDirty()
         }
         
-        let needsMotionVectors = (settings.frameGenMode != .off && settings.frameGenBackend == .vision) ||
-        (settings.scalingType == .metalFX && settings.metalFXMode.requiresMotionVectors)
+        let needsMotionVectors = (settings.frameGenMode != .off) ||
+                                 (settings.scalingType == .metalFX && settings.metalFXMode.requiresMotionVectors)
+        
         var texToScale = srcTex
         var motionTexture: MTLTexture?
         
-        if settings.frameGenMode != .off && settings.frameGenBackend == .metalFX {
-            motionTexture = ensureZeroMotionTexture(width: srcTex.width, height: srcTex.height)
-        } else if needsMotionVectors, let pTex = previousTexture, let pBuf = previousBuffer {
+        if needsMotionVectors, let pTex = previousTexture, let pBuf = previousBuffer {
             let w0 = CVPixelBufferGetWidth(processedBuffer)
             let h0 = CVPixelBufferGetHeight(processedBuffer)
             let w1 = CVPixelBufferGetWidth(pBuf)
             let h1 = CVPixelBufferGetHeight(pBuf)
-            let f0 = CVPixelBufferGetPixelFormatType(processedBuffer)
-            let f1 = CVPixelBufferGetPixelFormatType(pBuf)
-            if w0 == w1, h0 == h1, f0 == f1 {
+            
+            if w0 == w1, h0 == h1 {
                 let request = VNGenerateOpticalFlowRequest(targetedCVPixelBuffer: processedBuffer, options: [:])
                 request.computationAccuracy = profile.flowAccuracy
                 request.outputPixelFormat = kCVPixelFormatType_TwoComponent32Float
                 do {
                     try sequenceHandler.perform([request], on: pBuf, orientation: .up)
-                          if let res = request.results?.first,
-                              let flowTex = createTexture(from: res.pixelBuffer) {
-                                motionTexture = flowTex
-                                if settings.frameGenMode != .off && settings.frameGenBackend == .vision,
+                    if let res = request.results?.first,
+                       let flowTex = createTexture(from: res.pixelBuffer) {
+                        motionTexture = flowTex
+                        
+                        if settings.frameGenMode != .off && settings.frameGenBackend == .vision,
                            let midTex = makeIntermediateTextureLike(srcTex),
                            let enc = cmdBuffer.makeComputeCommandEncoder(),
                            let pipe = flowPipeline {
+                            
                             enc.setComputePipelineState(pipe)
                             enc.setTexture(pTex, index: 0)
                             enc.setTexture(srcTex, index: 1)
@@ -165,6 +188,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                             enc.setTexture(midTex, index: 3)
                             var t: Float = 0.5
                             enc.setBytes(&t, length: 4, index: 0)
+                            
                             let w = pipe.threadExecutionWidth
                             let h = pipe.maxTotalThreadsPerThreadgroup / w
                             let grids = MTLSize(width: (srcTex.width + w - 1)/w, height: (srcTex.height + h - 1)/h, depth: 1)
@@ -174,29 +198,42 @@ final class Renderer: NSObject, MTKViewDelegate {
                         }
                     }
                 } catch {
-                    markAllTemporalHistoriesDirty()
+                    fatalError("Optical flow generation failed: \(error)")
                 }
             } else {
+                // Resolution changed between frames: reset temporal history and previous references
                 markAllTemporalHistoriesDirty()
+                prevBuffer = nil
+                prevTexture = nil
             }
         }
         
-        if motionTexture == nil, settings.scalingType == .metalFX, settings.metalFXMode.requiresMotionVectors {
-            motionTexture = ensureZeroMotionTexture(width: srcTex.width, height: srcTex.height)
-            markAllTemporalHistoriesDirty()
+        // Fail-fast for strict compliance if motion is missing but required
+        if needsMotionVectors && motionTexture == nil {
+             if prevBuffer != nil {
+                 fatalError("Motion vectors required but failed to generate. Fallback is disabled.")
+             } else {
+                 // First frame initialization only
+                 motionTexture = ensureZeroMotionTexture(width: srcTex.width, height: srcTex.height)
+             }
         }
         
-        // 3. Frame Interpolation (optional)
-        if settings.frameGenMode != .off && settings.frameGenBackend == .metalFX,
-              let prevColor = previousTexture,
-           let motionTex = motionTexture {
-            texToScale = encodeFrameInterpolation(current: texToScale,
-                              previous: prevColor,
-                              motion: motionTex,
-                              commandBuffer: cmdBuffer)
+        // 3. Frame Interpolation (MetalFX Backend)
+        // STRICT: We must only run this if we have a Previous Texture.
+        // If it's the first frame (previousTexture == nil), we skip interpolation to avoid crashing.
+        if settings.frameGenMode != .off && settings.frameGenBackend == .metalFX {
+            if let prev = previousTexture, let motion = motionTexture {
+                texToScale = encodeFrameInterpolation(current: texToScale,
+                                                      previous: prev,
+                                                      motion: motion,
+                                                      commandBuffer: cmdBuffer)
+            } else {
+                // First frame or missing dependencies: Pass-through implies no interpolation this cycle.
+                // We do NOT fail here because it's a temporal dependency state, not a capability issue.
+            }
         }
         
-        // 4. UPSCALING (MetalFX or Shader)
+        // 4. UPSCALING
         let dstTex = drawable.texture
         
         if settings.scalingType == .metalFX {
@@ -208,11 +245,13 @@ final class Renderer: NSObject, MTKViewDelegate {
                 scaler.outputTexture = outTex
                 scaler.encode(commandBuffer: cmdBuffer)
                 copy(texture: outTex, to: dstTex, using: cmdBuffer)
+                
             case .temporal:
                 guard let motion = motionTexture else {
                     fatalError("Temporal MetalFX mode requires motion data.")
                 }
                 encodeTemporalScaler(src: texToScale, dst: dstTex, motion: motion, commandBuffer: cmdBuffer)
+                
             case .temporalDenoised:
                 guard let motion = motionTexture else {
                     fatalError("Temporal Denoised MetalFX mode requires motion data.")
@@ -220,33 +259,30 @@ final class Renderer: NSObject, MTKViewDelegate {
                 encodeTemporalDenoisedScaler(src: texToScale, dst: dstTex, motion: motion, commandBuffer: cmdBuffer)
             }
         } else {
-            // Integer / Bicubic via compute into intermediate texture, then blit to drawable
+            // Compute shader scaling
             let outTex = ensurePrivateOutputTexture(matching: dstTex)
-
-            guard let enc = cmdBuffer.makeComputeCommandEncoder() else { return }
-            let pipe = (settings.scalingType == .integer) ? integerPipeline : bicubicPipeline
-
-            if let p = pipe {
-                enc.setComputePipelineState(p)
-                enc.setTexture(texToScale, index: 0)
-                enc.setTexture(outTex, index: 1)
-
-                if settings.scalingType == .integer {
-                    var factor = settings.scaleFactor
-                    enc.setBytes(&factor, length: 4, index: 0)
-                }
-
-                let w = p.threadExecutionWidth
-                let h = p.maxTotalThreadsPerThreadgroup / w
-                let grids = MTLSize(width: (outTex.width + w - 1)/w, height: (outTex.height + h - 1)/h, depth: 1)
-                enc.dispatchThreadgroups(grids, threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+            
+            guard let enc = cmdBuffer.makeComputeCommandEncoder(),
+                  let pipe = (settings.scalingType == .integer) ? integerPipeline : bicubicPipeline else {
+                return
             }
+            
+            enc.setComputePipelineState(pipe)
+            enc.setTexture(texToScale, index: 0)
+            enc.setTexture(outTex, index: 1)
+            
+            if settings.scalingType == .integer {
+                var factor = settings.scaleFactor
+                enc.setBytes(&factor, length: 4, index: 0)
+            }
+            
+            let w = pipe.threadExecutionWidth
+            let h = pipe.maxTotalThreadsPerThreadgroup / w
+            let grids = MTLSize(width: (outTex.width + w - 1)/w, height: (outTex.height + h - 1)/h, depth: 1)
+            enc.dispatchThreadgroups(grids, threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
             enc.endEncoding()
-
-            if let blit = cmdBuffer.makeBlitCommandEncoder() {
-                blit.copy(from: outTex, to: dstTex)
-                blit.endEncoding()
-            }
+            
+            copy(texture: outTex, to: dstTex, using: cmdBuffer)
         }
         
         cmdBuffer.present(drawable)
@@ -267,6 +303,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         prevTexture = srcTex
         prevBuffer = buffer
     }
+    
+    // MARK: - MetalFX Setup & Encode
     
     func setupSpatialMetalFX(src: MTLTexture, dst: MTLTexture, profile: QualityProfile) -> MTLFXSpatialScaler {
         guard MTLFXSpatialScalerDescriptor.supportsDevice(device) else {
@@ -296,16 +334,14 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             spatialScaler = created
         }
-        guard let scaler = spatialScaler else {
-            fatalError("MetalFX Spatial Scaler is not available.")
-        }
-        return scaler
+        return spatialScaler!
     }
     
     func encodeTemporalScaler(src: MTLTexture, dst: MTLTexture, motion: MTLTexture, commandBuffer: MTLCommandBuffer) {
         let scaler = setupTemporalScaler(src: src, dst: dst, motion: motion)
         let depth = ensureFlatDepthTexture(width: src.width, height: src.height)
         let outTex = ensurePrivateOutputTexture(matching: dst)
+        
         scaler.colorTexture = src
         scaler.outputTexture = outTex
         scaler.motionTexture = motion
@@ -316,7 +352,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         scaler.inputContentWidth = src.width
         scaler.inputContentHeight = src.height
         scaler.reset = scalerHistoryNeedsReset
+        
         scaler.encode(commandBuffer: commandBuffer)
+        
         scalerHistoryNeedsReset = false
         copy(texture: outTex, to: dst, using: commandBuffer)
     }
@@ -325,6 +363,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let scaler = setupTemporalDenoisedScaler(src: src, dst: dst, motion: motion)
         let depth = ensureFlatDepthTexture(width: src.width, height: src.height)
         let outTex = ensurePrivateOutputTexture(matching: dst)
+        
         scaler.colorTexture = src
         scaler.outputTexture = outTex
         scaler.motionTexture = motion
@@ -336,7 +375,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         scaler.worldToViewMatrix = matrix_identity_float4x4
         scaler.viewToClipMatrix = matrix_identity_float4x4
         scaler.isDepthReversed = false
+        
         scaler.encode(commandBuffer: commandBuffer)
+        
         scalerHistoryNeedsReset = false
         copy(texture: outTex, to: dst, using: commandBuffer)
     }
@@ -345,18 +386,21 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard MTLFXTemporalScalerDescriptor.supportsDevice(device) else {
             fatalError("MetalFX Temporal Scaler is not supported on this device.")
         }
+        
         let scaleX = Float(dst.width) / Float(src.width)
         let scaleY = Float(dst.height) / Float(src.height)
         let minScale = min(scaleX, scaleY)
         let maxScale = max(scaleX, scaleY)
+        
         let needsNew = temporalScaler == nil ||
-        temporalScalerDesc?.inputWidth != src.width ||
-        temporalScalerDesc?.inputHeight != src.height ||
-        temporalScalerDesc?.outputWidth != dst.width ||
-        temporalScalerDesc?.outputHeight != dst.height ||
-        temporalScalerDesc?.colorTextureFormat != src.pixelFormat ||
-        temporalScalerDesc?.outputTextureFormat != dst.pixelFormat ||
-        temporalScalerDesc?.motionTextureFormat != motion.pixelFormat
+            temporalScalerDesc?.inputWidth != src.width ||
+            temporalScalerDesc?.inputHeight != src.height ||
+            temporalScalerDesc?.outputWidth != dst.width ||
+            temporalScalerDesc?.outputHeight != dst.height ||
+            temporalScalerDesc?.colorTextureFormat != src.pixelFormat ||
+            temporalScalerDesc?.outputTextureFormat != dst.pixelFormat ||
+            temporalScalerDesc?.motionTextureFormat != motion.pixelFormat
+        
         if needsNew {
             let desc = MTLFXTemporalScalerDescriptor()
             desc.inputWidth = src.width
@@ -367,6 +411,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             desc.outputTextureFormat = dst.pixelFormat
             desc.motionTextureFormat = motion.pixelFormat
             desc.depthTextureFormat = .r32Float
+            
             desc.isAutoExposureEnabled = false
             desc.isInputContentPropertiesEnabled = false
             desc.isReactiveMaskTextureEnabled = false
@@ -374,6 +419,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             desc.requiresSynchronousInitialization = false
             desc.inputContentMinScale = minScale
             desc.inputContentMaxScale = maxScale
+            
             temporalScalerDesc = desc
             guard let created = desc.makeTemporalScaler(device: device) else {
                 fatalError("Failed to create MetalFX Temporal Scaler.")
@@ -381,24 +427,23 @@ final class Renderer: NSObject, MTKViewDelegate {
             temporalScaler = created
             scalerHistoryNeedsReset = true
         }
-        guard let scaler = temporalScaler else {
-            fatalError("MetalFX Temporal Scaler is not available.")
-        }
-        return scaler
+        return temporalScaler!
     }
     
     func setupTemporalDenoisedScaler(src: MTLTexture, dst: MTLTexture, motion: MTLTexture) -> MTLFXTemporalDenoisedScaler {
         guard MTLFXTemporalDenoisedScalerDescriptor.supportsDevice(device) else {
             fatalError("MetalFX Temporal Denoised Scaler is not supported on this device.")
         }
+        
         let needsNew = temporalDenoisedScaler == nil ||
-        temporalDenoisedScalerDesc?.inputWidth != src.width ||
-        temporalDenoisedScalerDesc?.inputHeight != src.height ||
-        temporalDenoisedScalerDesc?.outputWidth != dst.width ||
-        temporalDenoisedScalerDesc?.outputHeight != dst.height ||
-        temporalDenoisedScalerDesc?.colorTextureFormat != src.pixelFormat ||
-        temporalDenoisedScalerDesc?.outputTextureFormat != dst.pixelFormat ||
-        temporalDenoisedScalerDesc?.motionTextureFormat != motion.pixelFormat
+            temporalDenoisedScalerDesc?.inputWidth != src.width ||
+            temporalDenoisedScalerDesc?.inputHeight != src.height ||
+            temporalDenoisedScalerDesc?.outputWidth != dst.width ||
+            temporalDenoisedScalerDesc?.outputHeight != dst.height ||
+            temporalDenoisedScalerDesc?.colorTextureFormat != src.pixelFormat ||
+            temporalDenoisedScalerDesc?.outputTextureFormat != dst.pixelFormat ||
+            temporalDenoisedScalerDesc?.motionTextureFormat != motion.pixelFormat
+        
         if needsNew {
             let desc = MTLFXTemporalDenoisedScalerDescriptor()
             desc.inputWidth = src.width
@@ -409,6 +454,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             desc.depthTextureFormat = .r32Float
             desc.motionTextureFormat = motion.pixelFormat
             desc.outputTextureFormat = dst.pixelFormat
+            
             desc.diffuseAlbedoTextureFormat = .invalid
             desc.specularAlbedoTextureFormat = .invalid
             desc.normalTextureFormat = .invalid
@@ -422,6 +468,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             desc.isReactiveMaskTextureEnabled = false
             desc.reactiveMaskTextureFormat = .invalid
             desc.isAutoExposureEnabled = false
+            
             temporalDenoisedScalerDesc = desc
             guard let created = desc.makeTemporalDenoisedScaler(device: device) else {
                 fatalError("Failed to create MetalFX Temporal Denoised Scaler.")
@@ -429,30 +476,45 @@ final class Renderer: NSObject, MTKViewDelegate {
             temporalDenoisedScaler = created
             scalerHistoryNeedsReset = true
         }
-        guard let scaler = temporalDenoisedScaler else {
-            fatalError("MetalFX Temporal Denoised Scaler is not available.")
-        }
-        return scaler
+        return temporalDenoisedScaler!
     }
     
     func encodeFrameInterpolation(current: MTLTexture, previous: MTLTexture, motion: MTLTexture, commandBuffer: MTLCommandBuffer) -> MTLTexture {
         let interpolator = setupFrameInterpolator(src: current, dstWidth: current.width, dstHeight: current.height, motion: motion)
         let outTex = ensureIntermediateTexture(width: current.width, height: current.height, pixelFormat: current.pixelFormat)
+        
+        // Complete Implementation according to MTLFXFrameInterpolatorBase:
+        // Explicitly set ALL available properties as per the C++ header definition.
+        
         interpolator.colorTexture = current
-        interpolator.prevColorTexture = previous
+        interpolator.prevColorTexture = previous // RESTORED: Critical per header definition.
         interpolator.motionTexture = motion
         interpolator.depthTexture = ensureFlatDepthTexture(width: current.width, height: current.height)
         interpolator.outputTexture = outTex
+        
+        // Motion & Timing
         interpolator.motionVectorScaleX = 1.0
         interpolator.motionVectorScaleY = 1.0
         interpolator.deltaTime = 1.0 / Float(settings.frameGenMode == .x2 ? 2 : 3)
-        interpolator.shouldResetHistory = interpolatorHistoryNeedsReset
+        
+        // Projection & Geometry
         interpolator.fieldOfView = 60.0
         interpolator.aspectRatio = Float(current.width) / Float(current.height)
         interpolator.nearPlane = 0.1
         interpolator.farPlane = 1000
+        
+        // Completeness: Set default values for properties found in the header but not previously set.
+        interpolator.jitterOffsetX = 0.0
+        interpolator.jitterOffsetY = 0.0
+        interpolator.isDepthReversed = false
+        interpolator.isUITextureComposited = false
+        
+        // State Management
+        interpolator.shouldResetHistory = interpolatorHistoryNeedsReset
+        
         interpolator.encode(commandBuffer: commandBuffer)
         interpolatorHistoryNeedsReset = false
+        
         return outTex
     }
     
@@ -460,13 +522,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard MTLFXFrameInterpolatorDescriptor.supportsDevice(device) else {
             fatalError("MetalFX Frame Interpolator is not supported on this device.")
         }
+        
         let needsNew = frameInterpolator == nil ||
-        frameInterpolatorDesc?.inputWidth != src.width ||
-        frameInterpolatorDesc?.inputHeight != src.height ||
-        frameInterpolatorDesc?.outputWidth != dstWidth ||
-        frameInterpolatorDesc?.outputHeight != dstHeight ||
-        frameInterpolatorDesc?.colorTextureFormat != src.pixelFormat ||
-        frameInterpolatorDesc?.motionTextureFormat != motion.pixelFormat
+            frameInterpolatorDesc?.inputWidth != src.width ||
+            frameInterpolatorDesc?.inputHeight != src.height ||
+            frameInterpolatorDesc?.outputWidth != dstWidth ||
+            frameInterpolatorDesc?.outputHeight != dstHeight ||
+            frameInterpolatorDesc?.colorTextureFormat != src.pixelFormat ||
+            frameInterpolatorDesc?.motionTextureFormat != motion.pixelFormat
+        
         if needsNew {
             let desc = MTLFXFrameInterpolatorDescriptor()
             desc.inputWidth = src.width
@@ -477,8 +541,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             desc.outputTextureFormat = src.pixelFormat
             desc.motionTextureFormat = motion.pixelFormat
             desc.depthTextureFormat = .r32Float
-            desc.uiTextureFormat = .invalid
+            desc.uiTextureFormat = .invalid // Explicitly invalid as we don't composite UI
             desc.scaler = nil
+            
             frameInterpolatorDesc = desc
             guard let created = desc.makeFrameInterpolator(device: device) else {
                 fatalError("Failed to create MetalFX Frame Interpolator.")
@@ -486,10 +551,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             frameInterpolator = created
             interpolatorHistoryNeedsReset = true
         }
-        guard let interpolator = frameInterpolator else {
-            fatalError("MetalFX Frame Interpolator is not available.")
-        }
-        return interpolator
+        return frameInterpolator!
     }
     
     func ensureZeroMotionTexture(width: Int, height: Int) -> MTLTexture {
@@ -513,11 +575,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     
     private func makeConstantTexture(width: Int, height: Int, pixelFormat: MTLPixelFormat, components: Int, values: [Float]) -> MTLTexture? {
-        precondition(values.count == components, "Values count komponent sayisiyla eslesmeli")
+        precondition(values.count == components, "Values count must match component count")
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: pixelFormat, width: width, height: height, mipmapped: false)
         desc.usage = [.shaderRead]
         desc.storageMode = .shared
         guard let texture = device.makeTexture(descriptor: desc) else { return nil }
+        
         let total = width * height * components
         var data = [Float](repeating: 0, count: total)
         for c in 0..<components {
@@ -565,6 +628,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let w = CVPixelBufferGetWidth(buffer)
         let h = CVPixelBufferGetHeight(buffer)
         guard let cache = textureCache else { return nil }
+        
         let cvFormat = CVPixelBufferGetPixelFormatType(buffer)
         let metalFormat: MTLPixelFormat
         switch cvFormat {
@@ -573,8 +637,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         case kCVPixelFormatType_TwoComponent32Float:
             metalFormat = .rg32Float
         default:
-            metalFormat = .bgra8Unorm
+            fatalError("Unsupported CVPixelBuffer pixel format: \(cvFormat)")
         }
+        
         CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, buffer, nil, metalFormat, w, h, 0, &cvTex)
         return cvTex.flatMap { CVMetalTextureGetTexture($0) }
     }
@@ -646,7 +711,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.trackedPID = pid
         self.overlayWindow = overlay
 
-        // Build AX window reference for faster tracking
         let appElement = AXUIElementCreateApplication(pid)
         var windowsRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
@@ -695,7 +759,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         guard size.width > 0, size.height > 0 else { return }
 
-        // Convert to Cocoa coordinates using union of screens
         let union = NSScreen.screens.reduce(NSRect.null) { $0.union($1.frame) }
         let cocoaX = union.minX + pos.x
         let cocoaY = union.maxY - (pos.y + size.height)
@@ -703,6 +766,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         if overlay.frame != newFrame {
             overlay.setFrame(newFrame, display: true, animate: false)
         }
+        updateDrawableSize(for: overlay, targetFrame: newFrame)
     }
     
     private func updateOverlayPosition() {
@@ -720,7 +784,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         let w = bounds["Width"] ?? 100
         let h = bounds["Height"] ?? 100
 
-        // Compute union rect of all screens in Cocoa coordinates
         let union = NSScreen.screens.reduce(NSRect.null) { $0.union($1.frame) }
         let cocoaX = union.minX + x
         let cocoaY = union.maxY - (y + h)
@@ -728,6 +791,23 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         if overlay.frame != newFrame {
             overlay.setFrame(newFrame, display: true, animate: false)
+        }
+        updateDrawableSize(for: overlay, targetFrame: newFrame)
+    }
+    
+    // Ensure MTKView's drawable size and contentsScale match the overlay window frame
+    private func updateDrawableSize(for overlay: NSWindow, targetFrame: CGRect) {
+        guard let view = hostView else { return }
+        // Ensure the content view fills the window
+        view.autoresizingMask = [.width, .height]
+        view.frame = CGRect(origin: .zero, size: targetFrame.size)
+        // Match drawable to backing scale and size
+        let scale = overlay.screen?.backingScaleFactor ?? view.window?.backingScaleFactor ?? view.layer?.contentsScale ?? 1.0
+        view.layer?.contentsScale = scale
+        let dw = targetFrame.width * scale
+        let dh = targetFrame.height * scale
+        if dw.isFinite && dh.isFinite && dw > 0 && dh > 0 {
+            view.drawableSize = CGSize(width: dw, height: dh)
         }
     }
     
@@ -768,4 +848,3 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     func draw(in view: MTKView) {}
 }
-

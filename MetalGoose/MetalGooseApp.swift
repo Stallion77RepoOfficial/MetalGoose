@@ -4,15 +4,11 @@ import SwiftUI
 struct MetalGooseApp: App {
     var body: some Scene {
         WindowGroup {
-            if AXIsProcessTrusted() && CGPreflightScreenCaptureAccess() {
-                if #available(macOS 26.0, *) {
-                    ContentView()
-                } else {
-                    Text("MetalGoose requires macOS 26.0 or newer")
-                        .padding()
-                }
+            if #available(macOS 26.0, *) {
+                ContentView()
             } else {
-                PermissionsView()
+                Text("MetalGoose requires macOS 26.0 or newer")
+                    .padding()
             }
         }
         .windowStyle(.hiddenTitleBar)
