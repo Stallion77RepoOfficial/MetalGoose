@@ -7,6 +7,7 @@ let PANEL_COLOR = Color(red: 0.15, green: 0.15, blue: 0.18)
 let ACCENT_RED = Color(red: 0.8, green: 0.2, blue: 0.2)
 let TEXT_COLOR = Color.white.opacity(0.9)
 
+@available(macOS 26.0, *)
 struct ContentView: View {
     @StateObject var settings = CaptureSettings.shared
     @StateObject var engine = CaptureEngine()
@@ -25,9 +26,14 @@ struct ContentView: View {
     
     @State private var targetDisplayID: CGDirectDisplayID?
     @State private var mtkView: MTKView = MTKView()
+    private var macOSVersionString: String {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return "macOS \(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+    }
     
     var body: some View {
-        HStack(spacing: 0) {
+        ZStack(alignment: .bottomLeading) {
+            HStack(spacing: 0) {
             // SIDEBAR
             VStack(alignment: .leading) {
                 VStack(alignment: .leading, spacing: 12) {
@@ -85,7 +91,7 @@ struct ContentView: View {
                             Button("STOP SCALING") { stop() }
                                 .buttonStyle(ActionButtonStyle(color: .red))
                         } else if isCountingDown {
-                            Text("STARTING IN \(countdown)...").font(.title2).foregroundColor(ACCENT_RED)
+                            Text("\(countdown)").font(.title2).foregroundColor(ACCENT_RED)
                         } else {
                             Button("SCALE") { startCountdown() }
                                 .buttonStyle(ActionButtonStyle(color: .blue))
@@ -101,8 +107,12 @@ struct ContentView: View {
                             // FRAME GEN PANEL
                             ConfigPanel(title: "Frame Generation") {
                                 PickerRow(label: "Type", selection: $settings.frameGenMode)
-                                Text("Uses Vision Optical Flow + Metal Compute")
-                                    .font(.caption).foregroundColor(.gray)
+                                if settings.frameGenMode != .off {
+                                    PickerRow(label: "Backend", selection: $settings.frameGenBackend)
+                                }
+                                Text(settings.frameGenBackend == .vision ? "Vision Optical Flow" : "MetalFX Frame Interpolator")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
                             }
                             
                             // CAPTURE PANEL
@@ -120,6 +130,7 @@ struct ContentView: View {
                                 PickerRow(label: "Type", selection: $settings.scalingType)
                                 
                                 if settings.scalingType == .metalFX {
+                                    PickerRow(label: "MetalFX Mode", selection: $settings.metalFXMode)
                                     PickerRow(label: "Quality", selection: $settings.qualityMode)
                                 } else if settings.scalingType == .integer {
                                     HStack {
@@ -155,14 +166,19 @@ struct ContentView: View {
                 }
                 .padding(30)
             }
+            }
+            Text(macOSVersionString)
+                .font(.caption)
+                .foregroundColor(.gray)
+                .padding(16)
         }
         .background(BG_COLOR)
         .preferredColorScheme(.dark)
-        .onChange(of: settings.vsync) { newValue in
+        .onChange(of: settings.vsync, initial: false) { _, newValue in
             mtkView.preferredFramesPerSecond = newValue ? 60 : 0
         }
         .frame(width: 900, height: 600)
-        .onChange(of: engine.currentFrame) { newFrame in
+        .onChange(of: engine.currentFrame, initial: false) { _, newFrame in
             if let frame = newFrame {
                 renderer?.processAndRender(buffer: frame, view: mtkView)
             }
@@ -170,8 +186,8 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             stop()
         }
-        .alert("Uyarı", isPresented: $showAlert) {
-            Button("Tamam", role: .cancel) { }
+        .alert("Warning", isPresented: $showAlert) {
+            Button("OK", role: .cancel) { }
         } message: {
             Text(alertMessage)
         }
@@ -193,7 +209,7 @@ struct ContentView: View {
     func activateOverlay() {
         guard let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != NSRunningApplication.current.processIdentifier else {
-            alertMessage = "Ön plandaki uygulama bulunamadı. Lütfen bir oyun veya pencere seçin."
+            alertMessage = "Unable to locate the foreground application. Please select a game or window."
             showAlert = true
             return
         }
@@ -205,7 +221,7 @@ struct ContentView: View {
               let targetInfo = list.first(where: { ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier }),
               let wid = targetInfo[kCGWindowNumber as String] as? CGWindowID,
               let bounds = targetInfo[kCGWindowBounds as String] as? [String: CGFloat] else {
-            alertMessage = "Hedef pencere bulunamadı. Pencerenin görünür olduğundan emin olun."
+            alertMessage = "Target window not found. Ensure the window is visible."
             showAlert = true
             return
         }
@@ -237,7 +253,7 @@ struct ContentView: View {
         
         renderer = Renderer(metalKitView: mtkView, settings: settings)
         guard renderer != nil else {
-            alertMessage = "Renderer başlatılamadı. Metal cihazı desteklenmiyor olabilir."
+            alertMessage = "Renderer failed to initialize. Your Metal device may be unsupported."
             showAlert = true
             return
         }
@@ -256,7 +272,7 @@ struct ContentView: View {
                 try await engine.startCapture(targetWindowID: wid, displayID: targetDisplayID, captureCursor: settings.captureCursor, queueDepth: settings.maxLatency * 2)
                 isOverlayActive = true
             } catch {
-                alertMessage = "Yakalama başlatılamadı: \(error.localizedDescription)"
+                alertMessage = "Failed to start capture: \(error.localizedDescription)"
                 showAlert = true
                 stop()
             }

@@ -17,6 +17,14 @@ class CaptureSettings: ObservableObject {
         var id: String { rawValue }
     }
     
+    enum MetalFXMode: String, CaseIterable, Identifiable {
+        case spatial = "Spatial"
+        case temporal = "Temporal"
+        case temporalDenoised = "Temporal Denoised"
+        var id: String { rawValue }
+        var requiresMotionVectors: Bool { self != .spatial }
+    }
+    
     enum QualityMode: String, CaseIterable, Identifiable {
         case performance = "Performance"
         case balanced = "Balanced"
@@ -25,6 +33,7 @@ class CaptureSettings: ObservableObject {
     }
     
     @Published var scalingType: ScalingType = .metalFX
+    @Published var metalFXMode: MetalFXMode = .spatial
     @Published var qualityMode: QualityMode = .quality
     @Published var scaleFactor: Float = 2.0
     
@@ -36,7 +45,14 @@ class CaptureSettings: ObservableObject {
         var id: String { rawValue }
     }
     
+    enum FrameGenBackend: String, CaseIterable, Identifiable {
+        case vision = "Vision Optical Flow"
+        case metalFX = "MetalFX Frame Interpolator"
+        var id: String { rawValue }
+    }
+    
     @Published var frameGenMode: FrameGenMode = .x2
+    @Published var frameGenBackend: FrameGenBackend = .vision
     
     // --- CURSOR & HUD ---
     @Published var captureCursor: Bool = true
@@ -46,7 +62,7 @@ class CaptureSettings: ObservableObject {
     @Published var maxLatency: Int = 1
 }
 
-// Kalite Profili Yapısı
+// Quality Profile structure
 struct QualityProfile {
     let flowAccuracy: VNGenerateOpticalFlowRequest.ComputationAccuracy
     let scalerMode: MTLFXSpatialScalerColorProcessingMode
