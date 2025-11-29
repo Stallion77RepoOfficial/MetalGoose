@@ -245,7 +245,7 @@ struct ContentView: View {
         overlayWindow?.contentView = mtkView
         overlayWindow?.orderFrontRegardless()
         NSApp.setActivationPolicy(.accessory); NSApp.deactivate()
-        renderer?.startTracking(windowID: wid, overlay: overlayWindow!)
+        renderer?.startTracking(windowID: wid, pid: app.processIdentifier, overlay: overlayWindow!)
         
         Task { @MainActor in
             // Determine target display for fallback (if available)

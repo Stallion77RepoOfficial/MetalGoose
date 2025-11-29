@@ -4,6 +4,7 @@ import Vision
 import CoreVideo
 import QuartzCore
 import AppKit
+import ApplicationServices
 
 final class Renderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
@@ -17,7 +18,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     var renderPipeline: MTLRenderPipelineState?
     
     // Processor & Scaler
-    private let frameProcessor = FrameProcessor()
     var spatialScaler: MTLFXSpatialScaler?
     var spatialScalerDesc: MTLFXSpatialScalerDescriptor?
     
@@ -33,6 +33,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var fpsLayer: CATextLayer?
     private var lastFPSTimestamp: CFTimeInterval = CACurrentMediaTime()
     private var smoothedFPS: Double = 0.0
+    
+    private var trackedAXWindow: AXUIElement?
+    private var trackedPID: pid_t = 0
     
     // Window Tracking
     var overlayWindow: NSWindow?
@@ -88,7 +91,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         setupHUDLayerIfNeeded(on: view)
         // 1. FRAME PROCESSOR STEP (VideoToolbox Scaling/Converting)
         let profile = settings.qualityMode.profile
-        let processedBuffer = frameProcessor.prepare(buffer: buffer, scalingMode: profile.vtScalingMode)
+        let processedBuffer = buffer
         
         guard let drawable = view.currentDrawable,
               let cmdBuffer = commandQueue.makeCommandBuffer(),
@@ -147,7 +150,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         
         prevTexture = srcTex
-        prevBuffer = processedBuffer
+        prevBuffer = buffer
         
         // 3. UPSCALING (MetalFX or Shader)
         let dstTex = drawable.texture
@@ -235,7 +238,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             desc.outputHeight = dst.height
             desc.colorTextureFormat = src.pixelFormat
             desc.outputTextureFormat = dst.pixelFormat
-            desc.colorProcessingMode = profile.scalerMode
+            desc.colorProcessingMode = .linear
             
             spatialScalerDesc = desc
             spatialScaler = desc.makeSpatialScaler(device: device)
@@ -302,12 +305,30 @@ final class Renderer: NSObject, MTKViewDelegate {
         return panel
     }
     
-    func startTracking(windowID: CGWindowID, overlay: NSWindow) {
+    func startTracking(windowID: CGWindowID, pid: Int32, overlay: NSWindow) {
         self.trackedWindowID = windowID
+        self.trackedPID = pid
         self.overlayWindow = overlay
+
+        // Build AX window reference for faster tracking
+        let appElement = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+           let windows = windowsRef as? [AXUIElement] {
+            self.trackedAXWindow = windows.first
+        } else {
+            self.trackedAXWindow = nil
+        }
+
         DispatchQueue.main.async {
-            self.trackingTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { [weak self] _ in
-                self?.updateOverlayPosition()
+            self.trackingTimer?.invalidate()
+            self.trackingTimer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                if self.trackedAXWindow != nil {
+                    self.updateOverlayPositionAX()
+                } else {
+                    self.updateOverlayPosition()
+                }
             }
         }
     }
@@ -319,6 +340,33 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     deinit {
         trackingTimer?.invalidate()
+    }
+    
+    private func updateOverlayPositionAX() {
+        guard let overlay = overlayWindow, let axWin = trackedAXWindow else { return }
+        var posValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        AXUIElementCopyAttributeValue(axWin, kAXPositionAttribute as CFString, &posValue)
+        AXUIElementCopyAttributeValue(axWin, kAXSizeAttribute as CFString, &sizeValue)
+
+        var pos = CGPoint.zero
+        var size = CGSize.zero
+        if let p = posValue, CFGetTypeID(p) == AXValueGetTypeID() {
+            AXValueGetValue(p as! AXValue, .cgPoint, &pos)
+        }
+        if let s = sizeValue, CFGetTypeID(s) == AXValueGetTypeID() {
+            AXValueGetValue(s as! AXValue, .cgSize, &size)
+        }
+        guard size.width > 0, size.height > 0 else { return }
+
+        // Convert to Cocoa coordinates using union of screens
+        let union = NSScreen.screens.reduce(NSRect.null) { $0.union($1.frame) }
+        let cocoaX = union.minX + pos.x
+        let cocoaY = union.maxY - (pos.y + size.height)
+        let newFrame = CGRect(x: cocoaX, y: cocoaY, width: size.width, height: size.height)
+        if overlay.frame != newFrame {
+            overlay.setFrame(newFrame, display: true, animate: false)
+        }
     }
     
     private func updateOverlayPosition() {
