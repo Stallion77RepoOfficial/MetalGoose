@@ -1,7 +1,14 @@
-#import <Metal/Metal.h>
 #import "MetalCPPBridge.h"
+
+#define NS_PRIVATE_IMPLEMENTATION
+#define CA_PRIVATE_IMPLEMENTATION
+#define MTL_PRIVATE_IMPLEMENTATION
+#define MTLFX_PRIVATE_IMPLEMENTATION
+#define MTL4FX_PRIVATE_IMPLEMENTATION
+// Avoid importing Foundation/Metal headers before metal-cpp to prevent redeclarations.
 #include "../metal-cpp/SingleHeader/Metal.hpp"
 
+#include <cstdio>
 #include <string>
 
 using namespace MTL;
@@ -15,7 +22,7 @@ std::string gLastError;
 [[noreturn]] void AbortWithReason(const char* message)
 {
     gLastError.assign(message);
-    NSLog(@"metal-cpp integration failure: %s", message);
+    std::fprintf(stderr, "metal-cpp integration failure: %s\n", message);
     std::abort();
 }
 
@@ -31,16 +38,16 @@ void Validate(bool condition, const char* message)
 void MetalCPPEnsureReady(void)
 {
     gLastError.clear();
-    NS::AutoreleasePool pool;
+    auto pool = NS::AutoreleasePool::alloc()->init();
 
     auto device = NS::TransferPtr(MTL::CreateSystemDefaultDevice());
-    Validate(device != nullptr, "Failed to create Metal device via metal-cpp.");
+    Validate(device.get() != nullptr, "Failed to create Metal device via metal-cpp.");
 
     auto queue = NS::TransferPtr(device->newCommandQueue());
-    Validate(queue != nullptr, "Failed to create command queue via metal-cpp.");
+    Validate(queue.get() != nullptr, "Failed to create command queue via metal-cpp.");
 
     auto scalerDesc = NS::TransferPtr(MTLFX::SpatialScalerDescriptor::alloc()->init());
-    Validate(scalerDesc != nullptr, "Failed to allocate MetalFX spatial scaler descriptor.");
+    Validate(scalerDesc.get() != nullptr, "Failed to allocate MetalFX spatial scaler descriptor.");
     scalerDesc->setInputWidth(16);
     scalerDesc->setInputHeight(16);
     scalerDesc->setOutputWidth(16);
@@ -53,10 +60,10 @@ void MetalCPPEnsureReady(void)
     Validate(scalerSupportsMetal4, "Device does not advertise Metal 4 FX support for spatial scaling.");
 
     auto scaler = NS::TransferPtr(scalerDesc->newSpatialScaler(device.get()));
-    Validate(scaler != nullptr, "Failed to create MetalFX spatial scaler via metal-cpp.");
+    Validate(scaler.get() != nullptr, "Failed to create MetalFX spatial scaler via metal-cpp.");
 
     auto interpolatorDesc = NS::TransferPtr(MTLFX::FrameInterpolatorDescriptor::alloc()->init());
-    Validate(interpolatorDesc != nullptr, "Failed to allocate MetalFX frame interpolator descriptor.");
+    Validate(interpolatorDesc.get() != nullptr, "Failed to allocate MetalFX frame interpolator descriptor.");
     interpolatorDesc->setInputWidth(16);
     interpolatorDesc->setInputHeight(16);
     interpolatorDesc->setOutputWidth(16);
@@ -71,10 +78,10 @@ void MetalCPPEnsureReady(void)
     Validate(interpolatorSupportsMetal4, "Device does not advertise Metal 4 FX support for frame interpolation.");
 
     auto interpolator = NS::TransferPtr(interpolatorDesc->newFrameInterpolator(device.get()));
-    Validate(interpolator != nullptr, "Failed to create MetalFX frame interpolator via metal-cpp.");
+    Validate(interpolator.get() != nullptr, "Failed to create MetalFX frame interpolator via metal-cpp.");
 
     auto temporalDesc = NS::TransferPtr(MTLFX::TemporalScalerDescriptor::alloc()->init());
-    Validate(temporalDesc != nullptr, "Failed to allocate MetalFX temporal scaler descriptor.");
+    Validate(temporalDesc.get() != nullptr, "Failed to allocate MetalFX temporal scaler descriptor.");
     temporalDesc->setInputWidth(16);
     temporalDesc->setInputHeight(16);
     temporalDesc->setOutputWidth(16);
@@ -88,5 +95,6 @@ void MetalCPPEnsureReady(void)
     Validate(temporalSupportsMetal4, "Device does not advertise Metal 4 FX support for temporal scaling.");
 
     auto temporalScaler = NS::TransferPtr(temporalDesc->newTemporalScaler(device.get()));
-    Validate(temporalScaler != nullptr, "Failed to create MetalFX temporal scaler via metal-cpp.");
+    Validate(temporalScaler.get() != nullptr, "Failed to create MetalFX temporal scaler via metal-cpp.");
+    pool->drain();
 }

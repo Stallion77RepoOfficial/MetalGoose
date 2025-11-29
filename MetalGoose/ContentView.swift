@@ -280,7 +280,7 @@ struct ContentView: View {
         mtkView.preferredFramesPerSecond = settings.vsync ? 60 : 0
         mtkView.autoResizeDrawable = false
         
-        if let win = overlayWindow {
+        if overlayWindow != nil {
             mtkView.frame = CGRect(origin: .zero, size: nsRect.size)
             mtkView.autoresizingMask = [.width, .height]
         }
@@ -300,7 +300,7 @@ struct ContentView: View {
             return
         }
         overlayWindow = renderer?.createOverlayWindow(targetFrame: nsRect)
-        if let win = overlayWindow {
+        if overlayWindow != nil {
             mtkView.frame = CGRect(origin: .zero, size: nsRect.size)
             mtkView.autoresizingMask = [.width, .height]
         }
