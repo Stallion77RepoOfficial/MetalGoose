@@ -60,13 +60,13 @@ MetalGoose is a native macOS application that provides real-time upscaling and f
 ## Installation
 
 ### Download Release
-1. Download the latest release from [Releases](https://github.com/yourusername/MetalGoose/releases)
+1. Download the latest release from [Releases](https://github.com/Stallion77RepoOfficial/MetalGoose/releases)
 2. Move `MetalGoose.app` to `/Applications`
 3. Grant Screen Recording and Accessibility permissions when prompted
 
 ### Build from Source
 ```bash
-git clone https://github.com/yourusername/MetalGoose.git
+git clone https://github.com/Stallion77RepoOfficial/MetalGoose
 cd MetalGoose
 open MetalGoose.xcodeproj
 ```
@@ -98,7 +98,7 @@ open MetalGoose.xcodeproj
 ### Build Steps
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/MetalGoose.git
+git clone https://github.com/Stallion77RepoOfficial/MetalGoose.git
 cd MetalGoose
 
 # Build with xcodebuild
