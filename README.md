@@ -88,12 +88,6 @@ open MetalGoose.xcodeproj
 | Shortcut | Action |
 |----------|--------|
 | `⌘ + T` | Toggle Scale |
-## Building
-
-### Prerequisites
-- Xcode 26.0+
-- macOS 26.0+ SDK
-- Command Line Tools
 
 ## Architecture
 
