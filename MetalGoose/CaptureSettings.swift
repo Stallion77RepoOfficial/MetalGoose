@@ -144,8 +144,8 @@ final class CaptureSettings: ObservableObject {
         
         var description: String {
             switch self {
-            case .off: return "No frame generation - lowest latency"
-            case .mgfg1: return "MetalGoose Frame Generation - Optical flow interpolation"
+            case .off: return String(localized: "No frame generation - lowest latency")
+            case .mgfg1: return String(localized: "MetalGoose Frame Generation - Optical flow interpolation")
             }
         }
     }
@@ -238,13 +238,19 @@ final class CaptureSettings: ObservableObject {
         
         var description: String {
             switch self {
-            case .off: return "No anti-aliasing - sharpest but aliased"
-            case .fxaa: return "Fast Approximate AA - quick, slight blur"
-            case .smaa: return "Subpixel Morphological AA - high quality edges"
-            case .msaa: return "Multisample AA - hardware-like, clean edges"
-            case .taa: return "Temporal AA - motion-compensated, best quality"
+            case .off:
+                String(localized: "No anti-aliasing - sharpest but aliased", comment: "AA mode description: No AA")
+            case .fxaa:
+                String(localized: "Fast Approximate AA - quick, slight blur", comment: "AA mode description: FXAA")
+            case .smaa:
+                String(localized: "Subpixel Morphological AA - high quality edges", comment: "AA mode description: SMAA")
+            case .msaa:
+                String(localized: "Multisample AA - hardware-like, clean edges", comment: "AA mode description: MSAA")
+            case .taa:
+                String(localized: "Temporal AA - motion-compensated, best quality", comment: "AA mode description: TAA")
             }
         }
+
         
         var isTemporal: Bool {
             return self == .taa
