@@ -43,8 +43,8 @@ struct DirectFrameEngineOpaque {
 
   std::mutex frameMutex;
   std::deque<FrameBufferEntry> frameBuffer;
-  static constexpr size_t kMaxFrameBufferNormal = 4;
-  static constexpr size_t kMaxFrameBufferLowLatency = 2;
+  static constexpr size_t kMaxFrameBufferNormal = 6;
+  static constexpr size_t kMaxFrameBufferLowLatency = 3;
   IOSurfaceRef currentSurface;
   IOSurfaceRef previousSurface;
   CVPixelBufferRef currentPixelBuffer;
@@ -420,25 +420,49 @@ struct DirectFrameEngineOpaque {
   void computeCPUMotionVectors(const uint8_t *prevData, const uint8_t *currData,
                                size_t width, size_t height,
                                size_t bytesPerRow) {
-    std::lock_guard<std::mutex> lock(cpuMotionMutex);
+    if (!prevData || !currData || width == 0 || height == 0 ||
+        bytesPerRow == 0) {
+      return;
+    }
 
     size_t blockSize = 8;
     size_t mvWidth = (width + blockSize - 1) / blockSize;
     size_t mvHeight = (height + blockSize - 1) / blockSize;
+    size_t mvSize = mvWidth * mvHeight;
+
+    {
+      std::lock_guard<std::mutex> lock(cpuMotionMutex);
+      if (cpuMotionCache.motionX.size() < mvSize) {
+        cpuMotionCache.motionX.resize(mvSize, 0.0f);
+        cpuMotionCache.motionY.resize(mvSize, 0.0f);
+        cpuMotionCache.confidence.resize(mvSize, 1.0f);
+        cpuMotionCache.width = mvWidth;
+        cpuMotionCache.height = mvHeight;
+      }
+    }
+
+    const size_t maxValidOffset = height * bytesPerRow;
+
+    const size_t localWidth = width;
+    const size_t localHeight = height;
+    const size_t localBytesPerRow = bytesPerRow;
+    const size_t localMvWidth = mvWidth;
 
     dispatch_apply(
         mvHeight, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
         ^(size_t by) {
-          for (size_t bx = 0; bx < mvWidth; bx++) {
-            size_t mvIdx = by * mvWidth + bx;
+          for (size_t bx = 0; bx < localMvWidth; bx++) {
+            size_t mvIdx = by * localMvWidth + bx;
 
             size_t cx = bx * blockSize + blockSize / 2;
             size_t cy = by * blockSize + blockSize / 2;
 
-            if (cx >= width || cy >= height) {
-              cpuMotionCache.motionX[mvIdx] = 0.0f;
-              cpuMotionCache.motionY[mvIdx] = 0.0f;
-              cpuMotionCache.confidence[mvIdx] = 0.0f;
+            if (cx >= localWidth || cy >= localHeight || mvIdx >= mvSize) {
+              if (mvIdx < mvSize) {
+                cpuMotionCache.motionX[mvIdx] = 0.0f;
+                cpuMotionCache.motionY[mvIdx] = 0.0f;
+                cpuMotionCache.confidence[mvIdx] = 0.0f;
+              }
               continue;
             }
 
@@ -471,22 +495,26 @@ struct DirectFrameEngineOpaque {
                     int tx = sx + dx;
                     int ty = sy + dy;
 
-                    if (sx >= 0 && sx < (int)width && sy >= 0 &&
-                        sy < (int)height && tx >= 0 && tx < (int)width &&
-                        ty >= 0 && ty < (int)height) {
+                    if (sx >= 0 && sx < (int)localWidth && sy >= 0 &&
+                        sy < (int)localHeight && tx >= 0 &&
+                        tx < (int)localWidth && ty >= 0 &&
+                        ty < (int)localHeight) {
 
-                      size_t prevOffset = sy * bytesPerRow + sx * 4;
-                      size_t currOffset = ty * bytesPerRow + tx * 4;
+                      size_t prevOffset = sy * localBytesPerRow + sx * 4;
+                      size_t currOffset = ty * localBytesPerRow + tx * 4;
 
-                      float prevLum = prevData[prevOffset] * 0.114f +
-                                      prevData[prevOffset + 1] * 0.587f +
-                                      prevData[prevOffset + 2] * 0.299f;
-                      float currLum = currData[currOffset] * 0.114f +
-                                      currData[currOffset + 1] * 0.587f +
-                                      currData[currOffset + 2] * 0.299f;
+                      if (prevOffset + 2 < maxValidOffset &&
+                          currOffset + 2 < maxValidOffset) {
+                        float prevLum = prevData[prevOffset] * 0.114f +
+                                        prevData[prevOffset + 1] * 0.587f +
+                                        prevData[prevOffset + 2] * 0.299f;
+                        float currLum = currData[currOffset] * 0.114f +
+                                        currData[currOffset + 1] * 0.587f +
+                                        currData[currOffset + 2] * 0.299f;
 
-                      sad += fabsf(prevLum - currLum);
-                      validPixels++;
+                        sad += fabsf(prevLum - currLum);
+                        validPixels++;
+                      }
                     }
                   }
                 }
@@ -509,6 +537,7 @@ struct DirectFrameEngineOpaque {
           }
         });
 
+    std::lock_guard<std::mutex> lock(cpuMotionMutex);
     cpuMotionCache.valid = true;
   }
 
@@ -746,6 +775,14 @@ struct DirectFrameEngineOpaque {
 @implementation DirectEngineStreamOutput
 
 - (void)stream:(SCStream *)stream
+    didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
+                 ofType:(SCStreamOutputType)type {
+  if (type == SCStreamOutputTypeScreen && self.engine) {
+    self.engine->droppedFrames.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+- (void)stream:(SCStream *)stream
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                    ofType:(SCStreamOutputType)type {
   if (type != SCStreamOutputTypeScreen)
@@ -765,7 +802,7 @@ struct DirectFrameEngineOpaque {
         attachment, (__bridge CFStringRef)SCStreamFrameInfoStatus);
     if (statusRef) {
       NSInteger status = [(NSNumber *)(__bridge id)statusRef integerValue];
-      if (status != 0) {
+      if (status == 2 || status == 3 || status == 5) {
         return;
       }
     }
@@ -802,17 +839,6 @@ struct DirectFrameEngineOpaque {
   size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
   size_t dataSize = bytesPerRow * height;
 
-  uint64_t currentHash = DirectFrameEngineOpaque::computeFrameHash(
-      (const uint8_t *)baseAddress, width, height, bytesPerRow);
-
-  if (currentHash == engine->lastFrameHash && engine->lastFrameHash != 0) {
-    engine->duplicateFrameCount++;
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-    return;
-  }
-
-  engine->lastFrameHash = currentHash;
-
   auto now = std::chrono::high_resolution_clock::now();
   float realFrameDelta =
       std::chrono::duration<float>(now - engine->lastRealFrameTime).count();
@@ -842,21 +868,41 @@ struct DirectFrameEngineOpaque {
   CVPixelBufferRef copiedBuffer = nullptr;
   NSDictionary *pixelBufferAttributes = @{
     (NSString *)kCVPixelBufferIOSurfacePropertiesKey : @{},
-    (NSString *)kCVPixelBufferMetalCompatibilityKey : @YES
+    (NSString *)kCVPixelBufferMetalCompatibilityKey : @YES,
+    (NSString *)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+    (NSString *)kCVPixelBufferWidthKey : @(width),
+    (NSString *)kCVPixelBufferHeightKey : @(height)
   };
 
-  CVReturn createResult = CVPixelBufferCreateWithBytes(
+  CVReturn createResult = CVPixelBufferCreate(
       kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
-      pixelDataCopy, bytesPerRow,
-      [](void *releaseRefCon, const void *baseAddress) {
-        free((void *)baseAddress);
-      },
-      nullptr, (__bridge CFDictionaryRef)pixelBufferAttributes, &copiedBuffer);
+      (__bridge CFDictionaryRef)pixelBufferAttributes, &copiedBuffer);
 
   if (createResult != kCVReturnSuccess || !copiedBuffer) {
     free(pixelDataCopy);
     return;
   }
+
+  CVReturn lockResult2 = CVPixelBufferLockBaseAddress(copiedBuffer, 0);
+  if (lockResult2 == kCVReturnSuccess) {
+    void *destBase = CVPixelBufferGetBaseAddress(copiedBuffer);
+    size_t destBytesPerRow = CVPixelBufferGetBytesPerRow(copiedBuffer);
+
+    if (destBase) {
+      if (destBytesPerRow == bytesPerRow) {
+        memcpy(destBase, pixelDataCopy, dataSize);
+      } else {
+        for (size_t row = 0; row < height; row++) {
+          memcpy((uint8_t *)destBase + row * destBytesPerRow,
+                 (uint8_t *)pixelDataCopy + row * bytesPerRow,
+                 std::min(bytesPerRow, destBytesPerRow));
+        }
+      }
+    }
+    CVPixelBufferUnlockBaseAddress(copiedBuffer, 0);
+  }
+
+  free(pixelDataCopy);
 
   {
     std::lock_guard<std::mutex> lock(engine->frameMutex);
@@ -880,12 +926,10 @@ struct DirectFrameEngineOpaque {
   engine->hasNewFrame.store(true, std::memory_order_release);
   engine->frameNumber.fetch_add(1, std::memory_order_relaxed);
 
-  CMTime outputPresentationTime =
-      CMSampleBufferGetOutputPresentationTimeStamp(sampleBuffer);
-  if (CMTIME_IS_VALID(outputPresentationTime)) {
-    double outputTimestamp = CMTimeGetSeconds(outputPresentationTime);
-    if (outputTimestamp > 0 && timestamp > 0) {
-      float latencyMs = (float)((outputTimestamp - timestamp) * 1000.0);
+  double captureWallTime = CACurrentMediaTime();
+  if (timestamp > 0) {
+    float latencyMs = (float)((captureWallTime - timestamp) * 1000.0);
+    if (latencyMs >= 0.0f && latencyMs < 1000.0f) {
       engine->captureLatency.store(latencyMs, std::memory_order_relaxed);
     }
   }
@@ -1107,18 +1151,58 @@ bool DirectEngine_StartCapture(DirectEngineRef engine) {
       }
 
       if (targetWindow) {
-        size_t baseW = engine->config.baseWidth > 0
+        CGRect windowFrame = targetWindow.frame;
+        size_t windowWidth = (size_t)windowFrame.size.width;
+        size_t windowHeight = (size_t)windowFrame.size.height;
+
+        SCDisplay *windowDisplay = nil;
+        bool isFullscreen = false;
+
+        for (SCDisplay *disp in content.displays) {
+          if (windowWidth >= disp.width * 0.95 &&
+              windowHeight >= disp.height * 0.95) {
+            windowDisplay = disp;
+            isFullscreen = true;
+            break;
+          }
+          if (windowWidth >= disp.width * 0.9 ||
+              windowHeight >= disp.height * 0.9 ||
+              (windowWidth < 100 && windowHeight < 100)) {
+            windowDisplay = disp;
+          }
+        }
+
+        bool forceDisplaySize = false;
+        if (windowWidth < 200 || windowHeight < 200) {
+          if (content.displays.count > 0) {
+            SCDisplay *primaryDisplay = content.displays[0];
+            windowWidth = primaryDisplay.width;
+            windowHeight = primaryDisplay.height;
+            forceDisplaySize = true;
+            isFullscreen = true;
+            windowDisplay = primaryDisplay;
+          }
+        }
+
+        size_t baseW = (engine->config.baseWidth > 0 && !forceDisplaySize)
                            ? (size_t)engine->config.baseWidth
-                           : (size_t)targetWindow.frame.size.width;
-        size_t baseH = engine->config.baseHeight > 0
+                           : windowWidth;
+        size_t baseH = (engine->config.baseHeight > 0 && !forceDisplaySize)
                            ? (size_t)engine->config.baseHeight
-                           : (size_t)targetWindow.frame.size.height;
+                           : windowHeight;
+
         config.width = std::max<size_t>(
             1, (size_t)std::llround((double)baseW * (double)renderScaleFactor));
         config.height = std::max<size_t>(
             1, (size_t)std::llround((double)baseH * (double)renderScaleFactor));
-        filter = [[SCContentFilter alloc]
-            initWithDesktopIndependentWindow:targetWindow];
+
+        if (isFullscreen && windowDisplay) {
+          filter = [[SCContentFilter alloc] initWithDisplay:windowDisplay
+                                           excludingWindows:@[]];
+        } else {
+          filter = [[SCContentFilter alloc]
+              initWithDesktopIndependentWindow:targetWindow];
+        }
       } else {
         engine->lastError = "Target window not found";
         dispatch_semaphore_signal(semaphore);
@@ -1284,8 +1368,14 @@ id<MTLTexture> DirectEngine_GetFrameTexture(DirectEngineRef engine,
 id<MTLTexture> DirectEngine_ProcessFrame(DirectEngineRef engine,
                                          id<MTLDevice> device,
                                          id<MTLCommandBuffer> commandBuffer) {
-  if (!engine || !engine->cppEngine || !device || !commandBuffer)
-    return nil;
+  static int processDebugCounter = 0;
+  processDebugCounter++;
+  bool shouldLog = (processDebugCounter % 60 == 1);
+
+  if (!engine || !engine->cppEngine || !device || !commandBuffer) {
+    if (shouldLog)
+      return nil;
+  }
 
   auto startTime = std::chrono::high_resolution_clock::now();
 
@@ -1328,32 +1418,6 @@ id<MTLTexture> DirectEngine_ProcessFrame(DirectEngineRef engine,
     return nil;
 
   engine->cachedInputTexture = inputTexture;
-
-  if (engine->config.frameGenMode != DirectFrameGenOff &&
-      engine->asyncFrameGenEnabled.load(std::memory_order_acquire) &&
-      engine->previousSurface && engine->currentSurface) {
-
-    IOSurfaceRef prevSurf = engine->previousSurface;
-    IOSurfaceRef currSurf = engine->currentSurface;
-
-    dispatch_async(engine->asyncFrameGenQueue, ^{
-      IOSurfaceLock(prevSurf, kIOSurfaceLockReadOnly, nullptr);
-      IOSurfaceLock(currSurf, kIOSurfaceLockReadOnly, nullptr);
-
-      const uint8_t *prevData =
-          (const uint8_t *)IOSurfaceGetBaseAddress(prevSurf);
-      const uint8_t *currData =
-          (const uint8_t *)IOSurfaceGetBaseAddress(currSurf);
-      size_t bytesPerRow = IOSurfaceGetBytesPerRow(currSurf);
-      size_t w = IOSurfaceGetWidth(currSurf);
-      size_t h = IOSurfaceGetHeight(currSurf);
-
-      engine->computeCPUMotionVectors(prevData, currData, w, h, bytesPerRow);
-
-      IOSurfaceUnlock(prevSurf, kIOSurfaceLockReadOnly, nullptr);
-      IOSurfaceUnlock(currSurf, kIOSurfaceLockReadOnly, nullptr);
-    });
-  }
 
   engine->state.store(DirectEngineStateProcessing, std::memory_order_relaxed);
   engine->commandBufferCount.fetch_add(1, std::memory_order_relaxed);
@@ -1402,6 +1466,7 @@ DirectEngine_GetInterpolatedFrame(DirectEngineRef engine, id<MTLDevice> device,
 id<MTLTexture> DirectEngine_GetInterpolatedFrameWithT(
     DirectEngineRef engine, id<MTLDevice> device,
     id<MTLCommandBuffer> commandBuffer, float t, bool *isInterpolated) {
+
   if (!engine || !device || !commandBuffer) {
     if (isInterpolated)
       *isInterpolated = false;

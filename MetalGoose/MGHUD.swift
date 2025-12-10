@@ -182,9 +182,7 @@ struct MGHUDView: View {
     private var frameStatsSection: some View {
         HUDRow(label: "Frames", value: "\(data.framesProcessed)", compact: isCompact)
         HUDRow(label: "Interpolated", value: "\(data.framesInterpolated)", compact: isCompact)
-        if data.framesDropped > 0 {
-            HUDRow(label: "Dropped", value: "\(data.framesDropped)", compact: isCompact, color: .red)
-        }
+        HUDRow(label: "Dropped", value: "\(data.framesDropped)", compact: isCompact, color: data.framesDropped > 0 ? .red : .white)
     }
     
     private func divider(opacity: Double = 0.2) -> some View {

@@ -60,13 +60,13 @@ MetalGoose is a native macOS application that provides real-time upscaling and f
 ## Installation
 
 ### Download Release
-1. Download the latest release from [Releases](https://github.com/Stallion77RepoOfficial/MetalGoose/releases)
+1. Download the latest release from [Releases](https://github.com/yourusername/MetalGoose/releases)
 2. Move `MetalGoose.app` to `/Applications`
 3. Grant Screen Recording and Accessibility permissions when prompted
 
 ### Build from Source
 ```bash
-git clone https://github.com/Stallion77RepoOfficial/MetalGoose
+git clone https://github.com/yourusername/MetalGoose.git
 cd MetalGoose
 open MetalGoose.xcodeproj
 ```
@@ -82,12 +82,36 @@ open MetalGoose.xcodeproj
    - Select anti-aliasing mode
 4. **Start Scaling**
    - Click "Start" to begin processing
+5. **Monitor Performance**
+   - Use the HUD overlay (⌘+H) to view real-time stats
 
 ### Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
-| `⌘ + T` | Toggle Scale |
+| `⌘ + H` | Toggle HUD overlay |
+| `⌘ + P` | Pause/Resume |
+| `⌘ + Q` | Quit |
+
+## Building
+
+### Prerequisites
+- Xcode 26.0+
+- macOS 26.0+ SDK
+- Command Line Tools
+
+### Build Steps
+```bash
+# Clone repository
+git clone https://github.com/yourusername/MetalGoose.git
+cd MetalGoose
+
+# Build with xcodebuild
+xcodebuild -scheme MetalGoose -configuration Release build
+
+# Or open in Xcode
+open MetalGoose.xcodeproj
+```
 
 ## Architecture
 
@@ -104,7 +128,7 @@ MetalGoose/
 
 ### Technology Stack
 - **SwiftUI** — Modern declarative UI
-- **Metal 4** — GPU-accelerated processing
+- **Metal 3** — GPU-accelerated processing
 - **ScreenCaptureKit** — Low-latency screen capture
 - **MetalPerformanceShaders** — Optimized GPU operations
 
@@ -146,22 +170,6 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 - Contributors who helped improve the project
 
 ---
-
-RESOURCES THAT USED FOR THIS PROJECT
-
-https://developer.apple.com/documentation/metal
-https://developer.apple.com/documentation/metalfx/
-https://developer.apple.com/documentation/coreimage
-https://developer.apple.com/documentation/screencapturekit/
-https://developer.apple.com/documentation/appkit
-https://developer.apple.com/documentation/metal/mtltexture
-https://developer.apple.com/documentation/corevideo/cvpixelbuffer
-https://developer.apple.com/documentation/metalperformanceshaders
-https://developer.apple.com/documentation/metal/compute-passes
-https://developer.apple.com/documentation/vision
-https://developer.apple.com/documentation/vision/vngenerateopticalflowrequest
-https://developer.apple.com/documentation/ScreenCaptureKit/capturing-screen-content-in-macos
-
 
 <div align="center">
   <sub>Built with ❤️ using Metal for macOS</sub>

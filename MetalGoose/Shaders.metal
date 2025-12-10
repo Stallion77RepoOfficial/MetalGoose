@@ -555,7 +555,9 @@ kernel void mgfg1Balanced(
         gradient = float2(0.0);
     }
     
-    float2 offset = gradient * motion * 2.5 * (0.5 - params.t);
+    float2 offset = gradient * motion * 1.0 * (0.5 - params.t);
+    offset = clamp(offset, float2(-8.0), float2(8.0));
+    
     int2 warpPosPrev = int2(float2(gid) + offset);
     int2 warpPosCurr = int2(float2(gid) - offset * (1.0 - params.t) / max(params.t, 0.01));
     
@@ -573,7 +575,7 @@ kernel void mgfg1Balanced(
     float4 motionBlend = mix(warpedPrev, warpedCurr, smoothT);
     float4 simpleBlend = mix(prev, curr, smoothT);
     
-    float blendWeight = motion * (1.0 - occlusion * 0.7);
+    float blendWeight = motion * (1.0 - occlusion * 0.7) * 0.5;
     float4 result = mix(simpleBlend, motionBlend, blendWeight);
     
     output.write(result, gid);
@@ -594,11 +596,18 @@ kernel void mgfg1Quality(
     }
     if (gid.x >= texSize.x || gid.y >= texSize.y) return;
     
+    float2 uv = float2(gid) / float2(texSize);
+    float edgeMargin = 0.03f;
+    bool isNearEdge = uv.x < edgeMargin || uv.x > (1.0f - edgeMargin) || 
+                      uv.y < edgeMargin || uv.y > (1.0f - edgeMargin);
+    float edgeFactor = isNearEdge ? 0.3f : 1.0f;
+    
     float4 mvData = motionVectors.read(gid);
     float2 motion = mvData.xy;
     float conf = confidence.read(gid).r;
     
-    motion *= params.motionScale;
+    motion *= params.motionScale * edgeFactor;
+    conf *= edgeFactor;
     
     float motionMag = length(motion);
     const float maxMotion = 48.0;  
@@ -629,6 +638,8 @@ kernel void mgfg1Quality(
     float4 simpleBlend = mix(directPrev, directCurr, smoothT);
     
     float blendWeight = conf * (1.0 - occlusionWeight);
+    if (isNearEdge) blendWeight = min(blendWeight, 0.3f);
+    
     float4 result = mix(simpleBlend, motionBlend, blendWeight);
     
     output.write(result, gid);
@@ -646,18 +657,27 @@ kernel void mgfg1AdaptiveInterpolation(
     uint2 texSize = uint2(output.get_width(), output.get_height());
     if (gid.x >= texSize.x || gid.y >= texSize.y) return;
     
+    float2 uv = float2(gid) / float2(texSize);
+    float edgeMargin = 0.03f;
+    bool isNearEdge = uv.x < edgeMargin || uv.x > (1.0f - edgeMargin) || 
+                      uv.y < edgeMargin || uv.y > (1.0f - edgeMargin);
+    
     float4 prev = prevFrame.read(gid);
     float4 curr = currFrame.read(gid);
     float4 mvData = motionVectors.read(gid);
     float conf = confidence.read(gid).r;
     
+    if (isNearEdge) conf *= 0.3f;
+    
     float2 motion = mvData.xy;
     float motionMag = length(motion);
+    
+    if (isNearEdge) motion *= 0.3f;
     
     float4 result;
     float smoothT = smootherStep(params.t);
     
-    if (motionMag < 2.0 || conf < 0.2) {
+    if (motionMag < 2.0 || conf < 0.2 || isNearEdge) {
         result = mix(prev, curr, smoothT);
     } else if (motionMag < 16.0) {
         float2 pos1 = clamp(float2(gid) - motion * params.t, float2(0), float2(texSize) - 1.0);
@@ -1307,16 +1327,21 @@ kernel void frameGenCompute(
     float2 uv = (float2(gid) + 0.5f) / float2(texSize);
     float2 flowNorm = float2(flow) / float2(texSize);
     
-    float2 prevUV = uv - flowNorm * float(tInv);
-    float2 currUV = uv + flowNorm * float(t);
+    float2 prevUV = clamp(uv - flowNorm * float(tInv), float2(0.002f), float2(0.998f));
+    float2 currUV = clamp(uv + flowNorm * float(t), float2(0.002f), float2(0.998f));
+    
+    float edgeMargin = 0.03f;
+    bool isNearEdge = uv.x < edgeMargin || uv.x > (1.0f - edgeMargin) || 
+                      uv.y < edgeMargin || uv.y > (1.0f - edgeMargin);
+    half edgeFactor = isNearEdge ? half(0.3) : half(1.0);
     
     constexpr sampler linearSampler(address::clamp_to_edge, filter::linear);
     
     half4 prevSample = prevFrame.sample(linearSampler, prevUV);
     half4 currSample = currFrame.sample(linearSampler, currUV);
     
-    half2 flowAtPrev = flowTexture.read(uint2(clamp(prevUV * float2(texSize), 
-                                                      float2(0), float2(texSize) - 1))).xy;
+    uint2 flowReadPos = uint2(clamp(prevUV * float2(texSize), float2(0), float2(texSize) - 1));
+    half2 flowAtPrev = flowTexture.read(flowReadPos).xy;
     
     half2 flowDiff = flow + flowAtPrev;
     half consistency = exp(-length(flowDiff) * half(params.occlusionThreshold));
@@ -1326,7 +1351,7 @@ kernel void frameGenCompute(
     half colorDiff = length(prevSample.rgb - currSample.rgb);
     half colorConfidence = exp(-colorDiff * 5.0h);
     
-    half confidence = consistency * colorConfidence;
+    half confidence = consistency * colorConfidence * edgeFactor;
     
     half4 result;
     
@@ -1345,6 +1370,7 @@ kernel void frameGenCompute(
         
         half4 simpleBlend = mix(prevSample, currSample, t);
         half blendFactor = half(params.temporalWeight) * (half(1.0) - confidence) + motionFactor * 0.2h;
+        if (isNearEdge) blendFactor = max(blendFactor, half(0.5));
         result = mix(result, simpleBlend, blendFactor);
     } else if (params.qualityMode == 1) {
         result = mix(prevSample, currSample, t);

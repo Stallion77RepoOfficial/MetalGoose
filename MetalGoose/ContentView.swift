@@ -56,40 +56,40 @@ struct ContentView: View {
             VStack(alignment: .leading) {
 
                 VStack(alignment: .leading, spacing: 12) {
-                                    Text(String(localized: "Scaling Info", defaultValue: "Scaling Info"))
-                                        .font(.headline)
-                                        .padding([.top, .horizontal])
+                                Text(String(localized: "Scaling Info", defaultValue: "Scaling Info"))
+                                    .font(.headline)
+                                    .padding([.top, .horizontal])
 
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        InfoRow(label: String(localized: "Status", defaultValue: "Status"),
-                                                value: isScalingActive ?
-                                                        String(localized: "Active", defaultValue: "Active") :
-                                                        String(localized: "Idle", defaultValue: "Idle"))
-                                        InfoRow(label: String(localized: "FPS", defaultValue: "FPS"),
-                                                value: currentFPS > 0 ? String(format: "%.1f", currentFPS) : "-")
+                                VStack(alignment: .leading, spacing: 8) {
+                                    InfoRow(label: String(localized: "Status", defaultValue: "Status"),
+                                            value: isScalingActive ?
+                                                    String(localized: "Active", defaultValue: "Active") :
+                                                    String(localized: "Idle", defaultValue: "Idle"))
+                                    InfoRow(label: String(localized: "FPS", defaultValue: "FPS"),
+                                            value: currentFPS > 0 ? String(format: "%.1f", currentFPS) : "-")
 
-                                        if interpolatedFPS > currentFPS {
-                                            InfoRow(label: String(localized: "Interp FPS", defaultValue: "Interp FPS"),
-                                                    value: String(format: "%.1f", interpolatedFPS))
-                                        }
-
-                                        InfoRow(label: String(localized: "Latency", defaultValue: "Latency"),
-                                                value: processingTime > 0 ? String(format: "%.2f ms", processingTime) : "-")
-
-                                        InfoRow(label: String(localized: "Process", defaultValue: "Process"), value: connectedProcessName)
-                                        InfoRow(label: String(localized: "PID", defaultValue: "PID"), value: String(connectedPID))
-                                        InfoRow(label: String(localized: "Window ID", defaultValue: "Window ID"), value: String(connectedWindowID))
-
-                                        InfoRow(label: String(localized: "Frame", defaultValue: "Frame"),
-                                                value: connectedSize.width > 0 ?
-                                                       "\(Int(connectedSize.width)) x \(Int(connectedSize.height))" : "-")
-
-                                        InfoRow(label: String(localized: "Display ID", defaultValue: "Display ID"),
-                                                value: targetDisplayID.map { String($0) } ?? "-")
+                                    if interpolatedFPS > 0 {
+                                        InfoRow(label: String(localized: "Interp FPS", defaultValue: "Interp FPS"),
+                                                value: String(format: "%.1f", interpolatedFPS))
                                     }
-                                    .padding(.horizontal)
-                                    .padding(.bottom)
+
+                                    InfoRow(label: String(localized: "Latency", defaultValue: "Latency"),
+                                            value: processingTime > 0 ? String(format: "%.2f ms", processingTime) : "-")
+
+                                    InfoRow(label: String(localized: "Process", defaultValue: "Process"), value: connectedProcessName)
+                                    InfoRow(label: String(localized: "PID", defaultValue: "PID"), value: String(connectedPID))
+                                    InfoRow(label: String(localized: "Window ID", defaultValue: "Window ID"), value: String(connectedWindowID))
+
+                                    InfoRow(label: String(localized: "Frame", defaultValue: "Frame"),
+                                            value: connectedSize.width > 0 ?
+                                                   "\(Int(connectedSize.width)) x \(Int(connectedSize.height))" : "-")
+
+                                    InfoRow(label: String(localized: "Display ID", defaultValue: "Display ID"),
+                                            value: targetDisplayID.map { String($0) } ?? "-")
                                 }
+                                .padding(.horizontal)
+                                .padding(.bottom)
+                            }
                 Spacer()
 
                 HStack {
@@ -324,7 +324,6 @@ struct ContentView: View {
             }
         }
     }
-
 
 
     private func initializeDirectRenderer() {

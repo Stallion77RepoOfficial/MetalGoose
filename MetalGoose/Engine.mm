@@ -228,6 +228,10 @@ private:
 
   std::atomic<float> processingTime_{0.0f};
   std::atomic<float> gpuTime_{0.0f};
+  std::string lastError_;
+
+public:
+  const char *getLastError() const { return lastError_.c_str(); }
 };
 
 Engine::Engine(id<MTLDevice> device, id<MTLCommandQueue> queue)
@@ -256,19 +260,44 @@ void Engine::setupPipelines() {
     return;
 
   id<MTLLibrary> library = [device_ newDefaultLibrary];
-  if (!library)
+  if (!library) {
+    NSBundle *mainBundle = [NSBundle mainBundle];
+    NSURL *url = [mainBundle URLForResource:@"default"
+                              withExtension:@"metallib"];
+    if (url) {
+      library = [device_ newLibraryWithURL:url error:nil];
+    }
+  }
+  if (!library) {
+    NSBundle *mainBundle = [NSBundle mainBundle];
+    NSURL *url = [mainBundle URLForResource:@"Shaders"
+                              withExtension:@"metallib"];
+    if (url) {
+      library = [device_ newLibraryWithURL:url error:nil];
+    }
+  }
+
+  if (!library) {
+    lastError_ = "Failed to load Metal shader library (default.metallib or "
+                 "Shaders.metallib absent)";
     return;
+  }
 
   NSError *error = nil;
 
   auto createPipeline = [&](NSString *name) -> id<MTLComputePipelineState> {
     id<MTLFunction> func = [library newFunctionWithName:name];
-    if (!func)
+    if (!func) {
+      lastError_ = "Missing shader function: " + std::string([name UTF8String]);
       return nil;
+    }
 
     id<MTLComputePipelineState> pipeline =
         [device_ newComputePipelineStateWithFunction:func error:&error];
     if (error) {
+      lastError_ =
+          "Failed to create pipeline: " + std::string([name UTF8String]) +
+          " - " + std::string([error.localizedDescription UTF8String]);
       return nil;
     }
     return pipeline;
@@ -522,6 +551,17 @@ id<MTLTexture> Engine::processFrame(id<MTLTexture> inputTexture,
       config_.outputWidth > 0 ? config_.outputWidth : baseWidth;
   size_t outputHeight =
       config_.outputHeight > 0 ? config_.outputHeight : baseHeight;
+
+  static int logCounter = 0;
+  if (logCounter++ % 120 == 0) {
+    NSLog(@"[MG-DEBUG] processFrame: input=%zux%zu base=%zux%zu output=%zux%zu "
+          @"upscaleMode=%u upscaleFactor=%.2f renderScale=%.2f "
+          @"configBase=%ux%u configOut=%ux%u",
+          inputWidth, inputHeight, baseWidth, baseHeight, outputWidth,
+          outputHeight, static_cast<uint32_t>(config_.upscaleMode),
+          config_.upscaleFactor, config_.renderScaleFactor, config_.baseWidth,
+          config_.baseHeight, config_.outputWidth, config_.outputHeight);
+  }
 
   bool needsResize = (outputWidth != inputWidth || outputHeight != inputHeight);
   if (!needsResize && config_.upscaleFactor > 1.0f &&

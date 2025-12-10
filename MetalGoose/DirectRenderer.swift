@@ -353,7 +353,12 @@ final class DirectRenderer: NSObject, MTKViewDelegate {
                 self.currentStats = DirectEngine_GetStats(engine)
                 self.currentFPS = DirectEngine_GetCurrentFPS(engine)
                 self.captureFPS = DirectEngine_GetCaptureFPS(engine)
-                self.interpolatedFPS = DirectEngine_GetInterpolatedFPS(engine)
+                let rawInterpFPS = DirectEngine_GetInterpolatedFPS(engine)
+                if self.interpolatedFPS > 0 {
+                    self.interpolatedFPS = self.interpolatedFPS * 0.85 + rawInterpFPS * 0.15
+                } else {
+                    self.interpolatedFPS = rawInterpFPS
+                }
                 
                 if capturedIsInterpolated {
                     self.frameCount += 1

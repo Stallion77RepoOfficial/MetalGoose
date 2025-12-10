@@ -250,7 +250,6 @@ final class CaptureSettings: ObservableObject {
                 String(localized: "Temporal AA - motion-compensated, best quality", comment: "AA mode description: TAA")
             }
         }
-
         
         var isTemporal: Bool {
             return self == .taa

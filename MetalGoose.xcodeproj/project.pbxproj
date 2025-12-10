@@ -91,7 +91,6 @@
 			knownRegions = (
 				en,
 				Base,
-				hu,
 			);
 			mainGroup = 19FDA0B12ED66F9100F64E76;
 			minimizedProjectReferenceProxies = 1;
@@ -187,7 +186,6 @@
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
-				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
 			name = Debug;
@@ -246,7 +244,6 @@
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
-				SWIFT_EMIT_LOC_STRINGS = YES;
 			};
 			name = Release;
 		};
@@ -269,6 +266,8 @@
 					"$(PROJECT_DIR)/metal-cpp/SingleHeader",
 				);
 				INFOPLIST_FILE = "Config/MetalGoose-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = MetalGoose;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -331,6 +330,8 @@
 					"$(PROJECT_DIR)/metal-cpp/SingleHeader",
 				);
 				INFOPLIST_FILE = "Config/MetalGoose-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = MetalGoose;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
