@@ -924,7 +924,6 @@ struct DirectFrameEngineOpaque {
   }
 
   engine->hasNewFrame.store(true, std::memory_order_release);
-  engine->frameNumber.fetch_add(1, std::memory_order_relaxed);
 
   double captureWallTime = CACurrentMediaTime();
   if (timestamp > 0) {
@@ -1242,14 +1241,14 @@ bool DirectEngine_StartCapture(DirectEngineRef engine) {
 
     engine->contentFilter = filter;
 
-    engine->captureStream = [[SCStream alloc] initWithFilter:filter
-                                               configuration:config
-                                                    delegate:nil];
-
     if (!gStreamOutput) {
       gStreamOutput = [[DirectEngineStreamOutput alloc] init];
     }
     gStreamOutput.engine = engine;
+
+    engine->captureStream = [[SCStream alloc] initWithFilter:filter
+                                               configuration:config
+                                                    delegate:gStreamOutput];
 
     NSError *streamError = nil;
     [engine->captureStream addStreamOutput:gStreamOutput

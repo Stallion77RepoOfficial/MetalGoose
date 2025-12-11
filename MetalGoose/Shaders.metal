@@ -41,11 +41,16 @@ inline float rgb2luma(float3 rgb) {
 }
 
 inline float3 srgbToLinear(float3 srgb) {
-    return pow(srgb, float3(2.2));
+    float3 below = srgb / 12.92;
+    float3 above = pow((srgb + 0.055) / 1.055, float3(2.4));
+    // select prefers bool mask; mix requires float mask, so avoid implicit bool overload.
+    return select(above, below, srgb <= float3(0.04045f));
 }
 
 inline float3 linearToSrgb(float3 linear) {
-    return pow(linear, float3(1.0 / 2.2));
+    float3 below = linear * 12.92;
+    float3 above = 1.055 * pow(linear, float3(1.0 / 2.4)) - 0.055;
+    return select(above, below, linear <= float3(0.0031308f));
 }
 
 inline half rgb2lumaH(half3 rgb) {
@@ -253,10 +258,11 @@ kernel void mgfg1MotionEstimationOptimized(
     }
     
     half conf = saturate(1.0h - minSAD * 5.0h);
-    
+
     bestMotion *= half(params.motionScale);
     
-    motionVectors.write(half4(bestMotion, minSAD, 1.0h), gid);
+    // Store confidence in .w so downstream consumers (e.g., TAA) can use it.
+    motionVectors.write(half4(bestMotion, minSAD, conf), gid);
     confidence.write(half4(conf, conf, conf, 1.0h), gid);
 }
 
@@ -334,7 +340,8 @@ kernel void mgfg1MotionEstimation(
     
     bestMotion *= params.motionScale;
     
-    motionVectors.write(float4(bestMotion, minSAD, 1.0), gid);
+    // Store confidence in .w so downstream consumers (e.g., TAA) can use it.
+    motionVectors.write(float4(bestMotion, minSAD, conf), gid);
     confidence.write(float4(conf, conf, conf, 1.0), gid);
 }
 

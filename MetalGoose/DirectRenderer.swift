@@ -40,6 +40,8 @@ final class DirectRenderer: NSObject, MTKViewDelegate {
     private var frameCount: Int = 0
     private var renderPipelineState: MTLRenderPipelineState?
     private var sampler: MTLSamplerState?
+    private var configuredTargetFPS: Int = 60
+    private var configuredOutputSize: CGSize?
     
     init?(device: MTLDevice? = nil, commandQueue: MTLCommandQueue? = nil) {
         guard let dev = device ?? MTLCreateSystemDefaultDevice() else {
@@ -124,6 +126,8 @@ final class DirectRenderer: NSObject, MTKViewDelegate {
         cfg.sharpness = settings.sharpening
         cfg.temporalBlend = settings.temporalBlend
         cfg.motionScale = settings.motionScale
+        configuredTargetFPS = targetFPS
+        configuredOutputSize = outputSize ?? sourceSize
         
         DirectEngine_SetConfig(engine, cfg)
         
@@ -173,13 +177,14 @@ final class DirectRenderer: NSObject, MTKViewDelegate {
         let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first
         guard let targetScreen else { return }
         
-        let displaySize = size ?? targetScreen.frame.size
+        let displaySize = size ?? configuredOutputSize ?? targetScreen.frame.size
+        let refresh = max(30, configuredTargetFPS)
         
         let config = OverlayWindowConfig(
             targetScreen: targetScreen,
             windowFrame: windowFrame,
             size: displaySize,
-            refreshRate: frameGenEnabled ? 120.0 : 60.0,
+            refreshRate: Double(refresh),
             vsyncEnabled: vsyncEnabled,
             adaptiveSyncEnabled: adaptiveSyncEnabled,
             passThrough: true
@@ -198,8 +203,7 @@ final class DirectRenderer: NSObject, MTKViewDelegate {
         view.enableSetNeedsDisplay = false
         view.isPaused = false
         
-        let targetFPS = frameGenEnabled ? 120 : 60
-        view.preferredFramesPerSecond = targetFPS
+        view.preferredFramesPerSecond = refresh
         view.delegate = self
         
         if let layer = view.layer as? CAMetalLayer {

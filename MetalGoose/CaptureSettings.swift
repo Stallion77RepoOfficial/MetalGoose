@@ -1,4 +1,3 @@
-
 import SwiftUI
 import MetalFX
 
@@ -239,15 +238,15 @@ final class CaptureSettings: ObservableObject {
         var description: String {
             switch self {
             case .off:
-                String(localized: "No anti-aliasing - sharpest but aliased", comment: "AA mode description: No AA")
+                return String(localized: "No anti-aliasing - sharpest but aliased", comment: "AA mode description: No AA")
             case .fxaa:
-                String(localized: "Fast Approximate AA - quick, slight blur", comment: "AA mode description: FXAA")
+                return String(localized: "Fast Approximate AA - quick, slight blur", comment: "AA mode description: FXAA")
             case .smaa:
-                String(localized: "Subpixel Morphological AA - high quality edges", comment: "AA mode description: SMAA")
+                return String(localized: "Subpixel Morphological AA - high quality edges", comment: "AA mode description: SMAA")
             case .msaa:
-                String(localized: "Multisample AA - hardware-like, clean edges", comment: "AA mode description: MSAA")
+                return String(localized: "Multisample AA - hardware-like, clean edges", comment: "AA mode description: MSAA")
             case .taa:
-                String(localized: "Temporal AA - motion-compensated, best quality", comment: "AA mode description: TAA")
+                return String(localized: "Temporal AA - motion-compensated, best quality", comment: "AA mode description: TAA")
             }
         }
         
@@ -346,6 +345,8 @@ final class CaptureSettings: ObservableObject {
         defaults.set(showMGHUD, forKey: prefix + "showMGHUD")
         defaults.set(vsync, forKey: prefix + "vsync")
         defaults.set(sharpening, forKey: prefix + "sharpening")
+        defaults.set(temporalBlend, forKey: prefix + "temporalBlend")
+        defaults.set(motionScale, forKey: prefix + "motionScale")
         
         if !profiles.contains(name) {
             profiles.append(name)
@@ -412,6 +413,12 @@ final class CaptureSettings: ObservableObject {
         if defaults.object(forKey: prefix + "sharpening") != nil {
             sharpening = defaults.float(forKey: prefix + "sharpening")
         }
+        if defaults.object(forKey: prefix + "temporalBlend") != nil {
+            temporalBlend = defaults.float(forKey: prefix + "temporalBlend")
+        }
+        if defaults.object(forKey: prefix + "motionScale") != nil {
+            motionScale = defaults.float(forKey: prefix + "motionScale")
+        }
         
         selectedProfile = name
     }
@@ -427,7 +434,7 @@ final class CaptureSettings: ObservableObject {
         let keys = ["renderScale", "scalingType", "qualityMode", "scaleFactor",
                     "frameGenMode", "frameGenType", "targetFPS", "frameGenMultiplier", "aaMode",
                     "captureCursor", "reduceLatency", "adaptiveSync",
-                    "showMGHUD", "vsync", "sharpening"]
+                    "showMGHUD", "vsync", "sharpening", "temporalBlend", "motionScale"]
         for key in keys {
             defaults.removeObject(forKey: prefix + key)
         }

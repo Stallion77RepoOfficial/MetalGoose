@@ -331,7 +331,11 @@
         }
       }
     },
+    "Profile: \"%@\"" : {
+
+    },
     "Profile: \"Default\"" : {
+      "extractionState" : "stale",
       "localizations" : {
         "hu" : {
           "stringUnit" : {

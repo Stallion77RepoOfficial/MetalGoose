@@ -45,6 +45,8 @@ struct EngineConfig {
   bool adaptiveQuality = true;
   float temporalBlend = 0.1f;
   bool enableTemporalAccumulation = true;
+  bool useMotionVectors = true;
+  float motionScale = 1.0f;
 };
 
 struct FrameData {
@@ -714,7 +716,7 @@ Engine::generateInterpolatedFrame(id<MTLTexture> prevTexture,
     pipeline = balancedPipeline_;
     break;
   case FrameGenQuality::Quality:
-    pipeline = qualityPipeline_;
+    pipeline = config_.useMotionVectors ? qualityPipeline_ : balancedPipeline_;
     break;
   }
 
@@ -774,6 +776,8 @@ void Engine::computeMotionVectors(id<MTLTexture> prevTex,
   if (!motionEstimationPipeline_ || !motionVectorTexture_ ||
       !confidenceTexture_)
     return;
+  if (!config_.useMotionVectors)
+    return;
 
   id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
   if (!encoder)
@@ -781,7 +785,7 @@ void Engine::computeMotionVectors(id<MTLTexture> prevTex,
 
   MGFG1Params params;
   params.t = 0.5f;
-  params.motionScale = 1.0f;
+  params.motionScale = config_.motionScale;
   params.occlusionThreshold = 0.15f;
   params.temporalWeight = config_.temporalBlend;
   params.textureSize =
@@ -821,6 +825,9 @@ void Engine::computeMotionVectors(id<MTLTexture> prevTex,
 void Engine::computeMotionVectorsPyramid(id<MTLTexture> prevTex,
                                          id<MTLTexture> currTex,
                                          id<MTLCommandBuffer> commandBuffer) {
+  if (!config_.useMotionVectors) {
+    return;
+  }
   if (!pyramidDownsample2xPipeline_ || !pyramidMotionPipeline_ ||
       !upsampleMotionPipeline_) {
     computeMotionVectors(prevTex, currTex, commandBuffer);
@@ -924,7 +931,7 @@ Engine::interpolateWithMotion(id<MTLTexture> prevTex, id<MTLTexture> currTex,
 
   MGFG1Params params;
   params.t = t;
-  params.motionScale = 1.0f;
+  params.motionScale = config_.motionScale;
   params.occlusionThreshold = 0.15f;
   params.temporalWeight = config_.temporalBlend;
   params.textureSize =
@@ -1148,7 +1155,8 @@ id<MTLTexture> Engine::applyTAA(id<MTLTexture> inputTexture,
     return inputTexture;
   }
 
-  if (previousFrameTexture_ && motionEstimationPipeline_) {
+  if (previousFrameTexture_ && motionEstimationPipeline_ &&
+      config_.useMotionVectors) {
     ensureMotionTextures(inputTexture.width, inputTexture.height);
     computeMotionVectors(previousFrameTexture_, inputTexture, commandBuffer);
   }
@@ -1301,6 +1309,8 @@ void Engine_SetConfig(Engine *engine, void *configPtr) {
       cfg->outputWidth > 0 ? static_cast<uint32_t>(cfg->outputWidth) : 0;
   engineConfig.outputHeight =
       cfg->outputHeight > 0 ? static_cast<uint32_t>(cfg->outputHeight) : 0;
+  engineConfig.useMotionVectors = cfg->useMotionVectors;
+  engineConfig.motionScale = cfg->motionScale;
 
   switch (cfg->frameGenQuality) {
   case 0:

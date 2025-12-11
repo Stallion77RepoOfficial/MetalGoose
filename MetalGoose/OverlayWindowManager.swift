@@ -213,7 +213,7 @@ final class OverlayWindowManager: ObservableObject {
             height: bounds["Height"] ?? 100
         )
         
-        let screenH = NSScreen.main?.frame.height ?? 1080
+        let screenH = (window.screen ?? NSScreen.main)?.frame.height ?? 1080
         
         let nsFrame = CGRect(
             x: cgFrame.origin.x,

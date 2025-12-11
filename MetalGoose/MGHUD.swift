@@ -65,6 +65,7 @@ final class MGHUDData: ObservableObject {
         aaMode = settings.aaMode.rawValue
         scaleFactor = "\(settings.scaleFactor.rawValue)"
         renderScale = settings.renderScale.rawValue
+        targetFPS = settings.effectiveTargetFPS
     }
 }
 

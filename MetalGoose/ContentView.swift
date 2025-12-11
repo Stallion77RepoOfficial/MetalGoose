@@ -176,10 +176,16 @@ struct ContentView: View {
         .onChange(of: settings.vsync, initial: false) { _, _ in directRenderer?.configure(from: settings) }
         .onChange(of: settings.scaleFactor, initial: false) { _, _ in directRenderer?.configure(from: settings) }
         .onChange(of: settings.scalingType, initial: false) { _, _ in directRenderer?.configure(from: settings) }
+        .onChange(of: settings.qualityMode, initial: false) { _, _ in directRenderer?.configure(from: settings) }
         .onChange(of: settings.frameGenMode, initial: false) { _, _ in directRenderer?.configure(from: settings) }
+        .onChange(of: settings.frameGenType, initial: false) { _, _ in directRenderer?.configure(from: settings) }
+        .onChange(of: settings.frameGenMultiplier, initial: false) { _, _ in directRenderer?.configure(from: settings) }
+        .onChange(of: settings.targetFPS, initial: false) { _, _ in directRenderer?.configure(from: settings) }
         .onChange(of: settings.aaMode, initial: false) { _, _ in directRenderer?.configure(from: settings) }
         .onChange(of: settings.renderScale, initial: false) { _, _ in directRenderer?.configure(from: settings) }
         .onChange(of: settings.sharpening, initial: false) { _, _ in directRenderer?.configure(from: settings) }
+        .onChange(of: settings.temporalBlend, initial: false) { _, _ in directRenderer?.configure(from: settings) }
+        .onChange(of: settings.motionScale, initial: false) { _, _ in directRenderer?.configure(from: settings) }
         .onChange(of: settings.showMGHUD, initial: false) { _, newValue in
             if newValue && isScalingActive {
                 hudController.show(compact: false)
@@ -199,7 +205,7 @@ struct ContentView: View {
     
     private var headerSection: some View {
         HStack {
-            Text("Profile: \"Default\"")
+            Text("Profile: \"\(settings.selectedProfile)\"")
                 .font(.largeTitle).bold()
             Spacer()
 
@@ -449,10 +455,17 @@ struct ContentView: View {
             return
         }
 
-        let outputFrame = resolvedDisplayFrame(for: nsRect)
-        let desiredRefresh = 120.0
+        let screen = screenContaining(nsRect) ?? NSScreen.main
+        guard let screen else {
+            alertMessage = "No target display found for the selected window."
+            showAlert = true
+            return
+        }
+
+        let outputFrame = screen.frame
+        let desiredRefresh = Double(settings.effectiveTargetFPS)
         
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let scale = screen.backingScaleFactor
         let userScale = CGFloat(settings.scaleFactor.floatValue)
         
         let sourceSize = nsRect.size
@@ -469,7 +482,7 @@ struct ContentView: View {
             outputSize: outputSize
         )
 
-        renderer.attachToScreen(NSScreen.main, size: sourceSize, windowFrame: nsRect)
+        renderer.attachToScreen(screen, size: outputSize, windowFrame: nsRect)
 
         if renderer.startCapture(windowID: wid, pid: app.processIdentifier) {
             connectedProcessName = app.localizedName ?? "Unknown"
@@ -524,11 +537,15 @@ struct ContentView: View {
     }
 
     private func resolvedDisplayFrame(for sourceFrame: CGRect) -> CGRect {
-        let center = CGPoint(x: sourceFrame.midX, y: sourceFrame.midY)
-        if let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) {
+        if let screen = screenContaining(sourceFrame) {
             return screen.frame
         }
         return NSScreen.main?.frame ?? sourceFrame
+    }
+
+    private func screenContaining(_ frame: CGRect) -> NSScreen? {
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        return NSScreen.screens.first(where: { $0.frame.contains(center) })
     }
 }
 
