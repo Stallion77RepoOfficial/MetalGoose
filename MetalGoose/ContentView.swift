@@ -61,6 +61,18 @@ struct ContentView: View {
         NavigationSplitView {
             VStack(alignment: .leading) {
 
+                HStack {
+                    Image("GooseLogo")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 40, height: 40)
+                        .cornerRadius(8)
+                    Text("MetalGoose")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                }
+                .padding([.top, .horizontal])
+
                 VStack(alignment: .leading, spacing: 12) {
                                 Text(String(localized: "Scaling Info", defaultValue: "Scaling Info"))
                                     .font(.headline)
