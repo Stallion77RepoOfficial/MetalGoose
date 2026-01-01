@@ -117,6 +117,9 @@ final class OverlayWindowManager: ObservableObject {
         window.contentView = view
         mtkView = view
         
+        window.ignoresMouseEvents = true
+        window.acceptsMouseMovedEvents = false
+        
         if let screen = window.screen ?? NSScreen.main {
             let scale = screen.backingScaleFactor
             view.drawableSize = CGSize(

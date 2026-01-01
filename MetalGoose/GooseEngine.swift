@@ -469,12 +469,105 @@ final class GooseEngine: NSObject, ObservableObject, SCStreamDelegate, SCStreamO
         }
     }
     
+    func startCaptureFromVirtualDisplay(_ virtualDisplayManager: VirtualDisplayManager, refreshRate: Int = 60) -> Bool {
+        guard virtualDisplayManager.isActive else {
+            lastError = "Virtual display is not active"
+            return false
+        }
+        
+        self.virtualDisplayManager = virtualDisplayManager
+        
+        virtualDisplayManager.onFrameReceived = { [weak self] surface, timestamp in
+            guard let self = self else { return }
+            Task { @MainActor in
+                self.processIOSurfaceFrame(surface: surface, timestamp: timestamp)
+            }
+        }
+        
+        guard virtualDisplayManager.startFrameCapture(refreshRate: refreshRate) else {
+            lastError = virtualDisplayManager.lastError ?? "Failed to start frame capture"
+            return false
+        }
+        
+        self.isCapturing = true
+        self.frameCount = 0
+        self.fpsStartTime = CACurrentMediaTime()
+        
+        return true
+    }
+    
+    private func processIOSurfaceFrame(surface: IOSurfaceRef, timestamp: Double) {
+        let currentTime = CACurrentMediaTime()
+        
+        frameCount += 1
+        stats.frameCount += 1
+        stats.gpuMemoryUsed = UInt64(device.currentAllocatedSize)
+        stats.gpuMemoryTotal = UInt64(device.recommendedMaxWorkingSetSize)
+        
+        let elapsed = currentTime - fpsStartTime
+        if elapsed >= 1.0 {
+            stats.captureFPS = Float(frameCount) / Float(elapsed)
+            stats.frameTime = Float((currentTime - lastFrameTime) * 1000.0)
+            stats.captureLatency = Float((currentTime - timestamp) * 1000.0)
+            
+            frameCount = 0
+            fpsStartTime = currentTime
+        }
+        lastFrameTime = currentTime
+        
+        let w = IOSurfaceGetWidth(surface)
+        let h = IOSurfaceGetHeight(surface)
+        
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
+        desc.usage = [.shaderRead]
+        guard let inputTex = device.makeTexture(descriptor: desc, iosurface: surface, plane: 0) else { return }
+        
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        
+        let outW = Int(outputSize.width)
+        let outH = Int(outputSize.height)
+        
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: outW, height: outH, mipmapped: false)
+        outDesc.usage = [.shaderRead, .shaderWrite]
+        guard let newFrameTex = device.makeTexture(descriptor: outDesc) else { return }
+        
+        if let upscalePipe = upscalePipeline, let compute = commandBuffer.makeComputeCommandEncoder() {
+             struct UpscaleParams {
+                var sharpness: Float
+                var inputSize: SIMD2<UInt32>
+                var outputSize: SIMD2<UInt32>
+            }
+            var params = UpscaleParams(sharpness: sharpness, 
+                                     inputSize: SIMD2(UInt32(w), UInt32(h)), 
+                                     outputSize: SIMD2(UInt32(outW), UInt32(outH)))
+                                     
+            compute.setComputePipelineState(upscalePipe)
+            compute.setTexture(inputTex, index: 0)
+            compute.setTexture(newFrameTex, index: 1)
+            compute.setBytes(&params, length: MemoryLayout<UpscaleParams>.size, index: 0)
+            
+            let threadW = upscalePipe.threadExecutionWidth
+            let threadH = upscalePipe.maxTotalThreadsPerThreadgroup / threadW
+            let grid = MTLSize(width: (outW + threadW - 1) / threadW, height: (outH + threadH - 1) / threadH, depth: 1)
+            compute.dispatchThreadgroups(grid, threadsPerThreadgroup: MTLSize(width: threadW, height: threadH, depth: 1))
+            compute.endEncoding()
+        }
+        
+        commandBuffer.commit()
+        
+        frameBuffer.push(FrameHistory(texture: newFrameTex, timestamp: currentTime))
+    }
+    
     func stopCapture() {
         isCapturing = false
+        
         if let stream = stream {
             Task { try? await stream.stopCapture() }
         }
         stream = nil
+        
+        virtualDisplayManager?.stopFrameCapture()
+        virtualDisplayManager?.onFrameReceived = nil
     }
     
     nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}

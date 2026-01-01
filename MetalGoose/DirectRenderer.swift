@@ -4,6 +4,15 @@ import Metal
 import MetalKit
 import IOSurface
 import QuartzCore
+import CoreGraphics
+
+@available(macOS 26.0, *)
+@MainActor
+class PassThroughMTKView: MTKView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        return nil
+    }
+}
 
 @available(macOS 26.0, *)
 @MainActor
@@ -43,6 +52,7 @@ final class DirectRenderer: NSObject, MTKViewDelegate {
     private var configuredTargetFPS: Int = 60
     private var configuredOutputSize: CGSize?
     
+
     init?(device: MTLDevice? = nil, commandQueue: MTLCommandQueue? = nil) {
         guard let dev = device ?? MTLCreateSystemDefaultDevice() else {
             return nil
@@ -84,6 +94,7 @@ final class DirectRenderer: NSObject, MTKViewDelegate {
         samplerDesc.sAddressMode = .clampToEdge
         samplerDesc.tAddressMode = .clampToEdge
         self.sampler = dev.makeSamplerState(descriptor: samplerDesc)
+        
     }
     
     deinit {
@@ -194,7 +205,7 @@ final class DirectRenderer: NSObject, MTKViewDelegate {
             return
         }
         
-        let view = MTKView(frame: CGRect(origin: .zero, size: displaySize), device: device)
+        let view = PassThroughMTKView(frame: CGRect(origin: .zero, size: displaySize), device: device)
         view.clearColor = MTLClearColorMake(0, 0, 0, 0)
         view.colorPixelFormat = .bgra8Unorm
         view.framebufferOnly = true
@@ -266,6 +277,7 @@ final class DirectRenderer: NSObject, MTKViewDelegate {
                 currentTexture = processed
                 displayTexture = processed
                 
+
                 let frameDelta = startTime - lastRealFrameTime
                 lastRealFrameTime = startTime
                 
@@ -444,4 +456,5 @@ final class DirectRenderer: NSObject, MTKViewDelegate {
         guard let engine else { return }
         DirectEngine_ResetStats(engine)
     }
+    
 }

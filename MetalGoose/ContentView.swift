@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var overlayManager: OverlayWindowManager?
     @State private var gooseMtkView: MTKView?
     @State private var windowMigrator: WindowMigrator?
+    @State private var mouseEventRouter: MouseEventRouter?
 
     @State private var connectedProcessName: String = "-"
     @State private var connectedPID: Int32 = 0
@@ -464,47 +465,56 @@ struct ContentView: View {
                 frameGenEnabled: settings.frameGenMode != .off
             )
             
-            Task {
-                let success = await engine.startCaptureFromDisplay(displayID: virtualDisplayID)
-                if success {
-                    connectedProcessName = app.localizedName ?? "Unknown"
-                    connectedPID = app.processIdentifier
-                    connectedWindowID = wid
-                    connectedSize = virtualRes
-                    isScalingActive = true
+            let success = engine.startCaptureFromVirtualDisplay(vdManager, refreshRate: 60)
+            if success {
+                connectedProcessName = app.localizedName ?? "Unknown"
+                connectedPID = app.processIdentifier
+                connectedWindowID = wid
+                connectedSize = virtualRes
+                isScalingActive = true
+                
+                let config = OverlayWindowConfig(
+                    targetScreen: mainScreen,
+                    windowFrame: mainScreen.frame,
+                    size: mainScreen.frame.size,
+                    refreshRate: 120.0,
+                    vsyncEnabled: settings.vsync,
+                    adaptiveSyncEnabled: settings.adaptiveSync,
+                    passThrough: true
+                )
+                
+                if overlay.createOverlay(config: config) {
+                    let mtkView = MTKView(frame: CGRect(origin: .zero, size: mainScreen.frame.size))
+                    overlay.setMTKView(mtkView)
+                    engine.attachToView(mtkView)
+                    gooseMtkView = mtkView
                     
-                    let config = OverlayWindowConfig(
-                        targetScreen: mainScreen,
-                        windowFrame: mainScreen.frame,
-                        size: mainScreen.frame.size,
-                        refreshRate: 120.0,
-                        vsyncEnabled: settings.vsync,
-                        adaptiveSyncEnabled: settings.adaptiveSync,
-                        passThrough: true
+                    if self.mouseEventRouter == nil {
+                        self.mouseEventRouter = MouseEventRouter()
+                    }
+                    self.mouseEventRouter?.configure(
+                        overlayFrame: mainScreen.frame,
+                        overlayScreen: mainScreen,
+                        virtualDisplayID: virtualDisplayID,
+                        virtualSize: virtualRes
                     )
-                    
-                    if overlay.createOverlay(config: config) {
-                        let mtkView = MTKView(frame: CGRect(origin: .zero, size: mainScreen.frame.size))
-                        overlay.setMTKView(mtkView)
-                        engine.attachToView(mtkView)
-                        gooseMtkView = mtkView
-                    }
-                    
-                    NSApp.setActivationPolicy(.accessory)
-                    NSApp.deactivate()
-                    startStatsTimer()
-                    
-                    if settings.showMGHUD {
-                        hudController.show(compact: false)
-                        hudController.setDeviceName(engine.deviceName)
-                        hudController.setResolutions(capture: virtualRes, output: outputSize)
-                    }
-                } else {
-                    alertMessage = engine.lastError ?? "Display capture failed"
-                    showAlert = true
-                    migrator.restoreWindow()
-                    vdManager.destroyDisplay()
+                    self.mouseEventRouter?.startRouting()
                 }
+                
+                NSApp.setActivationPolicy(.accessory)
+                NSApp.deactivate()
+                startStatsTimer()
+                
+                if settings.showMGHUD {
+                    hudController.show(compact: false)
+                    hudController.setDeviceName(engine.deviceName)
+                    hudController.setResolutions(capture: virtualRes, output: outputSize)
+                }
+            } else {
+                alertMessage = engine.lastError ?? "Display capture failed"
+                showAlert = true
+                migrator.restoreWindow()
+                vdManager.destroyDisplay()
             }
         }
     }
@@ -515,6 +525,8 @@ struct ContentView: View {
         
         statsTimer?.invalidate()
         statsTimer = nil
+        
+        mouseEventRouter?.stopRouting()
         
         gooseEngine?.detachFromView()
         overlayManager?.destroyOverlay()

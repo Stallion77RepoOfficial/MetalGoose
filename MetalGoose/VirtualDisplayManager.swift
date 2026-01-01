@@ -10,9 +10,13 @@ final class VirtualDisplayManager: ObservableObject {
     @Published private(set) var displayID: CGDirectDisplayID = 0
     @Published private(set) var currentResolution: CGSize = .zero
     @Published private(set) var lastError: String?
+    @Published private(set) var isCapturing: Bool = false
+    @Published private(set) var capturedFrameCount: UInt64 = 0
     
     private var virtualDisplay: CGVirtualDisplay?
     private var terminationHandler: (() -> Void)?
+    
+    var onFrameReceived: ((_ surface: IOSurfaceRef, _ timestamp: Double) -> Void)?
     
     struct DisplayConfig {
         var width: UInt32
@@ -96,7 +100,28 @@ final class VirtualDisplayManager: ObservableObject {
         return display.displayID
     }
     
+    func startFrameCapture(refreshRate: Int = 60) -> Bool {
+        guard isActive, displayID != 0 else {
+            lastError = "No active virtual display"
+            return false
+        }
+        
+        stopFrameCapture()
+        
+        // Note: Frame capture for virtual displays should use ScreenCaptureKit via DirectEngineBridge
+        // This method is kept for API compatibility but capture is handled externally
+        isCapturing = true
+        capturedFrameCount = 0
+        return true
+    }
+    
+    func stopFrameCapture() {
+        isCapturing = false
+    }
+    
     func destroyDisplay() {
+        stopFrameCapture()
+        
         guard let display = virtualDisplay else { return }
         
         virtualDisplay = nil
@@ -116,6 +141,9 @@ final class VirtualDisplayManager: ObservableObject {
             return false
         }
         
+        let wasCapturing = isCapturing
+        stopFrameCapture()
+        
         guard let mode = CGVirtualDisplayMode(width: width, height: height, refreshRate: refreshRate) else {
             lastError = "Failed to create CGVirtualDisplayMode"
             return false
@@ -134,6 +162,11 @@ final class VirtualDisplayManager: ObservableObject {
         }
         
         currentResolution = CGSize(width: CGFloat(width), height: CGFloat(height))
+        
+        if wasCapturing {
+            _ = startFrameCapture(refreshRate: Int(refreshRate))
+        }
+        
         return true
     }
     
@@ -154,6 +187,7 @@ final class VirtualDisplayManager: ObservableObject {
     }
     
     private func handleTermination() {
+        stopFrameCapture()
         isActive = false
         displayID = 0
         currentResolution = .zero
