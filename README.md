@@ -89,51 +89,63 @@ open MetalGoose.xcodeproj
 |----------|--------|
 | `⌘ + T` | Toggle Scale |
 
-## Architecture
+# MetalGoose Error Codes
 
-```
-MetalGoose/
-├── ContentView.swift      # Main SwiftUI interface
-├── DirectRenderer.swift   # Metal rendering pipeline
-├── DirectEngineBridge.mm  # Objective-C++ bridge layer
-├── Engine.mm              # Core C++ processing engine
-├── Shaders.metal          # GPU compute shaders
-├── MGHUD.swift           # Performance overlay
-└── CaptureSettings.swift  # Settings management
-```
+## UI (MG-UI)
+- MG-UI-002: Frontmost app is MetalGoose; user must switch to target window.
+- MG-UI-003: Target window not found for the selected app.
+- MG-UI-004: No display found.
+- MG-UI-005: Fullscreen window detected; virtual display requires windowed or borderless mode.
+- MG-UI-006: Target window bounds unavailable.
+- MG-UI-007: Display ID not found for target screen.
+- MG-UI-008: Display refresh rate unavailable.
 
-### Technology Stack
-- **SwiftUI** — Modern declarative UI
-- **Metal 4** — GPU-accelerated processing
-- **ScreenCaptureKit** — Low-latency screen capture
-- **MetalPerformanceShaders** — Optimized GPU operations
+## Engine (MG-ENG)
+- MG-ENG-001: Metal pipeline setup failed.
+- MG-ENG-002: Metal device not available.
+- MG-ENG-003: Metal command queue not available.
+- MG-ENG-004: MetalFX Spatial Scaler creation failed.
+- MG-ENG-005: Optical flow pipeline unavailable.
+- MG-ENG-006: Frame interpolation failed.
+- MG-ENG-007: Anti-aliasing pipeline unavailable.
+- MG-ENG-008: Scale pipeline unavailable.
+- MG-ENG-009: CAS pipeline unavailable.
+- MG-ENG-010: IOSurface texture creation failed.
+- MG-ENG-011: Optical flow pipeline unavailable.
+- MG-ENG-012: Optical flow resources unavailable.
+- MG-ENG-013: Frame generation pipeline unavailable.
 
-## Performance Tips
+## Virtual Display (MG-VD)
+- MG-VD-001: CGVirtualDisplayDescriptor creation failed.
+- MG-VD-002: CGVirtualDisplay creation failed.
+- MG-VD-003: CGVirtualDisplayMode creation failed.
+- MG-VD-004: CGVirtualDisplaySettings creation failed.
+- MG-VD-005: Applying virtual display settings failed.
+- MG-VD-006: No active virtual display.
+- MG-VD-007: Virtual display not found in ScreenCaptureKit.
+- MG-VD-008: ScreenCaptureKit start capture failed.
+- MG-VD-009: ScreenCaptureKit stop capture failed.
+- MG-VD-010: ScreenCaptureKit stream stopped with error.
 
-1. **Use Balanced mode** for the best quality/performance ratio
-2. **Lower render scale** if experiencing lag
-3. **Enable VSync** to reduce tearing
-4. **Reduce Latency** option available for competitive gaming
-5. **Adaptive frame gen** automatically adjusts to game FPS
+## Accessibility / Window Migration (MG-AX)
+- MG-AX-001: Accessibility permission not granted.
+- MG-AX-002: Failed to read window list from AX API.
+- MG-AX-003: No windows found for target PID.
+- MG-AX-004: Failed to create AX position value.
+- MG-AX-005: Failed to set AX window position.
+- MG-AX-006: Fullscreen window cannot be moved to virtual display.
+- MG-AX-007: Failed to create AX size value.
+- MG-AX-008: Failed to set AX window size.
+- MG-AX-009: Virtual display screen not found.
+- MG-AX-010: Window ID not found for target PID.
 
-## Troubleshooting
+## Overlay (MG-OV)
+- MG-OV-001: Target screen missing for overlay creation.
+- MG-OV-002: Window frame missing for overlay creation.
+- MG-OV-003: Unsupported pixel format for overlay texture creation.
 
-| Issue | Solution |
-|-------|----------|
-| Black screen | Grant Screen Recording permission in System Settings |
-| Low FPS | Lower render scale or disable frame generation |
-| High latency | Enable "Reduce Latency" option |
-| App not detecting windows | Restart MetalGoose and grant Accessibility permission |
-
-## Contributing
-
-Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) before submitting a pull request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+## Mouse Routing (MG-MO)
+- MG-MO-001: Virtual display not configured for mouse routing.
 
 ## License
 

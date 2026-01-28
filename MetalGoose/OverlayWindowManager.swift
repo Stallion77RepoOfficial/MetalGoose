@@ -12,18 +12,6 @@ struct OverlayWindowConfig {
     var vsyncEnabled: Bool
     var adaptiveSyncEnabled: Bool
     var passThrough: Bool
-    
-    static var `default`: OverlayWindowConfig {
-        OverlayWindowConfig(
-            targetScreen: NSScreen.main,
-            windowFrame: nil,
-            size: NSScreen.main?.frame.size ?? CGSize(width: 1920, height: 1080),
-            refreshRate: 120.0,
-            vsyncEnabled: true,
-            adaptiveSyncEnabled: true,
-            passThrough: true
-        )
-    }
 }
 
 class NonActivatingWindow: NSWindow {
@@ -51,8 +39,8 @@ final class OverlayWindowManager: ObservableObject {
     private var targetPID: pid_t = 0
     private var appObserver: Any?
     
-    init?(device: MTLDevice? = nil) {
-        guard let dev = device ?? MTLCreateSystemDefaultDevice() else {
+    init?() {
+        guard let dev = MTLCreateSystemDefaultDevice() else {
             return nil
         }
         guard let queue = dev.makeCommandQueue() else {
@@ -74,16 +62,18 @@ final class OverlayWindowManager: ObservableObject {
         }
     }
     
-    func createOverlay(config: OverlayWindowConfig = .default) -> Bool {
+    func createOverlay(config: OverlayWindowConfig) -> Bool {
         destroyOverlay()
         
-        let targetScreen = config.targetScreen ?? NSScreen.main ?? NSScreen.screens.first
-        guard let screen = targetScreen else {
-            lastError = "No screen available"
+        guard let screen = config.targetScreen else {
+            lastError = "Error Code: MG-OV-001 No screen available"
             return false
         }
         
-        let frame = config.windowFrame ?? screen.frame
+        guard let frame = config.windowFrame else {
+            lastError = "Error Code: MG-OV-002 Missing window frame"
+            return false
+        }
         currentSize = frame.size
         
         let window = NonActivatingWindow(
@@ -99,8 +89,8 @@ final class OverlayWindowManager: ObservableObject {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = false
-        window.ignoresMouseEvents = true 
-        window.acceptsMouseMovedEvents = false
+        window.ignoresMouseEvents = config.passThrough
+        window.acceptsMouseMovedEvents = !config.passThrough
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         
         overlayWindow = window
@@ -113,20 +103,16 @@ final class OverlayWindowManager: ObservableObject {
     
     func setMTKView(_ view: MTKView) {
         guard let window = overlayWindow else { return }
-        view.frame = window.contentView?.bounds ?? CGRect(origin: .zero, size: currentSize)
+        view.frame = CGRect(origin: .zero, size: currentSize)
         window.contentView = view
         mtkView = view
         
-        window.ignoresMouseEvents = true
-        window.acceptsMouseMovedEvents = false
-        
-        if let screen = window.screen ?? NSScreen.main {
-            let scale = screen.backingScaleFactor
-            view.drawableSize = CGSize(
-                width: currentSize.width * scale,
-                height: currentSize.height * scale
-            )
-        }
+        guard let screen = window.screen else { return }
+        let scale = screen.backingScaleFactor
+        view.drawableSize = CGSize(
+            width: currentSize.width * scale,
+            height: currentSize.height * scale
+        )
     }
     
     func destroyOverlay() {
@@ -153,7 +139,9 @@ final class OverlayWindowManager: ObservableObject {
         case kCVPixelFormatType_32BGRA: mtlPixelFormat = .bgra8Unorm
         case kCVPixelFormatType_32RGBA: mtlPixelFormat = .rgba8Unorm
         case kCVPixelFormatType_64RGBAHalf: mtlPixelFormat = .rgba16Float
-        default: mtlPixelFormat = .bgra8Unorm
+        default:
+            lastError = "Error Code: MG-OV-003 Unsupported pixel format: \(pixelFormat)"
+            return nil
         }
         
         var cvTexture: CVMetalTexture?
@@ -208,20 +196,20 @@ final class OverlayWindowManager: ObservableObject {
             return
         }
         
-        let isOnScreen = info[kCGWindowIsOnscreen as String] as? Bool ?? true
+        let isOnScreen = (info[kCGWindowIsOnscreen as String] as? Bool) == true
         if !isOnScreen {
             window.orderOut(nil)
             return
         }
         
-        let cgFrame = CGRect(
-            x: bounds["X"] ?? 0,
-            y: bounds["Y"] ?? 0,
-            width: bounds["Width"] ?? 100,
-            height: bounds["Height"] ?? 100
-        )
+        guard let boundX = bounds["X"],
+              let boundY = bounds["Y"],
+              let boundW = bounds["Width"],
+              let boundH = bounds["Height"],
+              let screen = window.screen else { return }
         
-        let screenH = (window.screen ?? NSScreen.main)?.frame.height ?? 1080
+        let cgFrame = CGRect(x: boundX, y: boundY, width: boundW, height: boundH)
+        let screenH = screen.frame.height
         
         let nsFrame = CGRect(
             x: cgFrame.origin.x,
@@ -237,7 +225,7 @@ final class OverlayWindowManager: ObservableObject {
         if window.frame != nsFrame {
             window.setFrame(nsFrame, display: false)
             
-            if let view = mtkView, let screen = window.screen ?? NSScreen.main {
+            if let view = mtkView, let screen = window.screen {
                 view.frame = CGRect(origin: .zero, size: nsFrame.size)
                 view.drawableSize = CGSize(
                     width: nsFrame.width * screen.backingScaleFactor,
@@ -251,8 +239,8 @@ final class OverlayWindowManager: ObservableObject {
     var metalDevice: MTLDevice { device }
     var metalCommandQueue: MTLCommandQueue { commandQueue }
     
-    var drawableSize: CGSize {
-        mtkView?.drawableSize ?? .zero
+    var drawableSize: CGSize? {
+        return mtkView?.drawableSize
     }
     
     func setVisible(_ visible: Bool) {

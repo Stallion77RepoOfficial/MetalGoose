@@ -27,7 +27,9 @@ final class MGHUDData: ObservableObject {
     @Published var textureMemory: UInt64 = 0
     
     @Published var framesProcessed: UInt64 = 0
+    @Published var framesPresented: UInt64 = 0
     @Published var framesInterpolated: UInt64 = 0
+    @Published var framesPassthrough: UInt64 = 0
     @Published var framesDropped: UInt64 = 0
     
     @Published var upscaleMode: String = "Off"
@@ -38,27 +40,29 @@ final class MGHUDData: ObservableObject {
     @Published var blitEncoders: UInt32 = 0
     @Published var commandBuffers: UInt32 = 0
     
-    func update(from stats: DirectEngineStats, settings: CaptureSettings) {
+    func update(from stats: PipelineStats, settings: CaptureSettings) {
         captureFPS = stats.captureFPS
-        outputFPS = stats.fps
+        outputFPS = stats.outputFPS
         interpolatedFPS = stats.interpolatedFPS
         
         frameTime = stats.frameTime
         gpuTime = stats.gpuTime
         captureLatency = stats.captureLatency
-        presentLatency = stats.presentLatency
+        presentLatency = 0
         
         gpuMemoryUsed = stats.gpuMemoryUsed
         gpuMemoryTotal = stats.gpuMemoryTotal
-        textureMemory = stats.textureMemoryUsed
+        textureMemory = 0
         
         framesProcessed = stats.frameCount
+        framesPresented = stats.outputFrameCount
         framesInterpolated = stats.interpolatedFrameCount
+        framesPassthrough = stats.passthroughFrameCount
         framesDropped = stats.droppedFrames
         
-        computeEncoders = stats.computeEncoders
-        blitEncoders = stats.blitEncoders
-        commandBuffers = stats.commandBuffers
+        computeEncoders = 0
+        blitEncoders = 0
+        commandBuffers = 0
         
         upscaleMode = settings.scalingType.rawValue
         frameGenMode = settings.isFrameGenEnabled ? "MGFG-1 \(settings.frameGenMultiplier.rawValue)" : "Off"
@@ -122,7 +126,7 @@ struct MGHUDView: View {
             HUDRow(label: "Capture", value: captureFPSText, compact: isCompact, color: fpsColor(data.captureFPS, target: Float(data.targetFPS)))
             HUDRow(label: "Output", value: outputFPSText, compact: isCompact, color: fpsColor(data.outputFPS, target: Float(data.targetFPS)))
             
-            if data.interpolatedFPS > data.captureFPS {
+            if data.frameGenMode != "Off" || data.interpolatedFPS > 0 {
                 HUDRow(label: "Interpolated", value: interpFPSText, compact: isCompact, color: .cyan)
             }
         }
@@ -153,15 +157,10 @@ struct MGHUDView: View {
     private var memorySection: some View {
         let usedMB = Double(data.gpuMemoryUsed) / (1024.0 * 1024.0)
         let totalMB = Double(data.gpuMemoryTotal) / (1024.0 * 1024.0)
-        let textureMB = Double(data.textureMemory) / (1024.0 * 1024.0)
-        
-        let effectiveUsed = usedMB > 0.1 ? usedMB : textureMB
-        let effectiveTotal = totalMB > 0.1 ? totalMB : max(textureMB * 8, 1024.0)
-        let percent = effectiveTotal > 0 ? (effectiveUsed / effectiveTotal) * 100 : 0
-        
-        let vramText: String = effectiveUsed >= 1.0
-            ? String(format: "%.0f / %.0f MB (%.0f%%)", effectiveUsed, effectiveTotal, percent)
-            : String(format: "%.1f KB", effectiveUsed * 1024.0)
+        let percent = totalMB > 0 ? (usedMB / totalMB) * 100 : 0
+        let vramText: String = usedMB >= 1.0
+            ? String(format: "%.0f / %.0f MB (%.0f%%)", usedMB, totalMB, percent)
+            : String(format: "%.1f KB", usedMB * 1024.0)
         
         let memoryColor: Color = percent > 90 ? .red : (percent > 75 ? .orange : (percent > 50 ? .yellow : .white))
         
@@ -181,8 +180,10 @@ struct MGHUDView: View {
     
     @ViewBuilder
     private var frameStatsSection: some View {
-        HUDRow(label: "Frames", value: "\(data.framesProcessed)", compact: isCompact)
+        HUDRow(label: "Captured", value: "\(data.framesProcessed)", compact: isCompact)
+        HUDRow(label: "Presented", value: "\(data.framesPresented)", compact: isCompact)
         HUDRow(label: "Interpolated", value: "\(data.framesInterpolated)", compact: isCompact)
+        HUDRow(label: "Passthrough", value: "\(data.framesPassthrough)", compact: isCompact)
         HUDRow(label: "Dropped", value: "\(data.framesDropped)", compact: isCompact, color: data.framesDropped > 0 ? .red : .white)
     }
     
@@ -267,7 +268,7 @@ class MGHUDOverlayView: NSView {
         hostingView = hosting
     }
     
-    func update(stats: DirectEngineStats, settings: CaptureSettings) {
+    func update(stats: PipelineStats, settings: CaptureSettings) {
         Task { @MainActor in
             hudData.update(from: stats, settings: settings)
         }
@@ -297,12 +298,25 @@ class MGHUDOverlayView: NSView {
             hudData.framesProcessed = stats.frameCount
             hudData.framesDropped = stats.droppedFrames
             hudData.framesInterpolated = stats.interpolatedFrameCount
+            hudData.framesPresented = stats.outputFrameCount
+            hudData.framesPassthrough = stats.passthroughFrameCount
             
             hudData.gpuMemoryUsed = stats.gpuMemoryUsed
             hudData.gpuMemoryTotal = stats.gpuMemoryTotal
             
-            hudData.upscaleMode = "mgup-1"
-            hudData.frameGenMode = settings.frameGenMode.rawValue
+            if stats.virtualResolution.width > 0 && stats.virtualResolution.height > 0 {
+                hudData.captureResolution = "\(Int(stats.virtualResolution.width))x\(Int(stats.virtualResolution.height))"
+            }
+            if stats.outputResolution.width > 0 && stats.outputResolution.height > 0 {
+                hudData.outputResolution = "\(Int(stats.outputResolution.width))x\(Int(stats.outputResolution.height))"
+            }
+            
+            hudData.upscaleMode = settings.scalingType.rawValue
+            hudData.frameGenMode = settings.isFrameGenEnabled ? "MGFG-1 \(settings.frameGenMultiplier.rawValue)" : "Off"
+            hudData.aaMode = settings.aaMode.rawValue
+            hudData.scaleFactor = "\(settings.scaleFactor.rawValue)"
+            hudData.renderScale = settings.renderScale.rawValue
+            hudData.targetFPS = settings.effectiveTargetFPS
         }
     }
 }
@@ -319,8 +333,8 @@ final class MGHUDWindowController {
         case topLeft, topRight, bottomLeft, bottomRight
     }
     
-    func show(on screen: NSScreen? = nil, corner: Corner = .topLeft, compact: Bool = false) {
-        let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first!
+    func show(on screen: NSScreen, corner: Corner = .topLeft, compact: Bool = false) {
+        let targetScreen = screen
         
         let hudSize = compact ? CGSize(width: 180, height: 150) : CGSize(width: 220, height: 350)
         
@@ -375,7 +389,7 @@ final class MGHUDWindowController {
         hudView = nil
     }
     
-    func update(stats: DirectEngineStats, settings: CaptureSettings) {
+    func update(stats: PipelineStats, settings: CaptureSettings) {
         hudView?.update(stats: stats, settings: settings)
     }
     
@@ -392,6 +406,6 @@ final class MGHUDWindowController {
     }
     
     var isVisible: Bool {
-        hudWindow?.isVisible ?? false
+        return hudWindow?.isVisible == true
     }
 }

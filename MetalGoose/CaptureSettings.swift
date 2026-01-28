@@ -1,5 +1,4 @@
 import SwiftUI
-import MetalFX
 
 @available(macOS 26.0, *)
 final class CaptureSettings: ObservableObject {
@@ -41,24 +40,13 @@ final class CaptureSettings: ObservableObject {
     enum ScalingType: String, CaseIterable, Identifiable {
         case off = "Off"
         case mgup1 = "MGUP-1"
-        case mgup1Fast = "MGUP-1 Fast"
-        case mgup1Quality = "MGUP-1 Quality"
         
         var id: String { rawValue }
-        
-        var usesMetalFX: Bool {
-            switch self {
-            case .off, .mgup1Fast: return false
-            case .mgup1, .mgup1Quality: return true
-            }
-        }
         
         var description: String {
             switch self {
             case .off: return "No upscaling - original resolution passthrough"
-            case .mgup1: return "MetalGoose Upscaler - Balanced MetalFX AI upscaling"
-            case .mgup1Fast: return "MetalGoose Fast - Bilinear + Adaptive Sharpening"
-            case .mgup1Quality: return "MetalGoose Quality - MetalFX Spatial + CAS"
+            case .mgup1: return "MetalGoose Upscaler - MetalFX Spatial + CAS"
             }
         }
     }
@@ -70,19 +58,11 @@ final class CaptureSettings: ObservableObject {
         
         var id: String { rawValue }
         
-        var scalerMode: MTLFXSpatialScalerColorProcessingMode {
-            switch self {
-            case .performance: return .linear
-            case .balanced: return .perceptual
-            case .ultra: return .hdr
-            }
-        }
-        
         var description: String {
             switch self {
-            case .performance: return "Linear processing - fastest, slight color shift"
-            case .balanced: return "Perceptual processing - best balance"
-            case .ultra: return "HDR processing - highest quality, wider gamut"
+            case .performance: return "Lower sharpening and faster filtering"
+            case .balanced: return "Balanced sharpness and stability"
+            case .ultra: return "Higher sharpness and lower temporal blend"
             }
         }
     }
@@ -125,7 +105,7 @@ final class CaptureSettings: ObservableObject {
             case .x2: return "2.0x - Standard upscale, recommended"
             case .x2_5: return "2.5x - Good for 1080p→2.7K"
             case .x3: return "3.0x - Good for 720p→2160p"
-            case .x4: return "4.0x - Maximum for MetalFX Temporal"
+            case .x4: return "4.0x - Maximum for high-quality temporal"
             case .x5: return "5.0x - High upscale ratio"
             case .x6: return "6.0x - Very high ratio"
             case .x8: return "8.0x - Extreme upscale"
@@ -143,7 +123,7 @@ final class CaptureSettings: ObservableObject {
         var description: String {
             switch self {
             case .off: return "No frame generation - lowest latency"
-            case .mgfg1: return "MetalGoose Frame Generation - Optical flow interpolation"
+            case .mgfg1: return "MetalGoose Frame Gen - GPU Optical Flow"
             }
         }
     }
@@ -197,6 +177,45 @@ final class CaptureSettings: ObservableObject {
             case .fps180: return "180 FPS - Ultra high refresh"
             case .fps240: return "240 FPS - Competitive/Pro"
             case .fps360: return "360 FPS - Extreme/Esports"
+            }
+        }
+    }
+
+    enum VirtualRefreshRate: String, CaseIterable, Identifiable {
+        case hz60 = "60 Hz"
+        case hz90 = "90 Hz"
+        case hz120 = "120 Hz"
+        case hz144 = "144 Hz"
+        case hz165 = "165 Hz"
+        case hz180 = "180 Hz"
+        case hz240 = "240 Hz"
+        case hz360 = "360 Hz"
+
+        var id: String { rawValue }
+
+        var intValue: Int {
+            switch self {
+            case .hz60: return 60
+            case .hz90: return 90
+            case .hz120: return 120
+            case .hz144: return 144
+            case .hz165: return 165
+            case .hz180: return 180
+            case .hz240: return 240
+            case .hz360: return 360
+            }
+        }
+
+        static func fromTargetFPS(_ target: TargetFPS) -> VirtualRefreshRate {
+            switch target {
+            case .fps60: return .hz60
+            case .fps90: return .hz90
+            case .fps120: return .hz120
+            case .fps144: return .hz144
+            case .fps165: return .hz165
+            case .fps180: return .hz180
+            case .fps240: return .hz240
+            case .fps360: return .hz360
             }
         }
     }
@@ -270,7 +289,7 @@ final class CaptureSettings: ObservableObject {
         
         var description: String {
             switch self {
-            case .native: return "No virtual display - original resolution"
+            case .native: return "Virtual display matches window size"
             case .r1440p: return "Virtual 1440p - good for 4K displays"
             case .r1080p: return "Virtual 1080p - 2-3× FPS boost typical"
             case .r900p: return "Virtual 900p - significant FPS boost"
@@ -292,10 +311,9 @@ final class CaptureSettings: ObservableObject {
     @Published var aaMode: AAMode = .off
     
     @Published var virtualResolution: VirtualResolution = .native
-    @Published var useGooseEngine: Bool = false
+    @Published var virtualRefreshRate: VirtualRefreshRate = .hz120
     
     @Published var captureCursor: Bool = true
-    @Published var reduceLatency: Bool = true
     @Published var adaptiveSync: Bool = true
     @Published var showMGHUD: Bool = true
     @Published var vsync: Bool = true
@@ -332,12 +350,12 @@ final class CaptureSettings: ObservableObject {
     }
     
     var effectiveTargetFPS: Int {
-        guard isFrameGenEnabled else { return 60 }
+        guard isFrameGenEnabled else { return targetFPS.intValue }
         switch frameGenType {
         case .adaptive:
             return targetFPS.intValue
         case .fixed:
-            return 60 * frameGenMultiplier.intValue
+            return targetFPS.intValue * frameGenMultiplier.intValue
         }
     }
     
@@ -346,7 +364,7 @@ final class CaptureSettings: ObservableObject {
             return frameGenMultiplier.intValue
         }
         let needed = Float(targetFPS.intValue) / sourceFPS
-        return max(1, min(4, Int(ceil(needed))))
+        return Int(ceil(needed))
     }
     
     func saveProfile(_ name: String) {
@@ -363,7 +381,6 @@ final class CaptureSettings: ObservableObject {
         defaults.set(frameGenMultiplier.rawValue, forKey: prefix + "frameGenMultiplier")
         defaults.set(aaMode.rawValue, forKey: prefix + "aaMode")
         defaults.set(captureCursor, forKey: prefix + "captureCursor")
-        defaults.set(reduceLatency, forKey: prefix + "reduceLatency")
         defaults.set(adaptiveSync, forKey: prefix + "adaptiveSync")
         defaults.set(showMGHUD, forKey: prefix + "showMGHUD")
         defaults.set(vsync, forKey: prefix + "vsync")
@@ -371,7 +388,7 @@ final class CaptureSettings: ObservableObject {
         defaults.set(temporalBlend, forKey: prefix + "temporalBlend")
         defaults.set(motionScale, forKey: prefix + "motionScale")
         defaults.set(virtualResolution.rawValue, forKey: prefix + "virtualResolution")
-        defaults.set(useGooseEngine, forKey: prefix + "useGooseEngine")
+        defaults.set(virtualRefreshRate.rawValue, forKey: prefix + "virtualRefreshRate")
         
         if !profiles.contains(name) {
             profiles.append(name)
@@ -412,16 +429,22 @@ final class CaptureSettings: ObservableObject {
            
         if let vr = defaults.string(forKey: prefix + "virtualResolution"),
            let val = VirtualResolution(rawValue: vr) { virtualResolution = val }
+
+        if let vrr = defaults.string(forKey: prefix + "virtualRefreshRate") {
+            if let val = VirtualRefreshRate(rawValue: vrr) {
+                virtualRefreshRate = val
+            } else if let legacy = TargetFPS(rawValue: vrr) {
+                virtualRefreshRate = VirtualRefreshRate.fromTargetFPS(legacy)
+            }
+        }
         
         if defaults.object(forKey: prefix + "captureCursor") != nil { captureCursor = defaults.bool(forKey: prefix + "captureCursor") }
-        if defaults.object(forKey: prefix + "reduceLatency") != nil { reduceLatency = defaults.bool(forKey: prefix + "reduceLatency") }
         if defaults.object(forKey: prefix + "adaptiveSync") != nil { adaptiveSync = defaults.bool(forKey: prefix + "adaptiveSync") }
         if defaults.object(forKey: prefix + "showMGHUD") != nil { showMGHUD = defaults.bool(forKey: prefix + "showMGHUD") }
         if defaults.object(forKey: prefix + "vsync") != nil { vsync = defaults.bool(forKey: prefix + "vsync") }
         if defaults.object(forKey: prefix + "sharpening") != nil { sharpening = defaults.float(forKey: prefix + "sharpening") }
         if defaults.object(forKey: prefix + "temporalBlend") != nil { temporalBlend = defaults.float(forKey: prefix + "temporalBlend") }
         if defaults.object(forKey: prefix + "motionScale") != nil { motionScale = defaults.float(forKey: prefix + "motionScale") }
-        if defaults.object(forKey: prefix + "useGooseEngine") != nil { useGooseEngine = defaults.bool(forKey: prefix + "useGooseEngine") }
         
         selectedProfile = name
     }
@@ -436,8 +459,9 @@ final class CaptureSettings: ObservableObject {
         let prefix = "MetalGoose.Profile.\(name)."
         let keys = ["renderScale", "scalingType", "qualityMode", "scaleFactor",
                     "frameGenMode", "frameGenType", "targetFPS", "frameGenMultiplier", "aaMode",
-                    "captureCursor", "reduceLatency", "adaptiveSync",
-                    "showMGHUD", "vsync", "sharpening", "temporalBlend", "motionScale", "virtualResolution", "useGooseEngine"]
+                    "captureCursor", "adaptiveSync",
+                    "showMGHUD", "vsync", "sharpening", "temporalBlend", "motionScale", "virtualResolution",
+                    "virtualRefreshRate"]
         for key in keys {
             defaults.removeObject(forKey: prefix + key)
         }
@@ -452,9 +476,11 @@ final class CaptureSettings: ObservableObject {
 }
 
 struct QualityProfile {
-    let scalerMode: MTLFXSpatialScalerColorProcessingMode
-    let sharpness: Float
-    let temporalBlend: Float
+    let sharpnessScale: Float
+    let temporalBlendScale: Float
+    let aaThreshold: Float
+    let smaaSearchSteps: Int
+    let frameGenGradientThreshold: Float
 }
 
 @available(macOS 26.0, *)
@@ -462,11 +488,29 @@ extension CaptureSettings.QualityMode {
     var profile: QualityProfile {
         switch self {
         case .performance:
-            return QualityProfile(scalerMode: .linear, sharpness: 0.3, temporalBlend: 0.15)
+            return QualityProfile(
+                sharpnessScale: 0.8,
+                temporalBlendScale: 1.2,
+                aaThreshold: 0.18,
+                smaaSearchSteps: 8,
+                frameGenGradientThreshold: 0.08
+            )
         case .balanced:
-            return QualityProfile(scalerMode: .perceptual, sharpness: 0.5, temporalBlend: 0.1)
+            return QualityProfile(
+                sharpnessScale: 1.0,
+                temporalBlendScale: 1.0,
+                aaThreshold: 0.12,
+                smaaSearchSteps: 12,
+                frameGenGradientThreshold: 0.06
+            )
         case .ultra:
-            return QualityProfile(scalerMode: .hdr, sharpness: 0.7, temporalBlend: 0.08)
+            return QualityProfile(
+                sharpnessScale: 1.2,
+                temporalBlendScale: 0.85,
+                aaThreshold: 0.08,
+                smaaSearchSteps: 16,
+                frameGenGradientThreshold: 0.045
+            )
         }
     }
 }

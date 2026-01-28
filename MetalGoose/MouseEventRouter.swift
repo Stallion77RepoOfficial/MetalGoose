@@ -51,7 +51,7 @@ final class MouseEventRouter: ObservableObject {
     func startRouting() {
         guard !isRouting else { return }
         guard virtualDisplayID != 0 else {
-            lastError = "Virtual display not configured"
+            lastError = "Error Code: MG-MO-001 Virtual display not configured"
             return
         }
         
@@ -90,30 +90,19 @@ final class MouseEventRouter: ObservableObject {
     
     private func handleMouseEvent(_ event: NSEvent) {
         let mouseLocation = NSEvent.mouseLocation
-        
-        guard let mainScreen = NSScreen.main else { return }
-        let screenHeight = mainScreen.frame.height
-        
-        let overlayInCocoaCoords = CGRect(
-            x: overlayFrame.origin.x,
-            y: screenHeight - overlayFrame.origin.y - overlayFrame.height,
-            width: overlayFrame.width,
-            height: overlayFrame.height
-        )
-        
-        guard overlayInCocoaCoords.contains(mouseLocation) else {
+
+        let overlayRect = overlayFrame
+        guard overlayRect.contains(mouseLocation) else {
             return
         }
         
-        let relativeX = (mouseLocation.x - overlayInCocoaCoords.origin.x) / overlayInCocoaCoords.width
-        let relativeY = (mouseLocation.y - overlayInCocoaCoords.origin.y) / overlayInCocoaCoords.height
+        let relativeX = (mouseLocation.x - overlayRect.origin.x) / overlayRect.width
+        let relativeY = (mouseLocation.y - overlayRect.origin.y) / overlayRect.height
         
         let targetX = virtualDisplayOrigin.x + (relativeX * virtualDisplaySize.width)
-        let targetY = virtualDisplayOrigin.y + ((1.0 - relativeY) * virtualDisplaySize.height)
+        let targetY = virtualDisplayOrigin.y + (relativeY * virtualDisplaySize.height)
         
         let targetPoint = CGPoint(x: targetX, y: targetY)
-        
-        CGWarpMouseCursorPosition(targetPoint)
         
         injectMouseEvent(event: event, at: targetPoint)
     }
@@ -165,8 +154,6 @@ final class MouseEventRouter: ObservableObject {
     }
     
     private func injectScrollEvent(event: NSEvent, at point: CGPoint) {
-        CGWarpMouseCursorPosition(point)
-        
         guard let scrollEvent = CGEvent(
             scrollWheelEvent2Source: nil,
             units: .pixel,

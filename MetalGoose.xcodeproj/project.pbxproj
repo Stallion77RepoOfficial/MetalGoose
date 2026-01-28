@@ -264,7 +264,6 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/metal-cpp/SingleHeader",
 				);
 				INFOPLIST_FILE = "Config/MetalGoose-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = MetalGoose;
@@ -288,8 +287,6 @@
 					MetalPerformanceShaders,
 					"-framework",
 					MetalPerformanceShadersGraph,
-					"-framework",
-					MetalFX,
 					"-framework",
 					QuartzCore,
 					"-framework",
@@ -328,7 +325,6 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/metal-cpp/SingleHeader",
 				);
 				INFOPLIST_FILE = "Config/MetalGoose-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = MetalGoose;
@@ -352,8 +348,6 @@
 					MetalPerformanceShaders,
 					"-framework",
 					MetalPerformanceShadersGraph,
-					"-framework",
-					MetalFX,
 					"-framework",
 					QuartzCore,
 					"-framework",

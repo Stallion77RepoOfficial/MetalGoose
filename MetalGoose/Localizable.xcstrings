@@ -29,7 +29,7 @@
     "%lld" : {
 
     },
-    "• Off: lowest latency\n• MGFG-1: optical-flow generation" : {
+    "• Off: lowest latency\n• MGFG-1: motion-aware interpolation" : {
 
     },
     "2× / 3× / 4×" : {
@@ -223,6 +223,9 @@
         }
       }
     },
+    "MetalGoose Upscaler - MetalFX Spatial + CAS" : {
+      "comment" : "Description text"
+    },
     "Method" : {
       "localizations" : {
         "hu" : {
@@ -274,9 +277,6 @@
         }
       }
     },
-    "Optimized pacing & submission." : {
-
-    },
     "Overlay" : {
       "comment" : "Toggle help text"
     },
@@ -308,6 +308,7 @@
       }
     },
     "Reduce Latency" : {
+      "extractionState" : "stale",
       "localizations" : {
         "hu" : {
           "stringUnit" : {
@@ -449,6 +450,7 @@
 
     },
     "Use GooseEngine" : {
+      "extractionState" : "stale",
       "localizations" : {
         "hu" : {
           "stringUnit" : {
@@ -458,13 +460,14 @@
         }
       }
     },
-    "Using MetalFX Spatial AI Upscaling" : {
+    "Using MGUP-1 Spatial Upscaling" : {
       "comment" : "Description text",
+      "extractionState" : "stale",
       "localizations" : {
         "hu" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "MetalFX M.I Képfelskálázó segítségével"
+            "value" : "MGUP-1 térbeli felskálázás használata"
           }
         }
       }

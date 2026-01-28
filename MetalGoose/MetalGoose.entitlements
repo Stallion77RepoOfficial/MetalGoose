@@ -17,38 +17,18 @@
 	<key>com.apple.security.device.audio-input</key>
 	<false/>
 	
-    <!-- TCC Bypass (Requires SIP Disabled) -->
     <key>com.apple.private.tcc.allow</key>
     <array>
         <string>kTCCServiceScreenCapture</string>
         <string>kTCCServiceAccessibility</string>
     </array>
-
-	<!-- IOKit Low-Level GPU Access -->
-	<key>com.apple.private.iokit.root-access</key>
-	<true/>
-	<key>com.apple.ioaccelerator.allow-all</key>
-	<true/>
-	<key>com.apple.private.iokit.user-client-access</key>
-	<array>
-		<string>AGXAccelerator</string>
-		<string>IOFramebuffer</string>
-	</array>
-	<!-- SkyLight Private Framework Access -->
-	<key>com.apple.private.skylight.presents-to-all-displays</key>
-	<true/>
-    <key>com.apple.private.window-server.framebuffer-access</key>
-    <true/>
     
-    <!-- System Privileges -->
     <key>com.apple.system.task_for_pid</key>
     <true/>
     
-	<!-- Skip code signing validation -->
 	<key>com.apple.private.amfi.can-load-cdhash</key>
 	<true/>
 	
-	<!-- IOKit Private Access - Fixes kIOReturnNotPrivileged (-536870201) -->
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
 	<key>com.apple.private.kernel.override-cpumon</key>
