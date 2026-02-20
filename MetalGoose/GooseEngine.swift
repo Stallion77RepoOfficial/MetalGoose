@@ -5,8 +5,11 @@ import AppKit
 @preconcurrency import MetalFX
 import IOSurface
 import QuartzCore
+import os
+import Vision
+import CoreVideo
 
-struct PipelineStats {
+struct PipelineStats: @unchecked Sendable {
     var captureFPS: Float = 0
     var outputFPS: Float = 0
     var interpolatedFPS: Float = 0
@@ -26,12 +29,31 @@ struct PipelineStats {
 }
 
 @available(macOS 26.0, *)
-@MainActor
-final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
+final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked Sendable {
     
+    // MARK: - Thread-safe published state
     @Published private(set) var isCapturing: Bool = false
-    @Published private(set) var stats: PipelineStats = PipelineStats()
     @Published private(set) var lastError: String?
+    
+    // Stats are read/written from processing queue, published to main for UI
+    private var _stats = PipelineStats()
+    private var statsLock = os_unfair_lock()
+    var stats: PipelineStats {
+        os_unfair_lock_lock(&statsLock)
+        defer { os_unfair_lock_unlock(&statsLock) }
+        return _stats
+    }
+    
+    // Dedicated GPU processing queue — all frame work happens here
+    private let processingQueue = DispatchQueue(label: "com.metalgoose.processing", qos: .userInteractive)
+    
+    // Triple buffering: allow up to 3 frames in-flight simultaneously
+    private let inFlightSemaphore = DispatchSemaphore(value: 3)
+    
+    // IOSurface texture pool — avoid per-frame MTLTexture allocation
+    private var ioSurfaceTexturePool: [MTLTexture?] = [nil, nil, nil]
+    private var ioSurfacePoolIndex: Int = 0
+    private var ioSurfacePoolSize: (width: Int, height: Int) = (0, 0)
     
     var deviceName: String { device.name }
     
@@ -56,11 +78,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
     private var copyPipeline: MTLComputePipelineState?
 
     // Optical flow / frame generation pipelines
-    private var lumaFromColorPipeline: MTLComputePipelineState?
-    private var lumaDownsamplePipeline: MTLComputePipelineState?
-    private var flowInitPipeline: MTLComputePipelineState?
-    private var flowRefinePipeline: MTLComputePipelineState?
-    private var flowUpsamplePipeline: MTLComputePipelineState?
     private var flowWarpPipeline: MTLComputePipelineState?
     private var flowComposePipeline: MTLComputePipelineState?
     private var flowOcclusionPipeline: MTLComputePipelineState?
@@ -80,12 +97,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
     private var taaHistoryTexture: MTLTexture?
     private var taaOutputTexture: MTLTexture?
     
-    // Optical flow resources
-    private var lumaPrevPyramid: [MTLTexture] = []
-    private var lumaNextPyramid: [MTLTexture] = []
-    private var flowPyramid: [MTLTexture] = []
-    private var flowScratchPyramid: [MTLTexture] = []
-    private var flowPyramidLevels: Int = 0
+    // Vision framework optical flow (ANE/GPU-powered)
+    // Managed by VisionFlowProvider class — no instance variables needed here
+    
     private var occlusionTexture: MTLTexture?
     private var warpedPrevTexture: MTLTexture?
     private var warpedNextTexture: MTLTexture?
@@ -109,7 +123,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
             if buffer.count > capacity {
                 buffer.removeFirst()
             }
-            buffer.sort { $0.timestamp < $1.timestamp }
         }
         
         func getFramesForTime(_ targetTime: CFTimeInterval) -> (prev: FrameHistory, next: FrameHistory)? {
@@ -175,7 +188,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
     private var vsyncEnabled: Bool = true
     private var qualityProfile: QualityProfile = CaptureSettings.QualityMode.balanced.profile
     
-    private let flowMaxLevels: Int = 5
     private let flowOcclusionThreshold: Float = 1.5
 
     private var estimatedCaptureInterval: Double = 0
@@ -230,14 +242,12 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         temporalPipeline = makeCompute("temporalReproject")
 
         // Optical flow / frame generation pipelines
-        lumaFromColorPipeline = makeCompute("lumaFromColor")
-        lumaDownsamplePipeline = makeCompute("lumaDownsample2x")
-        flowInitPipeline = makeCompute("flowInit")
-        flowRefinePipeline = makeCompute("flowRefine")
-        flowUpsamplePipeline = makeCompute("flowUpsample2x")
         flowWarpPipeline = makeCompute("flowWarp")
         flowComposePipeline = makeCompute("flowCompose")
         flowOcclusionPipeline = makeCompute("flowOcclusion")
+        
+        // Async Vision optical flow provider
+        visionFlowProvider = VisionFlowProvider(device: device, commandQueue: commandQueue)
 
         // Render pipeline
         do {
@@ -336,109 +346,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         return true
     }
     
-    private func flowLevels(for width: Int, height: Int) -> Int {
-        var w = width
-        var h = height
-        var levels = 1
-        while w > 32 && h > 32 && levels < flowMaxLevels {
-            w = max(1, w / 2)
-            h = max(1, h / 2)
-            levels += 1
-        }
-        return levels
-    }
-
-    private func flowRefineStopLevel(for width: Int, height: Int, levels: Int) -> Int {
-        let maxDim = max(width, height)
-        var stop: Int
-        switch qualityMode {
-        case .performance:
-            stop = min(2, levels - 1)
-        case .balanced:
-            stop = min(1, levels - 1)
-        case .ultra:
-            stop = 0
-        }
-        if maxDim >= 3840 {
-            stop = max(stop, 2)
-        } else if maxDim >= 2560 {
-            stop = max(stop, 1)
-        }
-        return min(stop, levels - 1)
-    }
-
-    private func effectiveFlowCoarseRadius() -> UInt32 {
-        switch qualityMode {
-        case .performance:
-            return 2
-        case .balanced:
-            return 3
-        case .ultra:
-            return 4
-        }
-    }
-
-    private func effectiveFlowRefineRadius() -> UInt32 {
-        switch qualityMode {
-        case .performance:
-            return 1
-        case .balanced:
-            return 2
-        case .ultra:
-            return 2
-        }
-    }
-    
-    private func makePyramidTexture(width: Int, height: Int, pixelFormat: MTLPixelFormat) -> MTLTexture? {
-        let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: pixelFormat,
-            width: width,
-            height: height,
-            mipmapped: false
-        )
-        desc.usage = [.shaderRead, .shaderWrite]
-        desc.storageMode = .private
-        return device.makeTexture(descriptor: desc)
-    }
-    
-    private func ensurePyramid(_ pyramid: inout [MTLTexture],
-                               levels: Int,
-                               width: Int,
-                               height: Int,
-                               pixelFormat: MTLPixelFormat) -> Bool {
-        if pyramid.count == levels,
-           let first = pyramid.first,
-           first.width == width,
-           first.height == height,
-           first.pixelFormat == pixelFormat {
-            return true
-        }
-        
-        pyramid.removeAll(keepingCapacity: true)
-        var w = width
-        var h = height
-        for _ in 0..<levels {
-            guard let tex = makePyramidTexture(width: w, height: h, pixelFormat: pixelFormat) else { return false }
-            pyramid.append(tex)
-            w = max(1, w / 2)
-            h = max(1, h / 2)
-        }
-        return pyramid.count == levels
-    }
-    
-    private func ensureFlowResources(width: Int, height: Int) -> Bool {
-        let levels = flowLevels(for: width, height: height)
-        let lumaOK = ensurePyramid(&lumaPrevPyramid, levels: levels, width: width, height: height, pixelFormat: .r16Float) &&
-                     ensurePyramid(&lumaNextPyramid, levels: levels, width: width, height: height, pixelFormat: .r16Float)
-        let flowOK = ensurePyramid(&flowPyramid, levels: levels, width: width, height: height, pixelFormat: .rg16Float) &&
-                     ensurePyramid(&flowScratchPyramid, levels: levels, width: width, height: height, pixelFormat: .rg16Float)
-        if lumaOK && flowOK {
-            flowPyramidLevels = levels
-            return true
-        }
-        return false
-    }
-
     private func dispatchThreads(pipeline: MTLComputePipelineState,
                                  encoder: MTLComputeCommandEncoder,
                                  width: Int,
@@ -452,150 +359,186 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         encoder.dispatchThreadgroups(grid, threadsPerThreadgroup: threadsPerGroup)
     }
     
-    private func computeOpticalFlow(prev: MTLTexture,
-                                    next: MTLTexture,
-                                    commandBuffer: MTLCommandBuffer) -> MTLTexture? {
-        guard let lumaFromColorPipeline = lumaFromColorPipeline,
-              let lumaDownsamplePipeline = lumaDownsamplePipeline,
-              let flowInitPipeline = flowInitPipeline,
-              let flowRefinePipeline = flowRefinePipeline,
-              let flowUpsamplePipeline = flowUpsamplePipeline else {
-            lastError = "Error Code: MG-ENG-011 Optical flow pipeline unavailable"
-            return nil
+    // MARK: - Async Vision Optical Flow Provider
+    
+    /// Async flow provider: runs VNGenerateOpticalFlowRequest on a dedicated queue.
+    /// The frame pipeline submits frame pairs and queries the latest available result.
+    private final class VisionFlowProvider {
+        private let device: MTLDevice
+        private let commandQueue: MTLCommandQueue
+        private let flowQueue = DispatchQueue(label: "com.metalgoose.visionflow", qos: .userInitiated)
+        private var textureCache: CVMetalTextureCache?
+        
+        // Latest computed flow pair (protected by lock)
+        private var lock = os_unfair_lock()
+        private var _forwardFlow: MTLTexture?
+        private var _backwardFlow: MTLTexture?
+        private var _flowFrameID: UInt64 = 0
+        private var isComputing = false
+        
+        // Track submitted frame ID to avoid redundant computation
+        private var submittedFrameID: UInt64 = 0
+        
+        struct FlowResult {
+            let forward: MTLTexture
+            let backward: MTLTexture
+            let frameID: UInt64
         }
         
-        guard ensureFlowResources(width: prev.width, height: prev.height) else {
-            lastError = "Error Code: MG-ENG-012 Optical flow resources unavailable"
-            return nil
+        init(device: MTLDevice, commandQueue: MTLCommandQueue) {
+            self.device = device
+            self.commandQueue = commandQueue
+            var cache: CVMetalTextureCache?
+            CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cache)
+            self.textureCache = cache
         }
         
-        guard let lumaPrev0 = lumaPrevPyramid.first,
-              let lumaNext0 = lumaNextPyramid.first else {
-            lastError = "Error Code: MG-ENG-012 Optical flow resources unavailable"
-            return nil
+        /// Returns the latest computed flow pair, or nil if not yet available
+        func latestFlow() -> FlowResult? {
+            os_unfair_lock_lock(&lock)
+            defer { os_unfair_lock_unlock(&lock) }
+            guard let fwd = _forwardFlow, let bwd = _backwardFlow else { return nil }
+            return FlowResult(forward: fwd, backward: bwd, frameID: _flowFrameID)
         }
         
-        // Level 0 luma from color
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.setComputePipelineState(lumaFromColorPipeline)
-            encoder.setTexture(prev, index: 0)
-            encoder.setTexture(lumaPrev0, index: 1)
-            dispatchThreads(pipeline: lumaFromColorPipeline, encoder: encoder, width: lumaPrev0.width, height: lumaPrev0.height)
-            encoder.endEncoding()
-        } else {
-            lastError = "Error Code: MG-ENG-011 Optical flow pipeline unavailable"
-            return nil
-        }
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.setComputePipelineState(lumaFromColorPipeline)
-            encoder.setTexture(next, index: 0)
-            encoder.setTexture(lumaNext0, index: 1)
-            dispatchThreads(pipeline: lumaFromColorPipeline, encoder: encoder, width: lumaNext0.width, height: lumaNext0.height)
-            encoder.endEncoding()
-        } else {
-            lastError = "Error Code: MG-ENG-011 Optical flow pipeline unavailable"
-            return nil
-        }
-        
-        // Downsample pyramid
-        if flowPyramidLevels > 1 {
-            for level in 1..<flowPyramidLevels {
-                let prevIn = lumaPrevPyramid[level - 1]
-                let nextIn = lumaNextPyramid[level - 1]
-                let prevOut = lumaPrevPyramid[level]
-                let nextOut = lumaNextPyramid[level]
-                guard let prevEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                    lastError = "Error Code: MG-ENG-011 Optical flow pipeline unavailable"
-                    return nil
+        /// Submit a frame pair for async flow computation (non-blocking)
+        func submitFlowRequest(prev: MTLTexture, next: MTLTexture, frameID: UInt64) {
+            os_unfair_lock_lock(&lock)
+            let alreadyComputing = isComputing
+            os_unfair_lock_unlock(&lock)
+            
+            // Skip if already computing — we'll pick up the next frame
+            if alreadyComputing { return }
+            
+            os_unfair_lock_lock(&lock)
+            isComputing = true
+            os_unfair_lock_unlock(&lock)
+            
+            // Read texture data to CPU-accessible buffers on the current thread
+            // (this is fast — just creates IOSurface-backed pixel buffers and blits)
+            guard let prevPB = createPixelBuffer(width: prev.width, height: prev.height),
+                  let nextPB = createPixelBuffer(width: next.width, height: next.height),
+                  let blitBuf = commandQueue.makeCommandBuffer() else {
+                os_unfair_lock_lock(&lock)
+                isComputing = false
+                os_unfair_lock_unlock(&lock)
+                return
+            }
+            
+            blitTexture(prev, to: prevPB, commandBuffer: blitBuf)
+            blitTexture(next, to: nextPB, commandBuffer: blitBuf)
+            blitBuf.commit()
+            
+            // Run Vision flow async on dedicated queue
+            let width = prev.width
+            let height = prev.height
+            flowQueue.async { [weak self] in
+                guard let self = self else { return }
+                defer {
+                    os_unfair_lock_lock(&self.lock)
+                    self.isComputing = false
+                    os_unfair_lock_unlock(&self.lock)
                 }
-                prevEncoder.setComputePipelineState(lumaDownsamplePipeline)
-                prevEncoder.setTexture(prevIn, index: 0)
-                prevEncoder.setTexture(prevOut, index: 1)
-                dispatchThreads(pipeline: lumaDownsamplePipeline, encoder: prevEncoder, width: prevOut.width, height: prevOut.height)
-                prevEncoder.endEncoding()
-                guard let nextEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                    lastError = "Error Code: MG-ENG-011 Optical flow pipeline unavailable"
-                    return nil
-                }
-                nextEncoder.setComputePipelineState(lumaDownsamplePipeline)
-                nextEncoder.setTexture(nextIn, index: 0)
-                nextEncoder.setTexture(nextOut, index: 1)
-                dispatchThreads(pipeline: lumaDownsamplePipeline, encoder: nextEncoder, width: nextOut.width, height: nextOut.height)
-                nextEncoder.endEncoding()
+                
+                // Wait for blit to finish
+                blitBuf.waitUntilCompleted()
+                
+                // Forward flow: prev → next
+                let forwardFlow = self.runVisionFlow(source: prevPB, target: nextPB, width: width, height: height)
+                // Backward flow: next → prev
+                let backwardFlow = self.runVisionFlow(source: nextPB, target: prevPB, width: width, height: height)
+                
+                guard let fwd = forwardFlow, let bwd = backwardFlow else { return }
+                
+                // Store results
+                os_unfair_lock_lock(&self.lock)
+                self._forwardFlow = fwd
+                self._backwardFlow = bwd
+                self._flowFrameID = frameID
+                os_unfair_lock_unlock(&self.lock)
             }
         }
         
-        // Coarse flow init
-        let lastLevel = flowPyramidLevels - 1
-        let lumaPrevCoarse = lumaPrevPyramid[lastLevel]
-        let lumaNextCoarse = lumaNextPyramid[lastLevel]
-        let flowCoarse = flowPyramid[lastLevel]
-        var initParams = FlowInitParams(searchRadius: effectiveFlowCoarseRadius())
-        guard let initEncoder = commandBuffer.makeComputeCommandEncoder() else {
-            lastError = "Error Code: MG-ENG-011 Optical flow pipeline unavailable"
-            return nil
-        }
-        initEncoder.setComputePipelineState(flowInitPipeline)
-        initEncoder.setTexture(lumaPrevCoarse, index: 0)
-        initEncoder.setTexture(lumaNextCoarse, index: 1)
-        initEncoder.setTexture(flowCoarse, index: 2)
-        initEncoder.setBytes(&initParams, length: MemoryLayout<FlowInitParams>.size, index: 0)
-        dispatchThreads(pipeline: flowInitPipeline, encoder: initEncoder, width: flowCoarse.width, height: flowCoarse.height)
-        initEncoder.endEncoding()
-        
-        if flowPyramidLevels > 1 {
-            let refineStopLevel = flowRefineStopLevel(for: prev.width, height: prev.height, levels: flowPyramidLevels)
-            let refineRadius = effectiveFlowRefineRadius()
-            if flowPyramidLevels - 1 > refineStopLevel {
-                for level in stride(from: flowPyramidLevels - 2, through: refineStopLevel, by: -1) {
-                    let flowUp = flowScratchPyramid[level]
-                    let flowOut = flowPyramid[level]
-                    let lumaPrevLevel = lumaPrevPyramid[level]
-                    let lumaNextLevel = lumaNextPyramid[level]
-                    var refineParams = FlowRefineParams(searchRadius: refineRadius)
-
-                    guard let upEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                        lastError = "Error Code: MG-ENG-011 Optical flow pipeline unavailable"
-                        return nil
-                    }
-
-                    upEncoder.setComputePipelineState(flowUpsamplePipeline)
-                    upEncoder.setTexture(flowPyramid[level + 1], index: 0)
-                    upEncoder.setTexture(flowUp, index: 1)
-                    dispatchThreads(pipeline: flowUpsamplePipeline, encoder: upEncoder, width: flowUp.width, height: flowUp.height)
-                    upEncoder.endEncoding()
-                    guard let refineEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                        lastError = "Error Code: MG-ENG-011 Optical flow pipeline unavailable"
-                        return nil
-                    }
-                    refineEncoder.setComputePipelineState(flowRefinePipeline)
-                    refineEncoder.setTexture(lumaPrevLevel, index: 0)
-                    refineEncoder.setTexture(lumaNextLevel, index: 1)
-                    refineEncoder.setTexture(flowUp, index: 2)
-                    refineEncoder.setTexture(flowOut, index: 3)
-                    refineEncoder.setBytes(&refineParams, length: MemoryLayout<FlowRefineParams>.size, index: 0)
-                    dispatchThreads(pipeline: flowRefinePipeline, encoder: refineEncoder, width: flowOut.width, height: flowOut.height)
-                    refineEncoder.endEncoding()
-                }
-            }
-
-            if refineStopLevel > 0 {
-                for level in stride(from: refineStopLevel - 1, through: 0, by: -1) {
-                    guard let upEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                        lastError = "Error Code: MG-ENG-011 Optical flow pipeline unavailable"
-                        return nil
-                    }
-                    upEncoder.setComputePipelineState(flowUpsamplePipeline)
-                    upEncoder.setTexture(flowPyramid[level + 1], index: 0)
-                    upEncoder.setTexture(flowPyramid[level], index: 1)
-                    dispatchThreads(pipeline: flowUpsamplePipeline, encoder: upEncoder, width: flowPyramid[level].width, height: flowPyramid[level].height)
-                    upEncoder.endEncoding()
-                }
-            }
+        func reset() {
+            os_unfair_lock_lock(&lock)
+            _forwardFlow = nil
+            _backwardFlow = nil
+            _flowFrameID = 0
+            os_unfair_lock_unlock(&lock)
         }
         
-        return flowPyramid.first
+        private func runVisionFlow(source: CVPixelBuffer, target: CVPixelBuffer,
+                                   width: Int, height: Int) -> MTLTexture? {
+            let request = VNGenerateOpticalFlowRequest(targetedCVPixelBuffer: target)
+            request.computationAccuracy = .medium
+            request.outputPixelFormat = kCVPixelFormatType_TwoComponent16Half
+            
+            let handler = VNImageRequestHandler(cvPixelBuffer: source, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                return nil
+            }
+            
+            guard let observation = request.results?.first as? VNPixelBufferObservation,
+                  let cache = textureCache else { return nil }
+            
+            let flowBuffer = observation.pixelBuffer
+            let flowW = CVPixelBufferGetWidth(flowBuffer)
+            let flowH = CVPixelBufferGetHeight(flowBuffer)
+            
+            var cvTex: CVMetalTexture?
+            let status = CVMetalTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault, cache, flowBuffer, nil,
+                .rg16Float, flowW, flowH, 0, &cvTex
+            )
+            guard status == kCVReturnSuccess, let tex = cvTex,
+                  let flowTexture = CVMetalTextureGetTexture(tex) else { return nil }
+            
+            // Copy to a persistent GPU texture (CVMetalTexture is transient)
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rg16Float, width: flowW, height: flowH, mipmapped: false
+            )
+            desc.usage = [.shaderRead, .shaderWrite]
+            desc.storageMode = .private
+            guard let persistentTex = device.makeTexture(descriptor: desc),
+                  let copyBuf = commandQueue.makeCommandBuffer(),
+                  let blit = copyBuf.makeBlitCommandEncoder() else { return nil }
+            blit.copy(from: flowTexture, to: persistentTex)
+            blit.endEncoding()
+            copyBuf.commit()
+            copyBuf.waitUntilCompleted()
+            
+            return persistentTex
+        }
+        
+        private func createPixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
+            var pb: CVPixelBuffer?
+            let attrs: [String: Any] = [
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+            ]
+            CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                               kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
+            return pb
+        }
+        
+        private func blitTexture(_ texture: MTLTexture, to pixelBuffer: CVPixelBuffer,
+                                 commandBuffer: MTLCommandBuffer) {
+            guard let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue() else { return }
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm, width: texture.width, height: texture.height, mipmapped: false
+            )
+            desc.usage = [.shaderWrite]
+            guard let destTex = device.makeTexture(descriptor: desc, iosurface: surface, plane: 0),
+                  let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+            blit.copy(from: texture, to: destTex)
+            blit.endEncoding()
+        }
     }
+    
+    private var visionFlowProvider: VisionFlowProvider?
+    private var flowFrameCounter: UInt64 = 0
 
     private func resetProcessingState(clearFrames: Bool = true) {
         renderTexture = nil
@@ -609,11 +552,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         msaaTexture = nil
         taaHistoryTexture = nil
         taaOutputTexture = nil
-        lumaPrevPyramid.removeAll()
-        lumaNextPyramid.removeAll()
-        flowPyramid.removeAll()
-        flowScratchPyramid.removeAll()
-        flowPyramidLevels = 0
+        visionFlowProvider?.reset()
         occlusionTexture = nil
         warpedPrevTexture = nil
         warpedNextTexture = nil
@@ -622,21 +561,25 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         lastProcessedSize = .zero
         if clearFrames {
             frameBuffer.clear()
-            stats.droppedFrames = 0
-            stats.interpolatedFrameCount = 0
-            stats.passthroughFrameCount = 0
+            os_unfair_lock_lock(&statsLock)
+            _stats.droppedFrames = 0
+            _stats.interpolatedFrameCount = 0
+            _stats.passthroughFrameCount = 0
+            os_unfair_lock_unlock(&statsLock)
         }
     }
 
     private func resetFrameCounters() {
-        stats.frameCount = 0
-        stats.outputFrameCount = 0
-        stats.interpolatedFrameCount = 0
-        stats.passthroughFrameCount = 0
-        stats.droppedFrames = 0
-        stats.captureFPS = 0
-        stats.outputFPS = 0
-        stats.interpolatedFPS = 0
+        os_unfair_lock_lock(&statsLock)
+        _stats.frameCount = 0
+        _stats.outputFrameCount = 0
+        _stats.interpolatedFrameCount = 0
+        _stats.passthroughFrameCount = 0
+        _stats.droppedFrames = 0
+        _stats.captureFPS = 0
+        _stats.outputFPS = 0
+        _stats.interpolatedFPS = 0
+        os_unfair_lock_unlock(&statsLock)
         frameCount = 0
         renderFrameCount = 0
         interpolatedFrameCount = 0
@@ -738,9 +681,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
     }
     
     nonisolated func draw(in view: MTKView) {
-        Task { @MainActor in
-            renderFrame(in: view)
-        }
+        renderFrame(in: view)
     }
     
     private var renderFrameCount: Int = 0
@@ -767,7 +708,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
 
         if frameGenEnabled {
             guard let (prev, next) = frameBuffer.getFramesForTime(targetTime) else {
-                stats.droppedFrames += 1
+                os_unfair_lock_lock(&statsLock)
+                _stats.droppedFrames += 1
+                os_unfair_lock_unlock(&statsLock)
                 lastError = "Error Code: MG-ENG-006 Frame interpolation failed: missing frame pair"
                 commandBuffer.commit()
                 return
@@ -775,7 +718,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
             let sameSize = prev.texture.width == next.texture.width &&
                            prev.texture.height == next.texture.height
             guard sameSize else {
-                stats.droppedFrames += 1
+                os_unfair_lock_lock(&statsLock)
+                _stats.droppedFrames += 1
+                os_unfair_lock_unlock(&statsLock)
                 lastError = "Error Code: MG-ENG-006 Frame interpolation failed: size mismatch"
                 commandBuffer.commit()
                 return
@@ -785,7 +730,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
             let ratio = duration > 0 ? (timeSincePrev / duration) : 0
             let t = Float(min(max(ratio, 0), 1))
             guard let interpolated = interpolateFrame(prev: prev, next: next, t: t, commandBuffer: commandBuffer) else {
-                stats.droppedFrames += 1
+                os_unfair_lock_lock(&statsLock)
+                _stats.droppedFrames += 1
+                os_unfair_lock_unlock(&statsLock)
                 lastError = "Error Code: MG-ENG-006 Frame interpolation failed: pipeline error"
                 commandBuffer.commit()
                 return
@@ -804,8 +751,10 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         renderFrameCount += 1
         if isInterpolated { interpolatedFrameCount += 1 }
         if elapsed >= 1.0 {
-            stats.outputFPS = Float(renderFrameCount) / Float(elapsed)
-            stats.interpolatedFPS = Float(interpolatedFrameCount) / Float(elapsed)
+            os_unfair_lock_lock(&statsLock)
+            _stats.outputFPS = Float(renderFrameCount) / Float(elapsed)
+            _stats.interpolatedFPS = Float(interpolatedFrameCount) / Float(elapsed)
+            os_unfair_lock_unlock(&statsLock)
             renderFrameCount = 0
             interpolatedFrameCount = 0
             renderFPSStartTime = currentTime
@@ -824,28 +773,32 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         renEncoder.endEncoding()
         
         commandBuffer.present(drawable)
-        commandBuffer.addCompletedHandler { _ in
-            Task { @MainActor in
-                self.stats.outputFrameCount += 1
-                if frameGenActive {
-                    if isInterpolated {
-                        self.stats.interpolatedFrameCount += 1
-                    } else {
-                        self.stats.passthroughFrameCount += 1
-                    }
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            guard let self = self else { return }
+            os_unfair_lock_lock(&self.statsLock)
+            self._stats.outputFrameCount += 1
+            if frameGenActive {
+                if isInterpolated {
+                    self._stats.interpolatedFrameCount += 1
                 } else {
-                    self.stats.passthroughFrameCount += 1
+                    self._stats.passthroughFrameCount += 1
                 }
+            } else {
+                self._stats.passthroughFrameCount += 1
             }
+            os_unfair_lock_unlock(&self.statsLock)
         }
         commandBuffer.commit()
     }
     
     private func updateCaptureStats(currentTime: CFTimeInterval, captureTimestamp: CFTimeInterval?) {
         frameCount += 1
-        stats.frameCount += 1
-        stats.gpuMemoryUsed = UInt64(device.currentAllocatedSize)
-        stats.gpuMemoryTotal = UInt64(device.recommendedMaxWorkingSetSize)
+
+        os_unfair_lock_lock(&statsLock)
+        _stats.frameCount += 1
+        _stats.gpuMemoryUsed = UInt64(device.currentAllocatedSize)
+        _stats.gpuMemoryTotal = UInt64(device.recommendedMaxWorkingSetSize)
+        os_unfair_lock_unlock(&statsLock)
 
         if lastCaptureTimestamp > 0 {
             let interval = currentTime - lastCaptureTimestamp
@@ -857,27 +810,43 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
 
         let elapsed = currentTime - fpsStartTime
         if elapsed >= 1.0 {
-            stats.captureFPS = Float(frameCount) / Float(elapsed)
+            os_unfair_lock_lock(&statsLock)
+            _stats.captureFPS = Float(frameCount) / Float(elapsed)
+            os_unfair_lock_unlock(&statsLock)
             frameCount = 0
             fpsStartTime = currentTime
-            applyFrameRatePreference(desiredOutputFPS())
+            DispatchQueue.main.async { [weak self] in
+                self?.applyFrameRatePreference(self?.desiredOutputFPS() ?? 0)
+            }
         }
 
         let delta = currentTime - lastFrameTime
+        os_unfair_lock_lock(&statsLock)
         if lastFrameTime > 0 {
-            stats.frameTime = Float(delta * 1000.0)
+            _stats.frameTime = Float(delta * 1000.0)
         }
         if let captureTimestamp, captureTimestamp > 0 {
-            stats.captureLatency = Float((currentTime - captureTimestamp) * 1000.0)
+            _stats.captureLatency = Float((currentTime - captureTimestamp) * 1000.0)
         } else {
-            stats.captureLatency = Float(delta * 1000.0)
+            _stats.captureLatency = Float(delta * 1000.0)
         }
+        os_unfair_lock_unlock(&statsLock)
         lastFrameTime = currentTime
     }
 
     private func processSurface(_ surface: IOSurfaceRef, timestamp: CFTimeInterval) {
         let w = IOSurfaceGetWidth(surface)
         let h = IOSurfaceGetHeight(surface)
+
+        // Re-create pool if resolution changed
+        if w != ioSurfacePoolSize.width || h != ioSurfacePoolSize.height {
+            ioSurfacePoolSize = (w, h)
+            ioSurfaceTexturePool = [nil, nil, nil]
+        }
+
+        // Reuse texture from pool or create new one backed by IOSurface
+        let poolIdx = ioSurfacePoolIndex % ioSurfaceTexturePool.count
+        ioSurfacePoolIndex += 1
 
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
@@ -890,12 +859,21 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
             lastError = "Error Code: MG-ENG-010 IOSurface texture creation failed"
             return
         }
+        ioSurfaceTexturePool[poolIdx] = inputTex
 
         processCapturedTexture(inputTex, timestamp: timestamp)
     }
 
     private func processCapturedTexture(_ inputTex: MTLTexture, timestamp: CFTimeInterval) {
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            inFlightSemaphore.signal()
+            return
+        }
+        
+        // Signal semaphore when GPU finishes this frame
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            self?.inFlightSemaphore.signal()
+        }
 
         let inputWidth = inputTex.width
         let inputHeight = inputTex.height
@@ -984,32 +962,35 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         }
 
         guard let finalTex = applyAntiAliasing(to: scaledTex, commandBuffer: commandBuffer) else {
-            stats.droppedFrames += 1
+            os_unfair_lock_lock(&statsLock)
+            _stats.droppedFrames += 1
+            os_unfair_lock_unlock(&statsLock)
             commandBuffer.commit()
             return
         }
 
-        stats.outputResolution = CGSize(width: finalTex.width, height: finalTex.height)
+        os_unfair_lock_lock(&statsLock)
+        _stats.outputResolution = CGSize(width: finalTex.width, height: finalTex.height)
+        os_unfair_lock_unlock(&statsLock)
 
         var flowFromPrev: MTLTexture?
         var flowToPrev: MTLTexture?
         if frameGenEnabled, let prevFrame = frameBuffer.newestFrame {
             let prevTex = prevFrame.texture
             if prevTex.width == finalTex.width && prevTex.height == finalTex.height {
-                if let forwardTmp = computeOpticalFlow(prev: prevTex, next: finalTex, commandBuffer: commandBuffer),
-                   let forwardOut = makeFlowTexture(width: finalTex.width, height: finalTex.height),
-                   encodeCopy(from: forwardTmp, to: forwardOut, commandBuffer: commandBuffer) {
-                    if let backwardTmp = computeOpticalFlow(prev: finalTex, next: prevTex, commandBuffer: commandBuffer),
-                       let backwardOut = makeFlowTexture(width: finalTex.width, height: finalTex.height),
-                       encodeCopy(from: backwardTmp, to: backwardOut, commandBuffer: commandBuffer) {
-                        flowFromPrev = forwardOut
-                        flowToPrev = backwardOut
-                    } else {
-                        lastError = "Error Code: MG-ENG-013 Frame generation pipeline unavailable"
-                    }
-                } else {
-                    lastError = "Error Code: MG-ENG-013 Frame generation pipeline unavailable"
+                // Submit frame pair for async Vision flow (non-blocking)
+                flowFrameCounter += 1
+                visionFlowProvider?.submitFlowRequest(
+                    prev: prevTex, next: finalTex, frameID: flowFrameCounter
+                )
+                
+                // Use latest available flow result (may be from previous frame pair)
+                if let cachedFlow = visionFlowProvider?.latestFlow() {
+                    flowFromPrev = cachedFlow.forward
+                    flowToPrev = cachedFlow.backward
                 }
+                // If no flow yet, frame will be pushed without flow — interpolation will use
+                // nearest available frame without motion compensation
             } else {
                 lastError = "Error Code: MG-ENG-006 Frame interpolation failed: size mismatch"
             }
@@ -1018,9 +999,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         commandBuffer.addCompletedHandler { [weak self] buffer in
             guard let self = self else { return }
             let gpuTime = buffer.gpuEndTime - buffer.gpuStartTime
-            Task { @MainActor in
-                self.stats.gpuTime = Float(gpuTime * 1000.0)
-            }
+            os_unfair_lock_lock(&self.statsLock)
+            self._stats.gpuTime = Float(gpuTime * 1000.0)
+            os_unfair_lock_unlock(&self.statsLock)
         }
         commandBuffer.commit()
 
@@ -1045,13 +1026,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         var subpixelBlend: Float
     }
 
-    private struct FlowInitParams {
-        var searchRadius: UInt32
-    }
-
-    private struct FlowRefineParams {
-        var searchRadius: UInt32
-    }
 
     private struct FlowWarpParams {
         var scale: Float
@@ -1060,6 +1034,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
     private struct FlowComposeParams {
         var t: Float
         var errorThreshold: Float
+        var flowThreshold: Float
     }
 
     private struct FlowOcclusionParams {
@@ -1106,38 +1081,31 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
                 maxSearchSteps: Int32(qualityProfile.smaaSearchSteps),
                 subpixelBlend: 0.75
             )
-            guard let edgeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (SMAA)"
                 return nil
             }
-            edgeEncoder.setComputePipelineState(edgePipe)
-            edgeEncoder.setTexture(input, index: 0)
-            edgeEncoder.setTexture(edges, index: 1)
-            edgeEncoder.setBytes(&params, length: MemoryLayout<AntiAliasParams>.size, index: 0)
-            dispatchThreads(pipeline: edgePipe, encoder: edgeEncoder, width: input.width, height: input.height)
-            edgeEncoder.endEncoding()
+            // Edge detection
+            encoder.setComputePipelineState(edgePipe)
+            encoder.setTexture(input, index: 0)
+            encoder.setTexture(edges, index: 1)
+            encoder.setBytes(&params, length: MemoryLayout<AntiAliasParams>.size, index: 0)
+            dispatchThreads(pipeline: edgePipe, encoder: encoder, width: input.width, height: input.height)
 
-            guard let weightEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (SMAA)"
-                return nil
-            }
-            weightEncoder.setComputePipelineState(weightPipe)
-            weightEncoder.setTexture(edges, index: 0)
-            weightEncoder.setTexture(weights, index: 1)
-            weightEncoder.setBytes(&params, length: MemoryLayout<AntiAliasParams>.size, index: 0)
-            dispatchThreads(pipeline: weightPipe, encoder: weightEncoder, width: input.width, height: input.height)
-            weightEncoder.endEncoding()
+            // Weight calculation
+            encoder.setComputePipelineState(weightPipe)
+            encoder.setTexture(edges, index: 0)
+            encoder.setTexture(weights, index: 1)
+            encoder.setBytes(&params, length: MemoryLayout<AntiAliasParams>.size, index: 0)
+            dispatchThreads(pipeline: weightPipe, encoder: encoder, width: input.width, height: input.height)
 
-            guard let blendEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (SMAA)"
-                return nil
-            }
-            blendEncoder.setComputePipelineState(blendPipe)
-            blendEncoder.setTexture(input, index: 0)
-            blendEncoder.setTexture(weights, index: 1)
-            blendEncoder.setTexture(out, index: 2)
-            dispatchThreads(pipeline: blendPipe, encoder: blendEncoder, width: input.width, height: input.height)
-            blendEncoder.endEncoding()
+            // Neighborhood blending
+            encoder.setComputePipelineState(blendPipe)
+            encoder.setTexture(input, index: 0)
+            encoder.setTexture(weights, index: 1)
+            encoder.setTexture(out, index: 2)
+            dispatchThreads(pipeline: blendPipe, encoder: encoder, width: input.width, height: input.height)
+            encoder.endEncoding()
             return out
         case .msaa:
             guard let msaaPipeline = msaaPipeline,
@@ -1182,32 +1150,28 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
                 return input
             }
 
-            guard let flow = computeOpticalFlow(prev: input, next: history, commandBuffer: commandBuffer) else {
-                return nil
-            }
+            // TAA without motion vectors — simple temporal blend
+            // (Vision flow is async & used for frame gen; TAA uses motionless reprojection)
             var params = TemporalParams(blendFactor: effectiveTemporalBlend())
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)"
                 return nil
             }
+            // Temporal reproject
             encoder.setComputePipelineState(temporalPipeline)
             encoder.setTexture(input, index: 0)
             encoder.setTexture(history, index: 1)
-            encoder.setTexture(flow, index: 2)
+            encoder.setTexture(input, index: 2)  // Use input as dummy flow (zero motion)
             encoder.setTexture(out, index: 3)
             encoder.setBytes(&params, length: MemoryLayout<TemporalParams>.size, index: 0)
             dispatchThreads(pipeline: temporalPipeline, encoder: encoder, width: input.width, height: input.height)
-            encoder.endEncoding()
 
-            guard let copyEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)"
-                return nil
-            }
-            copyEncoder.setComputePipelineState(copyPipeline)
-            copyEncoder.setTexture(out, index: 0)
-            copyEncoder.setTexture(history, index: 1)
-            dispatchThreads(pipeline: copyPipeline, encoder: copyEncoder, width: input.width, height: input.height)
-            copyEncoder.endEncoding()
+            // Copy to history
+            encoder.setComputePipelineState(copyPipeline)
+            encoder.setTexture(out, index: 0)
+            encoder.setTexture(history, index: 1)
+            dispatchThreads(pipeline: copyPipeline, encoder: encoder, width: input.width, height: input.height)
+            encoder.endEncoding()
             return out
         }
     }
@@ -1248,57 +1212,51 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
             }
 
             var occParams = FlowOcclusionParams(threshold: flowOcclusionThreshold)
-            guard let occEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 lastError = "Error Code: MG-ENG-013 Frame generation pipeline unavailable"
                 return nil
             }
-            occEncoder.setComputePipelineState(flowOcclusionPipeline)
-            occEncoder.setTexture(flowForward, index: 0)
-            occEncoder.setTexture(flowBackward, index: 1)
-            occEncoder.setTexture(occlusion, index: 2)
-            occEncoder.setBytes(&occParams, length: MemoryLayout<FlowOcclusionParams>.size, index: 0)
-            dispatchThreads(pipeline: flowOcclusionPipeline, encoder: occEncoder, width: occlusion.width, height: occlusion.height)
-            occEncoder.endEncoding()
+            
+            // Occlusion detection
+            encoder.setComputePipelineState(flowOcclusionPipeline)
+            encoder.setTexture(flowForward, index: 0)
+            encoder.setTexture(flowBackward, index: 1)
+            encoder.setTexture(occlusion, index: 2)
+            encoder.setBytes(&occParams, length: MemoryLayout<FlowOcclusionParams>.size, index: 0)
+            dispatchThreads(pipeline: flowOcclusionPipeline, encoder: encoder, width: occlusion.width, height: occlusion.height)
 
+            // Warp prev frame forward
             var warpPrevParams = FlowWarpParams(scale: t)
-            guard let warpPrevEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-013 Frame generation pipeline unavailable"
-                return nil
-            }
-            warpPrevEncoder.setComputePipelineState(flowWarpPipeline)
-            warpPrevEncoder.setTexture(prevTex, index: 0)
-            warpPrevEncoder.setTexture(flowForward, index: 1)
-            warpPrevEncoder.setTexture(warpPrev, index: 2)
-            warpPrevEncoder.setBytes(&warpPrevParams, length: MemoryLayout<FlowWarpParams>.size, index: 0)
-            dispatchThreads(pipeline: flowWarpPipeline, encoder: warpPrevEncoder, width: warpPrev.width, height: warpPrev.height)
-            warpPrevEncoder.endEncoding()
+            encoder.setComputePipelineState(flowWarpPipeline)
+            encoder.setTexture(prevTex, index: 0)
+            encoder.setTexture(flowForward, index: 1)
+            encoder.setTexture(warpPrev, index: 2)
+            encoder.setBytes(&warpPrevParams, length: MemoryLayout<FlowWarpParams>.size, index: 0)
+            dispatchThreads(pipeline: flowWarpPipeline, encoder: encoder, width: warpPrev.width, height: warpPrev.height)
 
+            // Warp next frame backward
             var warpNextParams = FlowWarpParams(scale: (1.0 - t))
-            guard let warpNextEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-013 Frame generation pipeline unavailable"
-                return nil
-            }
-            warpNextEncoder.setComputePipelineState(flowWarpPipeline)
-            warpNextEncoder.setTexture(nextTex, index: 0)
-            warpNextEncoder.setTexture(flowBackward, index: 1)
-            warpNextEncoder.setTexture(warpNext, index: 2)
-            warpNextEncoder.setBytes(&warpNextParams, length: MemoryLayout<FlowWarpParams>.size, index: 0)
-            dispatchThreads(pipeline: flowWarpPipeline, encoder: warpNextEncoder, width: warpNext.width, height: warpNext.height)
-            warpNextEncoder.endEncoding()
+            encoder.setComputePipelineState(flowWarpPipeline)
+            encoder.setTexture(nextTex, index: 0)
+            encoder.setTexture(flowBackward, index: 1)
+            encoder.setTexture(warpNext, index: 2)
+            encoder.setBytes(&warpNextParams, length: MemoryLayout<FlowWarpParams>.size, index: 0)
+            dispatchThreads(pipeline: flowWarpPipeline, encoder: encoder, width: warpNext.width, height: warpNext.height)
 
-            var composeParams = FlowComposeParams(t: t, errorThreshold: qualityProfile.frameGenGradientThreshold)
-            guard let composeEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-013 Frame generation pipeline unavailable"
-                return nil
-            }
-            composeEncoder.setComputePipelineState(flowComposePipeline)
-            composeEncoder.setTexture(warpPrev, index: 0)
-            composeEncoder.setTexture(warpNext, index: 1)
-            composeEncoder.setTexture(occlusion, index: 2)
-            composeEncoder.setTexture(output, index: 3)
-            composeEncoder.setBytes(&composeParams, length: MemoryLayout<FlowComposeParams>.size, index: 0)
-            dispatchThreads(pipeline: flowComposePipeline, encoder: composeEncoder, width: output.width, height: output.height)
-            composeEncoder.endEncoding()
+            // Compose final interpolated frame
+            var composeParams = FlowComposeParams(
+                t: t, 
+                errorThreshold: qualityProfile.frameGenGradientThreshold,
+                flowThreshold: flowOcclusionThreshold
+            )
+            encoder.setComputePipelineState(flowComposePipeline)
+            encoder.setTexture(warpPrev, index: 0)
+            encoder.setTexture(warpNext, index: 1)
+            encoder.setTexture(occlusion, index: 2)
+            encoder.setTexture(output, index: 3)
+            encoder.setBytes(&composeParams, length: MemoryLayout<FlowComposeParams>.size, index: 0)
+            dispatchThreads(pipeline: flowComposePipeline, encoder: encoder, width: output.width, height: output.height)
+            encoder.endEncoding()
             return output
         case .off:
             return nil
@@ -1313,9 +1271,11 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
             resetProcessingState(clearFrames: true)
         }
         self.outputSize = outputSize
-        stats.virtualResolution = virtualResolution
-        stats.outputResolution = outputSize
-        stats.isUsingVirtualDisplay = true
+        os_unfair_lock_lock(&statsLock)
+        _stats.virtualResolution = virtualResolution
+        _stats.outputResolution = outputSize
+        _stats.isUsingVirtualDisplay = true
+        os_unfair_lock_unlock(&statsLock)
     }
     
     func updateSettings(_ settings: CaptureSettings) {
@@ -1367,16 +1327,18 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         }
 
         if !frameGenEnabled {
-            stats.droppedFrames = 0
-            stats.interpolatedFrameCount = 0
-            stats.passthroughFrameCount = 0
+            os_unfair_lock_lock(&statsLock)
+            _stats.droppedFrames = 0
+            _stats.interpolatedFrameCount = 0
+            _stats.passthroughFrameCount = 0
+            os_unfair_lock_unlock(&statsLock)
         }
     }
 
     private func restartCaptureForCursorChange() {
         if let manager = virtualDisplayManager {
-            Task { @MainActor in
-                _ = await startCaptureFromVirtualDisplay(manager, refreshRate: captureRefreshRate)
+            Task {
+                _ = await self.startCaptureFromVirtualDisplay(manager, refreshRate: self.captureRefreshRate)
             }
         }
     }
@@ -1392,9 +1354,8 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
         self.virtualDisplayManager = virtualDisplayManager
         
         virtualDisplayManager.onFrameReceived = { [weak self] surface, timestamp in
-            guard let self = self else { return }
-            Task { @MainActor in
-                self.processIOSurfaceFrame(surface: surface, timestamp: timestamp)
+            self?.processingQueue.async {
+                self?.processIOSurfaceFrame(surface: surface, timestamp: timestamp)
             }
         }
         
@@ -1414,6 +1375,8 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate {
     }
     
     private func processIOSurfaceFrame(surface: IOSurfaceRef, timestamp: Double) {
+        // Triple buffering: wait for a slot
+        inFlightSemaphore.wait()
         let currentTime = CACurrentMediaTime()
         updateCaptureStats(currentTime: currentTime, captureTimestamp: timestamp)
         processSurface(surface, timestamp: currentTime)

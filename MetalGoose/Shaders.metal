@@ -32,6 +32,7 @@ struct FlowWarpParams {
 struct FlowComposeParams {
     float t;
     float errorThreshold;
+    float flowThreshold;
 };
 
 struct FlowOcclusionParams {
@@ -89,20 +90,26 @@ kernel void flowInit(
     half bestError = half(1e9);
     int2 bestOffset = int2(0, 0);
     
+    // 3x3 SAD error function for a given offset
+    auto computeSAD = [&](int2 offset) -> half {
+        half err = 0.0h;
+        for (int py = -1; py <= 1; py++) {
+            for (int px = -1; px <= 1; px++) {
+                int2 p = int2(gid) + int2(px, py);
+                p.x = clamp(p.x, 0, int(width) - 1);
+                p.y = clamp(p.y, 0, int(height) - 1);
+                int2 q = int2(gid) + offset + int2(px, py);
+                q.x = clamp(q.x, 0, int(width) - 1);
+                q.y = clamp(q.y, 0, int(height) - 1);
+                err += abs(prevLuma.read(uint2(p)).r - nextLuma.read(uint2(q)).r);
+            }
+        }
+        return err;
+    };
+    
     for (int dy = -radius; dy <= radius; dy++) {
         for (int dx = -radius; dx <= radius; dx++) {
-            half err = 0.0h;
-            for (int py = -1; py <= 1; py++) {
-                for (int px = -1; px <= 1; px++) {
-                    int2 p = int2(gid) + int2(px, py);
-                    p.x = clamp(p.x, 0, int(width) - 1);
-                    p.y = clamp(p.y, 0, int(height) - 1);
-                    int2 q = int2(gid) + int2(dx + px, dy + py);
-                    q.x = clamp(q.x, 0, int(width) - 1);
-                    q.y = clamp(q.y, 0, int(height) - 1);
-                    err += abs(prevLuma.read(uint2(p)).r - nextLuma.read(uint2(q)).r);
-                }
-            }
+            half err = computeSAD(int2(dx, dy));
             if (err < bestError) {
                 bestError = err;
                 bestOffset = int2(dx, dy);
@@ -110,7 +117,28 @@ kernel void flowInit(
         }
     }
     
-    flowOut.write(half4(half(bestOffset.x), half(bestOffset.y), 0.0h, 0.0h), gid);
+    // Sub-pixel quadratic refinement
+    half2 subPixel = half2(bestOffset);
+    
+    // X-axis parabolic fit
+    half eL = computeSAD(bestOffset + int2(-1, 0));
+    half eR = computeSAD(bestOffset + int2(1, 0));
+    half denomX = eL + eR - 2.0h * bestError;
+    if (abs(denomX) > 1e-6h) {
+        half dx = 0.5h * (eL - eR) / denomX;
+        subPixel.x += clamp(dx, -0.5h, 0.5h);
+    }
+    
+    // Y-axis parabolic fit
+    half eU = computeSAD(bestOffset + int2(0, -1));
+    half eD = computeSAD(bestOffset + int2(0, 1));
+    half denomY = eU + eD - 2.0h * bestError;
+    if (abs(denomY) > 1e-6h) {
+        half dy = 0.5h * (eU - eD) / denomY;
+        subPixel.y += clamp(dy, -0.5h, 0.5h);
+    }
+    
+    flowOut.write(half4(subPixel.x, subPixel.y, 0.0h, 0.0h), gid);
 }
 
 kernel void flowUpsample2x(
@@ -144,21 +172,27 @@ kernel void flowRefine(
     half bestError = half(1e9);
     int2 bestOffset = predInt;
     
+    // 3x3 SAD error function
+    auto computeSAD = [&](int2 offset) -> half {
+        half err = 0.0h;
+        for (int py = -1; py <= 1; py++) {
+            for (int px = -1; px <= 1; px++) {
+                int2 p = int2(gid) + int2(px, py);
+                p.x = clamp(p.x, 0, int(width) - 1);
+                p.y = clamp(p.y, 0, int(height) - 1);
+                int2 q = int2(gid) + offset + int2(px, py);
+                q.x = clamp(q.x, 0, int(width) - 1);
+                q.y = clamp(q.y, 0, int(height) - 1);
+                err += abs(prevLuma.read(uint2(p)).r - nextLuma.read(uint2(q)).r);
+            }
+        }
+        return err;
+    };
+    
     for (int dy = -radius; dy <= radius; dy++) {
         for (int dx = -radius; dx <= radius; dx++) {
             int2 offset = predInt + int2(dx, dy);
-            half err = 0.0h;
-            for (int py = -1; py <= 1; py++) {
-                for (int px = -1; px <= 1; px++) {
-                    int2 p = int2(gid) + int2(px, py);
-                    p.x = clamp(p.x, 0, int(width) - 1);
-                    p.y = clamp(p.y, 0, int(height) - 1);
-                    int2 q = int2(gid) + offset + int2(px, py);
-                    q.x = clamp(q.x, 0, int(width) - 1);
-                    q.y = clamp(q.y, 0, int(height) - 1);
-                    err += abs(prevLuma.read(uint2(p)).r - nextLuma.read(uint2(q)).r);
-                }
-            }
+            half err = computeSAD(offset);
             if (err < bestError) {
                 bestError = err;
                 bestOffset = offset;
@@ -166,7 +200,28 @@ kernel void flowRefine(
         }
     }
     
-    flowOut.write(half4(half(bestOffset.x), half(bestOffset.y), 0.0h, 0.0h), gid);
+    // Sub-pixel quadratic refinement
+    half2 subPixel = half2(bestOffset);
+    
+    // X-axis parabolic fit
+    half eL = computeSAD(bestOffset + int2(-1, 0));
+    half eR = computeSAD(bestOffset + int2(1, 0));
+    half denomX = eL + eR - 2.0h * bestError;
+    if (abs(denomX) > 1e-6h) {
+        half dx = 0.5h * (eL - eR) / denomX;
+        subPixel.x += clamp(dx, -0.5h, 0.5h);
+    }
+    
+    // Y-axis parabolic fit
+    half eU = computeSAD(bestOffset + int2(0, -1));
+    half eD = computeSAD(bestOffset + int2(0, 1));
+    half denomY = eU + eD - 2.0h * bestError;
+    if (abs(denomY) > 1e-6h) {
+        half dy = 0.5h * (eU - eD) / denomY;
+        subPixel.y += clamp(dy, -0.5h, 0.5h);
+    }
+    
+    flowOut.write(half4(subPixel.x, subPixel.y, 0.0h, 0.0h), gid);
 }
 
 kernel void flowWarp(
@@ -203,18 +258,29 @@ kernel void flowCompose(
     
     half4 a = warpPrev.read(gid);
     half4 b = warpNext.read(gid);
-    half err = abs(rgb2luma(a.rgb) - rgb2luma(b.rgb));
-    half occ = occlusion.read(gid).r;
     half t = half(params.t);
-    half threshold = half(params.errorThreshold);
     
-    if (occ > 0.5h || err > threshold) {
-        output.write(t < 0.5h ? a : b, gid);
-        return;
-    }
+    // 1. Color consistency error (difference between forward-warped and backward-warped)
+    half colorErr = length(a.rgb - b.rgb);
     
-    half4 result = mix(a, b, t);
-    output.write(result, gid);
+    // 2. Flow consistency error (passed from flowOcclusion)
+    half flowErr = occlusion.read(gid).r;
+    
+    // 3. Calculate confidence (0.0 = bad, 1.0 = good)
+    // Smoothstep creates a soft transition instead of a hard cutoff
+    // params.flowThreshold is used as the center of the transition for flow error (pixels)
+    half flowConf = 1.0h - smoothstep(half(params.flowThreshold) * 0.5h, half(params.flowThreshold) * 1.5h, flowErr);
+    half colorConf = 1.0h - smoothstep(0.1h, 0.3h, colorErr);
+    half confidence = min(flowConf, colorConf);
+    
+    // 4. Interpolate
+    half4 interpolated = mix(a, b, t);
+    
+    // 5. Fallback: nearest neighbor (prev if t < 0.5, else next)
+    // We blend smoothly from interpolated to nearest based on confidence
+    half4 nearest = t < 0.5h ? a : b;
+    
+    output.write(mix(nearest, interpolated, confidence), gid);
 }
 
 kernel void flowOcclusion(
@@ -231,13 +297,58 @@ kernel void flowOcclusion(
     float2 size = float2(width, height);
     float2 uv = (float2(gid) + 0.5f) / size;
     half2 f = flowForward.read(gid).rg;
+    
+    // Check flow consistency: F(p) + B(p + F(p)) should be close to 0
     float2 uvNext = clamp(uv + float2(f) / size, float2(0.0f), float2(1.0f));
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     half2 b = flowBackward.sample(s, uvNext).rg;
+    
+    // Output raw error magnitude instead of binary threshold
     float2 sum = float2(f + b);
     half err = half(length(sum));
-    half occ = err > half(params.threshold) ? 1.0h : 0.0h;
-    occlusion.write(half4(occ, 0.0h, 0.0h, 0.0h), gid);
+    
+    // Store error in R channel
+    occlusion.write(half4(err, 0.0h, 0.0h, 0.0h), gid);
+}
+
+// 3x3 median filter for flow field smoothing (edge-preserving outlier removal)
+kernel void flowMedianFilter(
+    texture2d<half, access::read> flowIn [[texture(0)]],
+    texture2d<half, access::write> flowOut [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint width = flowIn.get_width();
+    uint height = flowIn.get_height();
+    if (gid.x >= width || gid.y >= height) return;
+    
+    half flowX[9];
+    half flowY[9];
+    int idx = 0;
+    
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            int2 pos = int2(gid) + int2(dx, dy);
+            pos.x = clamp(pos.x, 0, int(width) - 1);
+            pos.y = clamp(pos.y, 0, int(height) - 1);
+            half2 f = flowIn.read(uint2(pos)).rg;
+            flowX[idx] = f.x;
+            flowY[idx] = f.y;
+            idx++;
+        }
+    }
+    
+    // Simple insertion sort for 9 elements (fast for small N)
+    for (int i = 1; i < 9; i++) {
+        half kx = flowX[i]; half ky = flowY[i];
+        int j = i - 1;
+        while (j >= 0 && flowX[j] > kx) { flowX[j+1] = flowX[j]; j--; }
+        flowX[j+1] = kx;
+        j = i - 1;
+        while (j >= 0 && flowY[j] > ky) { flowY[j+1] = flowY[j]; j--; }
+        flowY[j+1] = ky;
+    }
+    
+    flowOut.write(half4(flowX[4], flowY[4], 0.0h, 0.0h), gid);
 }
 
 vertex VertexOut texture_vertex(uint vertexID [[vertex_id]]) {

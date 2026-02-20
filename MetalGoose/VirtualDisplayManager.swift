@@ -4,10 +4,13 @@ import CoreGraphics
 import ScreenCaptureKit
 import CoreMedia
 import IOSurface
+import os
 
 @available(macOS 26.0, *)
-@MainActor
-final class VirtualDisplayManager: NSObject, ObservableObject, SCStreamDelegate, SCStreamOutput {
+final class VirtualDisplayManager: NSObject, ObservableObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
+    
+    private let captureQueue = DispatchQueue(label: "com.metalgoose.capture", qos: .userInteractive)
+    private var frameCountLock = os_unfair_lock()
     
     @Published private(set) var isActive: Bool = false
     @Published private(set) var displayID: CGDirectDisplayID = 0
@@ -141,14 +144,15 @@ final class VirtualDisplayManager: NSObject, ObservableObject, SCStreamDelegate,
             config.backgroundColor = .clear
             
             // Latency optimization settings
-            config.queueDepth = 3  // Lower = less latency (default is 8)
+            config.queueDepth = 2  // Minimum latency (default is 8)
+            config.captureResolution = .nominal  // Bypass compositor upscale
             config.streamName = "MetalGoose"
             config.capturesAudio = false
             
             let filter = SCContentFilter(display: targetDisplay, excludingWindows: [])
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
             
-            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue.main)
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
             try await stream.startCapture()
             
             captureStream = stream
@@ -333,9 +337,10 @@ final class VirtualDisplayManager: NSObject, ObservableObject, SCStreamDelegate,
         
         let timestamp = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         
-        Task { @MainActor in
-            self.capturedFrameCount += 1
-            self.onFrameReceived?(surface, timestamp)
-        }
+        os_unfair_lock_lock(&frameCountLock)
+        capturedFrameCount += 1
+        os_unfair_lock_unlock(&frameCountLock)
+        
+        onFrameReceived?(surface, timestamp)
     }
 }
