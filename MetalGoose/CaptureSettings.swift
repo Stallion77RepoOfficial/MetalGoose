@@ -180,45 +180,6 @@ final class CaptureSettings: ObservableObject {
             }
         }
     }
-
-    enum VirtualRefreshRate: String, CaseIterable, Identifiable {
-        case hz60 = "60 Hz"
-        case hz90 = "90 Hz"
-        case hz120 = "120 Hz"
-        case hz144 = "144 Hz"
-        case hz165 = "165 Hz"
-        case hz180 = "180 Hz"
-        case hz240 = "240 Hz"
-        case hz360 = "360 Hz"
-
-        var id: String { rawValue }
-
-        var intValue: Int {
-            switch self {
-            case .hz60: return 60
-            case .hz90: return 90
-            case .hz120: return 120
-            case .hz144: return 144
-            case .hz165: return 165
-            case .hz180: return 180
-            case .hz240: return 240
-            case .hz360: return 360
-            }
-        }
-
-        static func fromTargetFPS(_ target: TargetFPS) -> VirtualRefreshRate {
-            switch target {
-            case .fps60: return .hz60
-            case .fps90: return .hz90
-            case .fps120: return .hz120
-            case .fps144: return .hz144
-            case .fps165: return .hz165
-            case .fps180: return .hz180
-            case .fps240: return .hz240
-            case .fps360: return .hz360
-            }
-        }
-    }
     
     enum FrameGenMultiplier: String, CaseIterable, Identifiable {
         case x2 = "2x (Double FPS)"
@@ -268,36 +229,6 @@ final class CaptureSettings: ObservableObject {
         }
     }
     
-    enum VirtualResolution: String, CaseIterable, Identifiable {
-        case native = "Native"
-        case r1440p = "1440p (2560×1440)"
-        case r1080p = "1080p (1920×1080)"
-        case r900p = "900p (1600×900)"
-        case r720p = "720p (1280×720)"
-        
-        var id: String { rawValue }
-        
-        var size: CGSize? {
-            switch self {
-            case .native: return nil
-            case .r1440p: return CGSize(width: 2560, height: 1440)
-            case .r1080p: return CGSize(width: 1920, height: 1080)
-            case .r900p: return CGSize(width: 1600, height: 900)
-            case .r720p: return CGSize(width: 1280, height: 720)
-            }
-        }
-        
-        var description: String {
-            switch self {
-            case .native: return "Virtual display matches window size"
-            case .r1440p: return "Virtual 1440p - good for 4K displays"
-            case .r1080p: return "Virtual 1080p - 2-3× FPS boost typical"
-            case .r900p: return "Virtual 900p - significant FPS boost"
-            case .r720p: return "Virtual 720p - maximum FPS boost"
-            }
-        }
-    }
-    
     @Published var renderScale: RenderScale = .native
     @Published var scalingType: ScalingType = .off
     @Published var qualityMode: QualityMode = .ultra
@@ -309,9 +240,6 @@ final class CaptureSettings: ObservableObject {
     @Published var frameGenMultiplier: FrameGenMultiplier = .x2
     
     @Published var aaMode: AAMode = .off
-    
-    @Published var virtualResolution: VirtualResolution = .native
-    @Published var virtualRefreshRate: VirtualRefreshRate = .hz120
     
     @Published var captureCursor: Bool = true
     @Published var adaptiveSync: Bool = true
@@ -387,8 +315,6 @@ final class CaptureSettings: ObservableObject {
         defaults.set(sharpening, forKey: prefix + "sharpening")
         defaults.set(temporalBlend, forKey: prefix + "temporalBlend")
         defaults.set(motionScale, forKey: prefix + "motionScale")
-        defaults.set(virtualResolution.rawValue, forKey: prefix + "virtualResolution")
-        defaults.set(virtualRefreshRate.rawValue, forKey: prefix + "virtualRefreshRate")
         
         if !profiles.contains(name) {
             profiles.append(name)
@@ -427,16 +353,6 @@ final class CaptureSettings: ObservableObject {
         if let aa = defaults.string(forKey: prefix + "aaMode"),
            let val = AAMode(rawValue: aa) { aaMode = val }
            
-        if let vr = defaults.string(forKey: prefix + "virtualResolution"),
-           let val = VirtualResolution(rawValue: vr) { virtualResolution = val }
-
-        if let vrr = defaults.string(forKey: prefix + "virtualRefreshRate") {
-            if let val = VirtualRefreshRate(rawValue: vrr) {
-                virtualRefreshRate = val
-            } else if let legacy = TargetFPS(rawValue: vrr) {
-                virtualRefreshRate = VirtualRefreshRate.fromTargetFPS(legacy)
-            }
-        }
         
         if defaults.object(forKey: prefix + "captureCursor") != nil { captureCursor = defaults.bool(forKey: prefix + "captureCursor") }
         if defaults.object(forKey: prefix + "adaptiveSync") != nil { adaptiveSync = defaults.bool(forKey: prefix + "adaptiveSync") }
@@ -460,8 +376,7 @@ final class CaptureSettings: ObservableObject {
         let keys = ["renderScale", "scalingType", "qualityMode", "scaleFactor",
                     "frameGenMode", "frameGenType", "targetFPS", "frameGenMultiplier", "aaMode",
                     "captureCursor", "adaptiveSync",
-                    "showMGHUD", "vsync", "sharpening", "temporalBlend", "motionScale", "virtualResolution",
-                    "virtualRefreshRate"]
+                    "showMGHUD", "vsync", "sharpening", "temporalBlend", "motionScale"]
         for key in keys {
             defaults.removeObject(forKey: prefix + key)
         }

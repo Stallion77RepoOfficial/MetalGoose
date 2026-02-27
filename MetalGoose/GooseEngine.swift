@@ -24,7 +24,6 @@ struct PipelineStats: @unchecked Sendable {
     var gpuMemoryUsed: UInt64 = 0
     var gpuMemoryTotal: UInt64 = 0
     var isUsingVirtualDisplay: Bool = false
-    var virtualResolution: CGSize = .zero
     var outputResolution: CGSize = .zero
 }
 
@@ -195,7 +194,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     private var lastPreferredFPS: Int = 0
     private var lastPreferredUpdateTime: CFTimeInterval = 0
 
-    private var virtualDisplayManager: VirtualDisplayManager?
+    private var windowCaptureManager: WindowCaptureManager?
     private var captureRefreshRate: Int = 0
     
     private var lastFrameTime: CFTimeInterval = 0
@@ -1264,7 +1263,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     }
     
     func configure(
-        virtualResolution: CGSize,
+        sourceResolution: CGSize,
         outputSize: CGSize
     ) {
         if self.outputSize != outputSize {
@@ -1272,7 +1271,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         }
         self.outputSize = outputSize
         os_unfair_lock_lock(&statsLock)
-        _stats.virtualResolution = virtualResolution
         _stats.outputResolution = outputSize
         _stats.isUsingVirtualDisplay = true
         os_unfair_lock_unlock(&statsLock)
@@ -1336,33 +1334,18 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     }
 
     private func restartCaptureForCursorChange() {
-        if let manager = virtualDisplayManager {
-            Task {
-                _ = await self.startCaptureFromVirtualDisplay(manager, refreshRate: self.captureRefreshRate)
-            }
-        }
+        // Handled by ScreenCaptureKit dynamically if we update config
     }
     
-    func startCaptureFromVirtualDisplay(_ virtualDisplayManager: VirtualDisplayManager, refreshRate: Int) async -> Bool {
-        guard virtualDisplayManager.isActive else {
-            lastError = "Error Code: MG-VD-006 No active virtual display"
-            return false
-        }
-        
+    func startCaptureFromWindow(_ manager: WindowCaptureManager, refreshRate: Int) async {
         resetProcessingState(clearFrames: true)
         resetFrameCounters()
-        self.virtualDisplayManager = virtualDisplayManager
+        self.windowCaptureManager = manager
         
-        virtualDisplayManager.onFrameReceived = { [weak self] surface, timestamp in
+        manager.onFrameReceived = { [weak self] surface, timestamp in
             self?.processingQueue.async {
                 self?.processIOSurfaceFrame(surface: surface, timestamp: timestamp)
             }
-        }
-        
-        guard await virtualDisplayManager.startFrameCapture(refreshRate: refreshRate, showsCursor: captureCursor) else {
-            lastError = virtualDisplayManager.lastError!
-            isCapturing = false
-            return false
         }
         
         self.isCapturing = true
@@ -1370,8 +1353,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         self.frameCount = 0
         self.fpsStartTime = CACurrentMediaTime()
         self.lastCaptureTimestamp = 0
-        
-        return true
     }
     
     private func processIOSurfaceFrame(surface: IOSurfaceRef, timestamp: Double) {
@@ -1384,8 +1365,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     
     func stopCapture() async {
         isCapturing = false
-        if let manager = virtualDisplayManager {
-            await manager.stopFrameCapture()
+        if let manager = windowCaptureManager {
             manager.onFrameReceived = nil
         }
         lastCaptureTimestamp = 0

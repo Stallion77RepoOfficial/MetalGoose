@@ -304,8 +304,8 @@ class MGHUDOverlayView: NSView {
             hudData.gpuMemoryUsed = stats.gpuMemoryUsed
             hudData.gpuMemoryTotal = stats.gpuMemoryTotal
             
-            if stats.virtualResolution.width > 0 && stats.virtualResolution.height > 0 {
-                hudData.captureResolution = "\(Int(stats.virtualResolution.width))x\(Int(stats.virtualResolution.height))"
+            if stats.outputResolution.width > 0 && stats.outputResolution.height > 0 {
+                hudData.captureResolution = "\(Int(stats.outputResolution.width))x\(Int(stats.outputResolution.height))"
             }
             if stats.outputResolution.width > 0 && stats.outputResolution.height > 0 {
                 hudData.outputResolution = "\(Int(stats.outputResolution.width))x\(Int(stats.outputResolution.height))"

@@ -14,11 +14,9 @@ struct ContentView: View {
 
     
     @State private var gooseEngine: GooseEngine?
-    @State private var virtualDisplayManager: VirtualDisplayManager?
+    @State private var windowCaptureManager: WindowCaptureManager?
     @State private var overlayManager: OverlayWindowManager?
     @State private var gooseMtkView: MTKView?
-    @State private var windowMigrator: WindowMigrator?
-    @State private var mouseEventRouter: MouseEventRouter?
 
     @State private var connectedProcessName: String = "-"
     @State private var connectedPID: Int32 = 0
@@ -291,18 +289,6 @@ struct ContentView: View {
 
     private var leftConfigColumn: some View {
         VStack(spacing: 16) {
-            ConfigPanel(title: "Virtual Display") {
-                PickerRow(label: "Resolution",
-                          selection: $settings.virtualResolution,
-                          helpText: "Lower = higher FPS. The game will render at this resolution.")
-                PickerRow(label: "Refresh Rate (Hz)",
-                          selection: $settings.virtualRefreshRate,
-                          helpText: "Virtual display Hz. Capture/output timing follows this value.")
-                
-                Text(settings.virtualResolution.description)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
             
             Group {
                 ConfigPanel(title: String(localized: "Upscaling", defaultValue: "Upscaling")) {
@@ -409,7 +395,7 @@ struct ContentView: View {
 
         let engine = GooseEngine()
         gooseEngine = engine
-        virtualDisplayManager = VirtualDisplayManager()
+        windowCaptureManager = WindowCaptureManager()
         engine.updateSettings(settings)
         
     }
@@ -456,7 +442,7 @@ struct ContentView: View {
         let cgFrame = CGRect(x: boundX, y: boundY, width: boundW, height: boundH)
         
         if gooseEngine == nil { initializeGooseEngine() }
-        if windowMigrator == nil { windowMigrator = WindowMigrator() }
+        if windowCaptureManager == nil { windowCaptureManager = WindowCaptureManager() }
         if overlayManager == nil { overlayManager = OverlayWindowManager() }
         
         guard let engine = gooseEngine,
@@ -470,69 +456,27 @@ struct ContentView: View {
             return
         }
 
-        let outputSize = outputScreen.frame.size
+        let outputSize = cgFrame.size
 
         guard let displayID = outputScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
             alertMessage = "Error Code: MG-UI-007 Display ID not found."
             showAlert = true
             return
         }
-        let targetRefreshRate = Double(settings.virtualRefreshRate.intValue)
+        let targetRefreshRate = Double(settings.targetFPS.intValue)
         let captureRefreshRate = Int(round(targetRefreshRate))
         
-        if virtualDisplayManager == nil { virtualDisplayManager = VirtualDisplayManager() }
-        guard let vdManager = virtualDisplayManager,
-              let migrator = windowMigrator else { return }
+        guard let captureManager = windowCaptureManager else { return }
         
-        if migrator.isWindowFullscreen(pid: app.processIdentifier, windowID: wid, windowFrame: cgFrame, windowTitle: windowTitle) {
-            alertMessage = "Error Code: MG-UI-005 Fullscreen window detected. Please switch to windowed or borderless mode."
-            showAlert = true
-            return
-        }
+        let sourceRes = cgFrame.size
+        let scaledOutputSize = outputScreen.frame.size
         
-        let virtualRes: CGSize
-        if let size = settings.virtualResolution.size {
-            virtualRes = size
-        } else {
-            if cgFrame.size.width > 1 && cgFrame.size.height > 1 {
-                virtualRes = cgFrame.size
-            } else {
-                virtualRes = outputSize
-            }
-        }
+        engine.configure(sourceResolution: sourceRes, outputSize: scaledOutputSize)
         
-        guard let virtualDisplayID = await vdManager.createDisplay(config: .custom(
-            width: UInt32(virtualRes.width),
-            height: UInt32(virtualRes.height),
-            refreshRate: targetRefreshRate
-        )) else {
-            alertMessage = vdManager.lastError!
-            showAlert = true
-            return
-        }
-        
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        if let screen = vdManager.getScreen() {
-                let moved = migrator.moveWindowToScreen(
-                    pid: app.processIdentifier,
-                    windowID: wid,
-                    screen: screen,
-                    targetSize: virtualRes,
-                    windowFrame: cgFrame,
-                    windowTitle: windowTitle
-                )
-                if !moved {
-                    alertMessage = migrator.lastError!
-                    showAlert = true
-                    await vdManager.destroyDisplay()
-                    return
-                }
-            }
-        
-        engine.configure(virtualResolution: virtualRes, outputSize: outputSize)
-        
-        let success = await engine.startCaptureFromVirtualDisplay(vdManager, refreshRate: captureRefreshRate)
+        let success = await captureManager.startCapture(windowID: wid, refreshRate: captureRefreshRate)
         if success {
+            await engine.startCaptureFromWindow(captureManager, refreshRate: captureRefreshRate)
+            
             if let name = app.localizedName {
                 connectedProcessName = name
             } else {
@@ -540,37 +484,31 @@ struct ContentView: View {
             }
             connectedPID = app.processIdentifier
             connectedWindowID = wid
-            connectedSize = virtualRes
+            connectedSize = sourceRes
             targetDisplayID = displayID
             activeOutputScreen = outputScreen
             isScalingActive = true
             
             let config = OverlayWindowConfig(
                 targetScreen: outputScreen,
-                windowFrame: outputScreen.frame,
-                size: outputScreen.frame.size,
+                windowFrame: cgFrame,
+                size: scaledOutputSize,
                 refreshRate: targetRefreshRate,
                 vsyncEnabled: settings.vsync,
                 adaptiveSyncEnabled: settings.adaptiveSync,
-                passThrough: false
+                passThrough: true,
+                scaleFactor: 1.0,
+                captureCursor: settings.captureCursor
             )
             
             if overlay.createOverlay(config: config) {
-                let mtkView = MTKView(frame: CGRect(origin: .zero, size: outputScreen.frame.size))
+                let mtkView = MTKView(frame: CGRect(origin: .zero, size: scaledOutputSize))
                 overlay.setMTKView(mtkView)
                 engine.attachToView(mtkView, refreshRate: captureRefreshRate)
                 gooseMtkView = mtkView
                 
-                if self.mouseEventRouter == nil {
-                    self.mouseEventRouter = MouseEventRouter()
-                }
-                self.mouseEventRouter?.configure(
-                    overlayFrame: outputScreen.frame,
-                    overlayScreen: outputScreen,
-                    virtualDisplayID: virtualDisplayID,
-                    virtualSize: virtualRes
-                )
-                self.mouseEventRouter?.startRouting()
+                overlay.setTargetWindow(wid, pid: app.processIdentifier)
+                overlay.updateWindowPosition()
             }
             
             startStatsTimer()
@@ -578,7 +516,7 @@ struct ContentView: View {
             if settings.showMGHUD {
                 hudController.show(on: outputScreen, compact: false)
                 hudController.setDeviceName(engine.deviceName)
-                hudController.setResolutions(capture: virtualRes, output: outputSize)
+                hudController.setResolutions(capture: sourceRes, output: scaledOutputSize)
             }
             
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -586,10 +524,9 @@ struct ContentView: View {
                 targetApp?.activate()
             }
         } else {
-            alertMessage = engine.lastError!
+            alertMessage = captureManager.lastError ?? "Unknown Capture Error"
             showAlert = true
-            migrator.restoreWindow()
-            await vdManager.destroyDisplay()
+            await captureManager.stopCapture()
         }
     }
     
@@ -606,8 +543,6 @@ struct ContentView: View {
     private func stopGooseCaptureAsync() async {
         statsTimer?.invalidate()
         statsTimer = nil
-
-        mouseEventRouter?.stopRouting()
         
         gooseEngine?.detachFromView()
         overlayManager?.destroyOverlay()
@@ -618,9 +553,8 @@ struct ContentView: View {
             await engine.stopCapture()
         }
 
-        windowMigrator?.restoreWindow()
-        if let vdManager = virtualDisplayManager {
-            await vdManager.destroyDisplay()
+        if let captureManager = windowCaptureManager {
+            await captureManager.stopCapture()
         }
         
         isScalingActive = false
@@ -676,18 +610,18 @@ struct ContentView: View {
 
     private func startStatsTimer() {
         statsTimer?.invalidate()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [self] _ in
             Task { @MainActor in
-                if let engine = gooseEngine {
+                if let engine = self.gooseEngine {
                     let stats = engine.stats
-                    currentFPS = stats.captureFPS
-                    interpolatedFPS = stats.interpolatedFPS
-                    processingTime = Double(stats.frameTime)
+                    self.currentFPS = stats.outputFPS
+                    self.interpolatedFPS = stats.interpolatedFPS
+                    self.processingTime = Double(stats.frameTime)
                     
-                    if settings.showMGHUD {
-                        hudController.updateFromGooseEngine(stats: stats, settings: settings)
-                    }
+                    self.hudController.updateFromGooseEngine(stats: stats, settings: self.settings)
                 }
+                self.overlayManager?.setCaptureCursorEnabled(self.settings.captureCursor)
+                self.overlayManager?.updateWindowPosition()
             }
         }
     }
