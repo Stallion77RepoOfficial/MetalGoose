@@ -87,7 +87,7 @@ open MetalGoose.xcodeproj
 
 | Shortcut | Action |
 |----------|--------|
-| `⌘ + T` | Toggle Scale |
+| `⌘ + ⇧ + T` | Toggle Scale |
 
 # MetalGoose Error Codes
 

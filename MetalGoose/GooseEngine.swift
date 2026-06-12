@@ -36,11 +36,19 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     
     // Stats are read/written from processing queue, published to main for UI
     private var _stats = PipelineStats()
-    private var statsLock = os_unfair_lock()
+    private let statsLock = OSAllocatedUnfairLock()
     var stats: PipelineStats {
-        os_unfair_lock_lock(&statsLock)
-        defer { os_unfair_lock_unlock(&statsLock) }
+        statsLock.lock()
+        defer { statsLock.unlock() }
         return _stats
+    }
+
+    // @Published properties must be mutated on the main thread; errors are
+    // reported from the processing queue and the MTKView render thread
+    private func reportError(_ message: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.lastError = message
+        }
     }
     
     // Dedicated GPU processing queue — all frame work happens here
@@ -262,7 +270,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
                 renderPipeline = try device.makeRenderPipelineState(descriptor: desc)
             }
         } catch {
-            lastError = "Error Code: MG-ENG-001 Pipeline setup failed: \(error)"
+            reportError("Error Code: MG-ENG-001 Pipeline setup failed: \(error)")
         }
         
     }
@@ -287,7 +295,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         descriptor.colorProcessingMode = .perceptual
         
         guard let scaler = descriptor.makeSpatialScaler(device: device) else {
-            lastError = "Error Code: MG-ENG-004 MetalFX Spatial Scaler creation failed"
+            reportError("Error Code: MG-ENG-004 MetalFX Spatial Scaler creation failed")
             return nil
         }
         
@@ -337,7 +345,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
                             commandBuffer: MTLCommandBuffer) -> Bool {
         guard let copyPipeline = copyPipeline,
               let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            lastError = "Error Code: MG-ENG-011 Optical flow pipeline unavailable"
+            reportError("Error Code: MG-ENG-011 Optical flow pipeline unavailable")
             return false
         }
         encoder.setComputePipelineState(copyPipeline)
@@ -372,7 +380,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         private var textureCache: CVMetalTextureCache?
         
         // Latest computed flow pair (protected by lock)
-        private var lock = os_unfair_lock()
+        private let lock = OSAllocatedUnfairLock()
         private var _forwardFlow: MTLTexture?
         private var _backwardFlow: MTLTexture?
         private var _flowFrameID: UInt64 = 0
@@ -397,33 +405,33 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         
         /// Returns the latest computed flow pair, or nil if not yet available
         func latestFlow() -> FlowResult? {
-            os_unfair_lock_lock(&lock)
-            defer { os_unfair_lock_unlock(&lock) }
+            lock.lock()
+            defer { lock.unlock() }
             guard let fwd = _forwardFlow, let bwd = _backwardFlow else { return nil }
             return FlowResult(forward: fwd, backward: bwd, frameID: _flowFrameID)
         }
         
         /// Submit a frame pair for async flow computation (non-blocking)
         func submitFlowRequest(prev: MTLTexture, next: MTLTexture, frameID: UInt64) {
-            os_unfair_lock_lock(&lock)
+            lock.lock()
             let alreadyComputing = isComputing
-            os_unfair_lock_unlock(&lock)
+            lock.unlock()
             
             // Skip if already computing — we'll pick up the next frame
             if alreadyComputing { return }
             
-            os_unfair_lock_lock(&lock)
+            lock.lock()
             isComputing = true
-            os_unfair_lock_unlock(&lock)
+            lock.unlock()
             
             // Read texture data to CPU-accessible buffers on the current thread
             // (this is fast — just creates IOSurface-backed pixel buffers and blits)
             guard let prevPB = createPixelBuffer(width: prev.width, height: prev.height),
                   let nextPB = createPixelBuffer(width: next.width, height: next.height),
                   let blitBuf = commandQueue.makeCommandBuffer() else {
-                os_unfair_lock_lock(&lock)
+                lock.lock()
                 isComputing = false
-                os_unfair_lock_unlock(&lock)
+                lock.unlock()
                 return
             }
             
@@ -437,9 +445,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             flowQueue.async { [weak self] in
                 guard let self = self else { return }
                 defer {
-                    os_unfair_lock_lock(&self.lock)
+                    self.lock.lock()
                     self.isComputing = false
-                    os_unfair_lock_unlock(&self.lock)
+                    self.lock.unlock()
                 }
                 
                 // Wait for blit to finish
@@ -453,20 +461,20 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
                 guard let fwd = forwardFlow, let bwd = backwardFlow else { return }
                 
                 // Store results
-                os_unfair_lock_lock(&self.lock)
+                self.lock.lock()
                 self._forwardFlow = fwd
                 self._backwardFlow = bwd
                 self._flowFrameID = frameID
-                os_unfair_lock_unlock(&self.lock)
+                self.lock.unlock()
             }
         }
         
         func reset() {
-            os_unfair_lock_lock(&lock)
+            lock.lock()
             _forwardFlow = nil
             _backwardFlow = nil
             _flowFrameID = 0
-            os_unfair_lock_unlock(&lock)
+            lock.unlock()
         }
         
         private func runVisionFlow(source: CVPixelBuffer, target: CVPixelBuffer,
@@ -565,16 +573,16 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         lastProcessedSize = .zero
         if clearFrames {
             frameBuffer.clear()
-            os_unfair_lock_lock(&statsLock)
+            statsLock.lock()
             _stats.droppedFrames = 0
             _stats.interpolatedFrameCount = 0
             _stats.passthroughFrameCount = 0
-            os_unfair_lock_unlock(&statsLock)
+            statsLock.unlock()
         }
     }
 
     private func resetFrameCounters() {
-        os_unfair_lock_lock(&statsLock)
+        statsLock.lock()
         _stats.frameCount = 0
         _stats.outputFrameCount = 0
         _stats.interpolatedFrameCount = 0
@@ -583,7 +591,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         _stats.captureFPS = 0
         _stats.outputFPS = 0
         _stats.interpolatedFPS = 0
-        os_unfair_lock_unlock(&statsLock)
+        statsLock.unlock()
         frameCount = 0
         renderFrameCount = 0
         interpolatedFrameCount = 0
@@ -639,9 +647,14 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         if abs(target - lastPreferredFPS) < 3 { return }
         if now - lastPreferredUpdateTime < 0.5 { return }
         if target != lastPreferredFPS {
-            mtkView?.preferredFramesPerSecond = target
             lastPreferredFPS = target
             lastPreferredUpdateTime = now
+            // Called from the render thread and processing queue; view
+            // properties must be mutated on the main thread
+            let view = mtkView
+            DispatchQueue.main.async {
+                view?.preferredFramesPerSecond = target
+            }
         }
     }
     
@@ -712,20 +725,20 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
 
         if frameGenEnabled {
             guard let (prev, next) = frameBuffer.getFramesForTime(targetTime) else {
-                os_unfair_lock_lock(&statsLock)
+                statsLock.lock()
                 _stats.droppedFrames += 1
-                os_unfair_lock_unlock(&statsLock)
-                lastError = "Error Code: MG-ENG-006 Frame interpolation failed: missing frame pair"
+                statsLock.unlock()
+                reportError("Error Code: MG-ENG-006 Frame interpolation failed: missing frame pair")
                 commandBuffer.commit()
                 return
             }
             let sameSize = prev.texture.width == next.texture.width &&
                            prev.texture.height == next.texture.height
             guard sameSize else {
-                os_unfair_lock_lock(&statsLock)
+                statsLock.lock()
                 _stats.droppedFrames += 1
-                os_unfair_lock_unlock(&statsLock)
-                lastError = "Error Code: MG-ENG-006 Frame interpolation failed: size mismatch"
+                statsLock.unlock()
+                reportError("Error Code: MG-ENG-006 Frame interpolation failed: size mismatch")
                 commandBuffer.commit()
                 return
             }
@@ -734,10 +747,10 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             let ratio = duration > 0 ? (timeSincePrev / duration) : 0
             let t = Float(min(max(ratio, 0), 1))
             guard let interpolated = interpolateFrame(prev: prev, next: next, t: t, commandBuffer: commandBuffer) else {
-                os_unfair_lock_lock(&statsLock)
+                statsLock.lock()
                 _stats.droppedFrames += 1
-                os_unfair_lock_unlock(&statsLock)
-                lastError = "Error Code: MG-ENG-006 Frame interpolation failed: pipeline error"
+                statsLock.unlock()
+                reportError("Error Code: MG-ENG-006 Frame interpolation failed: pipeline error")
                 commandBuffer.commit()
                 return
             }
@@ -755,10 +768,10 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         renderFrameCount += 1
         if isInterpolated { interpolatedFrameCount += 1 }
         if elapsed >= 1.0 {
-            os_unfair_lock_lock(&statsLock)
+            statsLock.lock()
             _stats.outputFPS = Float(renderFrameCount) / Float(elapsed)
             _stats.interpolatedFPS = Float(interpolatedFrameCount) / Float(elapsed)
-            os_unfair_lock_unlock(&statsLock)
+            statsLock.unlock()
             renderFrameCount = 0
             interpolatedFrameCount = 0
             renderFPSStartTime = currentTime
@@ -779,7 +792,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         commandBuffer.present(drawable)
         commandBuffer.addCompletedHandler { [weak self] _ in
             guard let self = self else { return }
-            os_unfair_lock_lock(&self.statsLock)
+            self.statsLock.lock()
             self._stats.outputFrameCount += 1
             if frameGenActive {
                 if isInterpolated {
@@ -790,7 +803,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             } else {
                 self._stats.passthroughFrameCount += 1
             }
-            os_unfair_lock_unlock(&self.statsLock)
+            self.statsLock.unlock()
         }
         commandBuffer.commit()
     }
@@ -798,11 +811,11 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     private func updateCaptureStats(currentTime: CFTimeInterval, captureTimestamp: CFTimeInterval?) {
         frameCount += 1
 
-        os_unfair_lock_lock(&statsLock)
+        statsLock.lock()
         _stats.frameCount += 1
         _stats.gpuMemoryUsed = UInt64(device.currentAllocatedSize)
         _stats.gpuMemoryTotal = UInt64(device.recommendedMaxWorkingSetSize)
-        os_unfair_lock_unlock(&statsLock)
+        statsLock.unlock()
 
         if lastCaptureTimestamp > 0 {
             let interval = currentTime - lastCaptureTimestamp
@@ -814,9 +827,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
 
         let elapsed = currentTime - fpsStartTime
         if elapsed >= 1.0 {
-            os_unfair_lock_lock(&statsLock)
+            statsLock.lock()
             _stats.captureFPS = Float(frameCount) / Float(elapsed)
-            os_unfair_lock_unlock(&statsLock)
+            statsLock.unlock()
             frameCount = 0
             fpsStartTime = currentTime
             DispatchQueue.main.async { [weak self] in
@@ -825,7 +838,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         }
 
         let delta = currentTime - lastFrameTime
-        os_unfair_lock_lock(&statsLock)
+        statsLock.lock()
         if lastFrameTime > 0 {
             _stats.frameTime = Float(delta * 1000.0)
         }
@@ -834,7 +847,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         } else {
             _stats.captureLatency = Float(delta * 1000.0)
         }
-        os_unfair_lock_unlock(&statsLock)
+        statsLock.unlock()
         lastFrameTime = currentTime
     }
 
@@ -850,7 +863,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         )
         desc.usage = [.shaderRead]
         guard let inputTex = device.makeTexture(descriptor: desc, iosurface: surface, plane: 0) else {
-            lastError = "Error Code: MG-ENG-010 IOSurface texture creation failed"
+            reportError("Error Code: MG-ENG-010 IOSurface texture creation failed")
             inFlightSemaphore.signal()
             return
         }
@@ -895,7 +908,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             guard let scalePipeline = scalePipeline,
                   let renderTex = ensureTexture(&renderTexture, width: renderWidth, height: renderHeight),
                   let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-008 Scale pipeline unavailable"
+                reportError("Error Code: MG-ENG-008 Scale pipeline unavailable")
                 commandBuffer.commit()
                 return
             }
@@ -912,7 +925,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             // MetalFX Spatial Scaler requires .renderTarget usage flag
             guard let outputTex = ensureTexture(&scaledTexture, width: targetWidth, height: targetHeight,
                                                  usage: [.shaderRead, .shaderWrite, .renderTarget]) else {
-                lastError = "Error Code: MG-ENG-008 Scale pipeline unavailable"
+                reportError("Error Code: MG-ENG-008 Scale pipeline unavailable")
                 commandBuffer.commit()
                 return
             }
@@ -925,7 +938,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
                     inputWidth: workingTex.width, inputHeight: workingTex.height,
                     outputWidth: targetWidth, outputHeight: targetHeight
                 ) else {
-                    lastError = "Error Code: MG-ENG-004 MetalFX Spatial Scaler creation failed"
+                    reportError("Error Code: MG-ENG-004 MetalFX Spatial Scaler creation failed")
                     commandBuffer.commit()
                     return
                 }
@@ -939,7 +952,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
                     guard let casPipeline = casPipeline,
                           let casOut = ensureTexture(&casTexture, width: targetWidth, height: targetHeight),
                           let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                        lastError = "Error Code: MG-ENG-009 CAS pipeline unavailable"
+                        reportError("Error Code: MG-ENG-009 CAS pipeline unavailable")
                         commandBuffer.commit()
                         return
                     }
@@ -959,16 +972,16 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         }
 
         guard let finalTex = applyAntiAliasing(to: scaledTex, commandBuffer: commandBuffer) else {
-            os_unfair_lock_lock(&statsLock)
+            statsLock.lock()
             _stats.droppedFrames += 1
-            os_unfair_lock_unlock(&statsLock)
+            statsLock.unlock()
             commandBuffer.commit()
             return
         }
 
-        os_unfair_lock_lock(&statsLock)
+        statsLock.lock()
         _stats.outputResolution = CGSize(width: finalTex.width, height: finalTex.height)
-        os_unfair_lock_unlock(&statsLock)
+        statsLock.unlock()
 
         // Copy into a dedicated history slot — finalTex aliases a working
         // texture that the next frame overwrites
@@ -976,9 +989,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         historyTextureIndex += 1
         guard let historyTex = ensureTexture(&historyTextures[slot], width: finalTex.width, height: finalTex.height),
               encodeCopy(from: finalTex, to: historyTex, commandBuffer: commandBuffer) else {
-            os_unfair_lock_lock(&statsLock)
+            statsLock.lock()
             _stats.droppedFrames += 1
-            os_unfair_lock_unlock(&statsLock)
+            statsLock.unlock()
             commandBuffer.commit()
             return
         }
@@ -986,9 +999,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         commandBuffer.addCompletedHandler { [weak self] buffer in
             guard let self = self else { return }
             let gpuTime = buffer.gpuEndTime - buffer.gpuStartTime
-            os_unfair_lock_lock(&self.statsLock)
+            self.statsLock.lock()
             self._stats.gpuTime = Float(gpuTime * 1000.0)
-            os_unfair_lock_unlock(&self.statsLock)
+            self.statsLock.unlock()
         }
         commandBuffer.commit()
 
@@ -1060,7 +1073,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             guard let fxaaPipeline = fxaaPipeline,
                   let out = ensureTexture(&fxaaTexture, width: input.width, height: input.height),
                   let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (FXAA)"
+                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (FXAA)")
                 return nil
             }
             var threshold = qualityProfile.aaThreshold
@@ -1078,7 +1091,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
                   let edges = ensureTexture(&smaaEdgeTexture, width: input.width, height: input.height),
                   let weights = ensureTexture(&smaaWeightTexture, width: input.width, height: input.height),
                   let out = ensureTexture(&smaaOutputTexture, width: input.width, height: input.height) else {
-                lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (SMAA)"
+                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (SMAA)")
                 return nil
             }
             var params = AntiAliasParams(
@@ -1088,7 +1101,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
                 subpixelBlend: 0.75
             )
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (SMAA)"
+                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (SMAA)")
                 return nil
             }
             // Edge detection
@@ -1117,7 +1130,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             guard let msaaPipeline = msaaPipeline,
                   let out = ensureTexture(&msaaTexture, width: input.width, height: input.height),
                   let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (MSAA)"
+                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (MSAA)")
                 return nil
             }
             var params = AntiAliasParams(
@@ -1138,13 +1151,13 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
                   let copyPipeline = copyPipeline,
                   let history = ensureTexture(&taaHistoryTexture, width: input.width, height: input.height),
                   let out = ensureTexture(&taaOutputTexture, width: input.width, height: input.height) else {
-                lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)"
+                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)")
                 return nil
             }
 
             if !hasTAAHistory {
                 guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                    lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)"
+                    reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)")
                     return nil
                 }
                 encoder.setComputePipelineState(copyPipeline)
@@ -1160,7 +1173,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             // (Vision flow is async & used for frame gen, so no reprojection here)
             var blendFactor = effectiveTemporalBlend()
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)"
+                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)")
                 return nil
             }
             encoder.setComputePipelineState(taaAccumulatePipeline)
@@ -1193,31 +1206,31 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             guard let flowWarpPipeline = flowWarpPipeline,
                   let flowComposePipeline = flowComposePipeline,
                   let flowOcclusionPipeline = flowOcclusionPipeline else {
-                lastError = "Error Code: MG-ENG-013 Frame generation pipeline unavailable"
+                reportError("Error Code: MG-ENG-013 Frame generation pipeline unavailable")
                 return nil
             }
             guard let flowForward = next.flowFromPrev,
                   let flowBackward = next.flowToPrev else {
-                lastError = "Error Code: MG-ENG-013 Frame generation pipeline unavailable"
+                reportError("Error Code: MG-ENG-013 Frame generation pipeline unavailable")
                 return nil
             }
             guard flowForward.width == prevTex.width,
                   flowForward.height == prevTex.height,
                   flowBackward.width == prevTex.width,
                   flowBackward.height == prevTex.height else {
-                lastError = "Error Code: MG-ENG-006 Frame interpolation failed: size mismatch"
+                reportError("Error Code: MG-ENG-006 Frame interpolation failed: size mismatch")
                 return nil
             }
             guard let occlusion = ensureTexture(&occlusionTexture, width: prevTex.width, height: prevTex.height, pixelFormat: .r16Float),
                   let warpPrev = ensureTexture(&warpedPrevTexture, width: prevTex.width, height: prevTex.height),
                   let warpNext = ensureTexture(&warpedNextTexture, width: prevTex.width, height: prevTex.height) else {
-                lastError = "Error Code: MG-ENG-013 Frame generation pipeline unavailable"
+                reportError("Error Code: MG-ENG-013 Frame generation pipeline unavailable")
                 return nil
             }
 
             var occParams = FlowOcclusionParams(threshold: flowOcclusionThreshold)
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                lastError = "Error Code: MG-ENG-013 Frame generation pipeline unavailable"
+                reportError("Error Code: MG-ENG-013 Frame generation pipeline unavailable")
                 return nil
             }
             
@@ -1275,10 +1288,10 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             resetProcessingState(clearFrames: true)
         }
         self.outputSize = outputSize
-        os_unfair_lock_lock(&statsLock)
+        statsLock.lock()
         _stats.outputResolution = outputSize
         _stats.isUsingVirtualDisplay = true
-        os_unfair_lock_unlock(&statsLock)
+        statsLock.unlock()
     }
     
     func updateSettings(_ settings: CaptureSettings) {
@@ -1330,16 +1343,20 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         }
 
         if !frameGenEnabled {
-            os_unfair_lock_lock(&statsLock)
+            statsLock.lock()
             _stats.droppedFrames = 0
             _stats.interpolatedFrameCount = 0
             _stats.passthroughFrameCount = 0
-            os_unfair_lock_unlock(&statsLock)
+            statsLock.unlock()
         }
     }
 
     private func restartCaptureForCursorChange() {
-        // Handled by ScreenCaptureKit dynamically if we update config
+        guard let manager = windowCaptureManager else { return }
+        let showsCursor = captureCursor
+        Task {
+            await manager.setShowsCursor(showsCursor)
+        }
     }
     
     func startCaptureFromWindow(_ manager: WindowCaptureManager, refreshRate: Int) async {

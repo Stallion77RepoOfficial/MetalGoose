@@ -450,7 +450,17 @@ struct ContentView: View {
         
         engine.updateSettings(settings)
         
-        guard let outputScreen = NSScreen.main else {
+        // Use the screen that actually contains the target window, not the
+        // screen of MetalGoose's own UI. Window bounds are in global top-left
+        // coordinates; NSScreen frames are bottom-left
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let cocoaWindowFrame = CGRect(
+            x: cgFrame.origin.x,
+            y: primaryHeight - cgFrame.maxY,
+            width: cgFrame.width,
+            height: cgFrame.height
+        )
+        guard let outputScreen = NSScreen.screens.first(where: { $0.frame.intersects(cocoaWindowFrame) }) ?? NSScreen.main else {
             alertMessage = "Error Code: MG-UI-004 No display found."
             showAlert = true
             return
@@ -473,7 +483,7 @@ struct ContentView: View {
         
         engine.configure(sourceResolution: sourceRes, outputSize: scaledOutputSize)
         
-        let success = await captureManager.startCapture(windowID: wid, refreshRate: captureRefreshRate)
+        let success = await captureManager.startCapture(windowID: wid, refreshRate: captureRefreshRate, showsCursor: settings.captureCursor)
         if success {
             await engine.startCaptureFromWindow(captureManager, refreshRate: captureRefreshRate)
             
@@ -635,7 +645,7 @@ struct ContentView: View {
                 timer.invalidate()
                 isCountingDown = false
                 
-                if let window = NSApp.windows.first(where: { $0.isVisible && $0.title.contains("MetalGoose") || $0.contentViewController != nil }) {
+                if let window = NSApp.windows.first(where: { $0.isVisible && $0.title.contains("MetalGoose") }) {
                     window.orderOut(nil)
                 }
                 

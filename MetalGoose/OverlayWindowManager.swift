@@ -310,20 +310,22 @@ class MouseConstraintManager {
         
         let info = Unmanaged.passUnretained(self).toOpaque()
         let callback: CGEventTapCallBack = { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-            guard let ref = refcon else { return Unmanaged.passRetained(event) }
+            // Returning the same event requires passUnretained — passRetained
+            // would leak one reference per mouse event
+            guard let ref = refcon else { return Unmanaged.passUnretained(event) }
             let manager = Unmanaged<MouseConstraintManager>.fromOpaque(ref).takeUnretainedValue()
-            
+
             var location = event.location
             let bounds = manager.targetRect
-            
+
             if !bounds.contains(location) {
                 location.x = max(bounds.minX, min(bounds.maxX, location.x))
                 location.y = max(bounds.minY, min(bounds.maxY, location.y))
                 event.location = location
                 CGWarpMouseCursorPosition(location)
             }
-            
-            return Unmanaged.passRetained(event)
+
+            return Unmanaged.passUnretained(event)
         }
         
         eventTap = CGEvent.tapCreate(
