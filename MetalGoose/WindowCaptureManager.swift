@@ -2,6 +2,7 @@ import Foundation
 import ScreenCaptureKit
 import CoreGraphics
 import CoreMedia
+import CoreVideo
 import IOSurface
 import os
 
@@ -16,7 +17,9 @@ final class WindowCaptureManager: NSObject, ObservableObject, SCStreamDelegate, 
     
     private var stream: SCStream?
     
-    var onFrameReceived: ((_ surface: IOSurfaceRef, _ timestamp: Double) -> Void)?
+    // The pixel buffer must be retained until the GPU finishes reading the
+    // IOSurface, otherwise ScreenCaptureKit recycles it mid-frame.
+    var onFrameReceived: ((_ surface: IOSurfaceRef, _ pixelBuffer: CVPixelBuffer, _ timestamp: Double) -> Void)?
     
     func startCapture(windowID: CGWindowID, refreshRate: Int) async -> Bool {
         await stopCapture()
@@ -105,7 +108,7 @@ final class WindowCaptureManager: NSObject, ObservableObject, SCStreamDelegate, 
         guard let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue() else { return }
         
         let timestamp = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
-        
-        onFrameReceived?(surface, timestamp)
+
+        onFrameReceived?(surface, pixelBuffer, timestamp)
     }
 }

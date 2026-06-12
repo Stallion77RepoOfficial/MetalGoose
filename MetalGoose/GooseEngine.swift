@@ -49,11 +49,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     // Triple buffering: allow up to 3 frames in-flight simultaneously
     private let inFlightSemaphore = DispatchSemaphore(value: 3)
     
-    // IOSurface texture pool — avoid per-frame MTLTexture allocation
-    private var ioSurfaceTexturePool: [MTLTexture?] = [nil, nil, nil]
-    private var ioSurfacePoolIndex: Int = 0
-    private var ioSurfacePoolSize: (width: Int, height: Int) = (0, 0)
-    
     var deviceName: String { device.name }
     
     var onFrameReady: ((MTLTexture) -> Void)?
@@ -73,7 +68,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     private var smaaWeightPipeline: MTLComputePipelineState?
     private var smaaBlendPipeline: MTLComputePipelineState?
     private var msaaPipeline: MTLComputePipelineState?
-    private var temporalPipeline: MTLComputePipelineState?
+    private var taaAccumulatePipeline: MTLComputePipelineState?
     private var copyPipeline: MTLComputePipelineState?
 
     // Optical flow / frame generation pipelines
@@ -165,6 +160,14 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     }
     
     private let frameBuffer = FrameRingBuffer()
+
+    // Frames pushed to the ring buffer must not alias the working textures
+    // (scaledTexture, casTexture, ...) that are rewritten every frame, so each
+    // processed frame is copied into its own history slot. Capacity covers the
+    // ring buffer (4) plus frames still referenced by display/flow.
+    private var historyTextures: [MTLTexture?] = Array(repeating: nil, count: 6)
+    private var historyTextureIndex: Int = 0
+
     private var blendTexture: MTLTexture?
     private var hasTAAHistory: Bool = false
     private var lastProcessedSize: CGSize = .zero
@@ -238,7 +241,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         smaaWeightPipeline = makeCompute("smaaBlendingWeights")
         smaaBlendPipeline = makeCompute("smaaBlend")
         msaaPipeline = makeCompute("msaa")
-        temporalPipeline = makeCompute("temporalReproject")
+        taaAccumulatePipeline = makeCompute("temporalAccumulation")
 
         // Optical flow / frame generation pipelines
         flowWarpPipeline = makeCompute("flowWarp")
@@ -551,6 +554,8 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         msaaTexture = nil
         taaHistoryTexture = nil
         taaOutputTexture = nil
+        historyTextures = Array(repeating: nil, count: historyTextures.count)
+        historyTextureIndex = 0
         visionFlowProvider?.reset()
         occlusionTexture = nil
         warpedPrevTexture = nil
@@ -833,19 +838,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         lastFrameTime = currentTime
     }
 
-    private func processSurface(_ surface: IOSurfaceRef, timestamp: CFTimeInterval) {
+    private func processSurface(_ surface: IOSurfaceRef, pixelBuffer: CVPixelBuffer, timestamp: CFTimeInterval) {
         let w = IOSurfaceGetWidth(surface)
         let h = IOSurfaceGetHeight(surface)
-
-        // Re-create pool if resolution changed
-        if w != ioSurfacePoolSize.width || h != ioSurfacePoolSize.height {
-            ioSurfacePoolSize = (w, h)
-            ioSurfaceTexturePool = [nil, nil, nil]
-        }
-
-        // Reuse texture from pool or create new one backed by IOSurface
-        let poolIdx = ioSurfacePoolIndex % ioSurfaceTexturePool.count
-        ioSurfacePoolIndex += 1
 
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
@@ -856,21 +851,24 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         desc.usage = [.shaderRead]
         guard let inputTex = device.makeTexture(descriptor: desc, iosurface: surface, plane: 0) else {
             lastError = "Error Code: MG-ENG-010 IOSurface texture creation failed"
+            inFlightSemaphore.signal()
             return
         }
-        ioSurfaceTexturePool[poolIdx] = inputTex
 
-        processCapturedTexture(inputTex, timestamp: timestamp)
+        processCapturedTexture(inputTex, pixelBuffer: pixelBuffer, timestamp: timestamp)
     }
 
-    private func processCapturedTexture(_ inputTex: MTLTexture, timestamp: CFTimeInterval) {
+    private func processCapturedTexture(_ inputTex: MTLTexture, pixelBuffer: CVPixelBuffer, timestamp: CFTimeInterval) {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             inFlightSemaphore.signal()
             return
         }
-        
-        // Signal semaphore when GPU finishes this frame
+
+        // Signal semaphore when GPU finishes this frame; the pixel buffer is
+        // retained until then so ScreenCaptureKit cannot recycle the IOSurface
+        // while the GPU is still reading it
         commandBuffer.addCompletedHandler { [weak self] _ in
+            _ = pixelBuffer
             self?.inFlightSemaphore.signal()
         }
 
@@ -972,27 +970,17 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         _stats.outputResolution = CGSize(width: finalTex.width, height: finalTex.height)
         os_unfair_lock_unlock(&statsLock)
 
-        var flowFromPrev: MTLTexture?
-        var flowToPrev: MTLTexture?
-        if frameGenEnabled, let prevFrame = frameBuffer.newestFrame {
-            let prevTex = prevFrame.texture
-            if prevTex.width == finalTex.width && prevTex.height == finalTex.height {
-                // Submit frame pair for async Vision flow (non-blocking)
-                flowFrameCounter += 1
-                visionFlowProvider?.submitFlowRequest(
-                    prev: prevTex, next: finalTex, frameID: flowFrameCounter
-                )
-                
-                // Use latest available flow result (may be from previous frame pair)
-                if let cachedFlow = visionFlowProvider?.latestFlow() {
-                    flowFromPrev = cachedFlow.forward
-                    flowToPrev = cachedFlow.backward
-                }
-                // If no flow yet, frame will be pushed without flow — interpolation will use
-                // nearest available frame without motion compensation
-            } else {
-                lastError = "Error Code: MG-ENG-006 Frame interpolation failed: size mismatch"
-            }
+        // Copy into a dedicated history slot — finalTex aliases a working
+        // texture that the next frame overwrites
+        let slot = historyTextureIndex % historyTextures.count
+        historyTextureIndex += 1
+        guard let historyTex = ensureTexture(&historyTextures[slot], width: finalTex.width, height: finalTex.height),
+              encodeCopy(from: finalTex, to: historyTex, commandBuffer: commandBuffer) else {
+            os_unfair_lock_lock(&statsLock)
+            _stats.droppedFrames += 1
+            os_unfair_lock_unlock(&statsLock)
+            commandBuffer.commit()
+            return
         }
 
         commandBuffer.addCompletedHandler { [weak self] buffer in
@@ -1004,7 +992,30 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         }
         commandBuffer.commit()
 
-        frameBuffer.push(FrameHistory(texture: finalTex, timestamp: timestamp, flowFromPrev: flowFromPrev, flowToPrev: flowToPrev))
+        // Flow submission must happen after commit: the provider blits the
+        // textures on its own command buffer, which has to execute after the
+        // copy above has produced the frame content
+        var flowFromPrev: MTLTexture?
+        var flowToPrev: MTLTexture?
+        if frameGenEnabled, let prevFrame = frameBuffer.newestFrame,
+           prevFrame.texture.width == historyTex.width,
+           prevFrame.texture.height == historyTex.height {
+            // Submit frame pair for async Vision flow (non-blocking)
+            flowFrameCounter += 1
+            visionFlowProvider?.submitFlowRequest(
+                prev: prevFrame.texture, next: historyTex, frameID: flowFrameCounter
+            )
+
+            // Use latest available flow result (may be from previous frame pair)
+            if let cachedFlow = visionFlowProvider?.latestFlow() {
+                flowFromPrev = cachedFlow.forward
+                flowToPrev = cachedFlow.backward
+            }
+            // If no flow yet, frame will be pushed without flow — interpolation will use
+            // nearest available frame without motion compensation
+        }
+
+        frameBuffer.push(FrameHistory(texture: historyTex, timestamp: timestamp, flowFromPrev: flowFromPrev, flowToPrev: flowToPrev))
     }
 
     private struct UpscaleParams {
@@ -1038,10 +1049,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
 
     private struct FlowOcclusionParams {
         var threshold: Float
-    }
-    
-    private struct TemporalParams {
-        var blendFactor: Float
     }
 
     private func applyAntiAliasing(to input: MTLTexture,
@@ -1127,7 +1134,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             encoder.endEncoding()
             return out
         case .taa:
-            guard let temporalPipeline = temporalPipeline,
+            guard let taaAccumulatePipeline = taaAccumulatePipeline,
                   let copyPipeline = copyPipeline,
                   let history = ensureTexture(&taaHistoryTexture, width: input.width, height: input.height),
                   let out = ensureTexture(&taaOutputTexture, width: input.width, height: input.height) else {
@@ -1149,21 +1156,19 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
                 return input
             }
 
-            // TAA without motion vectors — simple temporal blend
-            // (Vision flow is async & used for frame gen; TAA uses motionless reprojection)
-            var params = TemporalParams(blendFactor: effectiveTemporalBlend())
+            // TAA without motion vectors — neighborhood-clamped accumulation
+            // (Vision flow is async & used for frame gen, so no reprojection here)
+            var blendFactor = effectiveTemporalBlend()
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 lastError = "Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)"
                 return nil
             }
-            // Temporal reproject
-            encoder.setComputePipelineState(temporalPipeline)
+            encoder.setComputePipelineState(taaAccumulatePipeline)
             encoder.setTexture(input, index: 0)
             encoder.setTexture(history, index: 1)
-            encoder.setTexture(input, index: 2)  // Use input as dummy flow (zero motion)
-            encoder.setTexture(out, index: 3)
-            encoder.setBytes(&params, length: MemoryLayout<TemporalParams>.size, index: 0)
-            dispatchThreads(pipeline: temporalPipeline, encoder: encoder, width: input.width, height: input.height)
+            encoder.setTexture(out, index: 2)
+            encoder.setBytes(&blendFactor, length: MemoryLayout<Float>.size, index: 0)
+            dispatchThreads(pipeline: taaAccumulatePipeline, encoder: encoder, width: input.width, height: input.height)
 
             // Copy to history
             encoder.setComputePipelineState(copyPipeline)
@@ -1342,9 +1347,9 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         resetFrameCounters()
         self.windowCaptureManager = manager
         
-        manager.onFrameReceived = { [weak self] surface, timestamp in
+        manager.onFrameReceived = { [weak self] surface, pixelBuffer, timestamp in
             self?.processingQueue.async {
-                self?.processIOSurfaceFrame(surface: surface, timestamp: timestamp)
+                self?.processIOSurfaceFrame(surface: surface, pixelBuffer: pixelBuffer, timestamp: timestamp)
             }
         }
         
@@ -1355,12 +1360,12 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         self.lastCaptureTimestamp = 0
     }
     
-    private func processIOSurfaceFrame(surface: IOSurfaceRef, timestamp: Double) {
+    private func processIOSurfaceFrame(surface: IOSurfaceRef, pixelBuffer: CVPixelBuffer, timestamp: Double) {
         // Triple buffering: wait for a slot
         inFlightSemaphore.wait()
         let currentTime = CACurrentMediaTime()
         updateCaptureStats(currentTime: currentTime, captureTimestamp: timestamp)
-        processSurface(surface, timestamp: currentTime)
+        processSurface(surface, pixelBuffer: pixelBuffer, timestamp: currentTime)
     }
     
     func stopCapture() async {
