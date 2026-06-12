@@ -23,7 +23,6 @@ struct PipelineStats: @unchecked Sendable {
     var passthroughFrameCount: UInt64 = 0
     var gpuMemoryUsed: UInt64 = 0
     var gpuMemoryTotal: UInt64 = 0
-    var isUsingVirtualDisplay: Bool = false
     var outputResolution: CGSize = .zero
 }
 
@@ -58,8 +57,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     private let inFlightSemaphore = DispatchSemaphore(value: 3)
     
     var deviceName: String { device.name }
-    
-    var onFrameReady: ((MTLTexture) -> Void)?
+
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     
@@ -90,7 +88,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     private var renderTexture: MTLTexture?
     private var scaledTexture: MTLTexture?
     private var casTexture: MTLTexture?
-    private var usmTexture: MTLTexture?
     private var fxaaTexture: MTLTexture?
     private var smaaEdgeTexture: MTLTexture?
     private var smaaWeightTexture: MTLTexture?
@@ -187,7 +184,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     private var scaleFactor: Float = 1.0
     private var sharpness: Float = 0.5
     private var temporalBlend: Float = 0.1
-    private var motionScale: Float = 1.0
     private var captureCursor: Bool = true
     private var frameGenEnabled: Bool = false
     private var frameGenMode: CaptureSettings.FrameGenMode = .off
@@ -554,7 +550,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         renderTexture = nil
         scaledTexture = nil
         casTexture = nil
-        usmTexture = nil
         fxaaTexture = nil
         smaaEdgeTexture = nil
         smaaWeightTexture = nil
@@ -1031,12 +1026,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         frameBuffer.push(FrameHistory(texture: historyTex, timestamp: timestamp, flowFromPrev: flowFromPrev, flowToPrev: flowToPrev))
     }
 
-    private struct UpscaleParams {
-        var sharpness: Float
-        var inputSize: SIMD2<UInt32>
-        var outputSize: SIMD2<UInt32>
-    }
-
     private struct SharpenParams {
         var sharpness: Float
         var radius: Float
@@ -1290,7 +1279,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         self.outputSize = outputSize
         statsLock.lock()
         _stats.outputResolution = outputSize
-        _stats.isUsingVirtualDisplay = true
         statsLock.unlock()
     }
     
@@ -1323,7 +1311,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         qualityProfile = newProfile
         sharpness = settings.sharpening
         temporalBlend = settings.temporalBlend
-        motionScale = settings.motionScale
         captureCursor = settings.captureCursor
         frameGenMode = settings.frameGenMode
         frameGenEnabled = settings.frameGenMode != .off

@@ -156,8 +156,9 @@ struct ContentView: View {
                     showAlert = true
                 }
                 Button("Check for Updates") {
-                    alertMessage = "You're up to date."
-                    showAlert = true
+                    if let url = URL(string: "https://github.com/Stallion77RepoOfficial/MetalGoose/releases/latest") {
+                        NSWorkspace.shared.open(url)
+                    }
                 }
             } label: {
                 Image(systemName: "gearshape")
