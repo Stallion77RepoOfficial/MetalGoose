@@ -209,22 +209,14 @@ final class CaptureSettings: ObservableObject {
         case off = "Off"
         case fxaa = "FXAA"
         case smaa = "SMAA"
-        case msaa = "MSAA"
-        case taa = "TAA"
-        
+
         var id: String { rawValue }
-        
-        var isTemporal: Bool {
-            return self == .taa
-        }
-        
+
         var description: String {
             switch self {
             case .off: return "No anti-aliasing - sharpest but aliased"
-            case .fxaa: return "Fast Approximate AA - quick, slight blur"
-            case .smaa: return "Subpixel Morphological AA - high quality edges"
-            case .msaa: return "Multisample AA - hardware-like, clean edges"
-            case .taa: return "Temporal AA - motion-compensated, best quality"
+            case .fxaa: return "Fast Approximate AA - quick, smooths edges on the final image"
+            case .smaa: return "Subpixel Morphological AA - higher quality edge detection"
             }
         }
     }
@@ -242,13 +234,10 @@ final class CaptureSettings: ObservableObject {
     @Published var aaMode: AAMode = .off
     
     @Published var captureCursor: Bool = true
-    @Published var adaptiveSync: Bool = true
     @Published var showMGHUD: Bool = true
     @Published var vsync: Bool = true
-    
+
     @Published var sharpening: Float = 0.5
-    @Published var temporalBlend: Float = 0.1
-    @Published var motionScale: Float = 1.0
     
     var effectiveUpscaleFactor: Float {
         guard scalingType != .off else { return 1.0 }
@@ -262,21 +251,7 @@ final class CaptureSettings: ObservableObject {
     var isFrameGenEnabled: Bool {
         return frameGenMode != .off
     }
-    
-    var isTemporalAAEnabled: Bool {
-        return aaMode == .taa
-    }
-    
-    var outputMultiplier: Float {
-        guard isUpscalingEnabled else { return 1.0 }
-        return scaleFactor.floatValue
-    }
-    
-    var interpolatedFrameCount: Int {
-        guard isFrameGenEnabled else { return 1 }
-        return frameGenMultiplier.intValue
-    }
-    
+
     var effectiveTargetFPS: Int {
         guard isFrameGenEnabled else { return targetFPS.intValue }
         switch frameGenType {
@@ -309,13 +284,10 @@ final class CaptureSettings: ObservableObject {
         defaults.set(frameGenMultiplier.rawValue, forKey: prefix + "frameGenMultiplier")
         defaults.set(aaMode.rawValue, forKey: prefix + "aaMode")
         defaults.set(captureCursor, forKey: prefix + "captureCursor")
-        defaults.set(adaptiveSync, forKey: prefix + "adaptiveSync")
         defaults.set(showMGHUD, forKey: prefix + "showMGHUD")
         defaults.set(vsync, forKey: prefix + "vsync")
         defaults.set(sharpening, forKey: prefix + "sharpening")
-        defaults.set(temporalBlend, forKey: prefix + "temporalBlend")
-        defaults.set(motionScale, forKey: prefix + "motionScale")
-        
+
         if !profiles.contains(name) {
             profiles.append(name)
             defaults.set(profiles, forKey: "MetalGoose.Profiles")
@@ -355,13 +327,10 @@ final class CaptureSettings: ObservableObject {
            
         
         if defaults.object(forKey: prefix + "captureCursor") != nil { captureCursor = defaults.bool(forKey: prefix + "captureCursor") }
-        if defaults.object(forKey: prefix + "adaptiveSync") != nil { adaptiveSync = defaults.bool(forKey: prefix + "adaptiveSync") }
         if defaults.object(forKey: prefix + "showMGHUD") != nil { showMGHUD = defaults.bool(forKey: prefix + "showMGHUD") }
         if defaults.object(forKey: prefix + "vsync") != nil { vsync = defaults.bool(forKey: prefix + "vsync") }
         if defaults.object(forKey: prefix + "sharpening") != nil { sharpening = defaults.float(forKey: prefix + "sharpening") }
-        if defaults.object(forKey: prefix + "temporalBlend") != nil { temporalBlend = defaults.float(forKey: prefix + "temporalBlend") }
-        if defaults.object(forKey: prefix + "motionScale") != nil { motionScale = defaults.float(forKey: prefix + "motionScale") }
-        
+
         selectedProfile = name
     }
     
@@ -375,8 +344,7 @@ final class CaptureSettings: ObservableObject {
         let prefix = "MetalGoose.Profile.\(name)."
         let keys = ["renderScale", "scalingType", "qualityMode", "scaleFactor",
                     "frameGenMode", "frameGenType", "targetFPS", "frameGenMultiplier", "aaMode",
-                    "captureCursor", "adaptiveSync",
-                    "showMGHUD", "vsync", "sharpening", "temporalBlend", "motionScale"]
+                    "captureCursor", "showMGHUD", "vsync", "sharpening"]
         for key in keys {
             defaults.removeObject(forKey: prefix + key)
         }
@@ -392,7 +360,6 @@ final class CaptureSettings: ObservableObject {
 
 struct QualityProfile {
     let sharpnessScale: Float
-    let temporalBlendScale: Float
     let aaThreshold: Float
     let smaaSearchSteps: Int
     let frameGenGradientThreshold: Float
@@ -405,7 +372,6 @@ extension CaptureSettings.QualityMode {
         case .performance:
             return QualityProfile(
                 sharpnessScale: 0.8,
-                temporalBlendScale: 1.2,
                 aaThreshold: 0.18,
                 smaaSearchSteps: 8,
                 frameGenGradientThreshold: 0.08
@@ -413,7 +379,6 @@ extension CaptureSettings.QualityMode {
         case .balanced:
             return QualityProfile(
                 sharpnessScale: 1.0,
-                temporalBlendScale: 1.0,
                 aaThreshold: 0.12,
                 smaaSearchSteps: 12,
                 frameGenGradientThreshold: 0.06
@@ -421,7 +386,6 @@ extension CaptureSettings.QualityMode {
         case .ultra:
             return QualityProfile(
                 sharpnessScale: 1.2,
-                temporalBlendScale: 0.85,
                 aaThreshold: 0.08,
                 smaaSearchSteps: 16,
                 frameGenGradientThreshold: 0.045

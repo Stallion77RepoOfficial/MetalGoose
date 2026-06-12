@@ -36,10 +36,10 @@ MetalGoose is a native macOS application that provides real-time upscaling and f
 - Quality modes: Performance, Balanced, Quality
 
 ### Anti-Aliasing
-- **FXAA** — Fast approximate anti-aliasing
-- **SMAA** — Enhanced subpixel morphological AA
-- **MSAA** — Multi-sample anti-aliasing
-- **TAA** — Temporal anti-aliasing with history
+Post-process anti-aliasing that runs on the final captured image, with no need
+for depth buffers or motion vectors:
+- **FXAA** — Fast approximate anti-aliasing (relative edge threshold + subpixel pass)
+- **SMAA** — Subpixel morphological AA with local contrast adaptation
 
 ### Performance Monitoring
 - Real-time HUD overlay
@@ -103,7 +103,6 @@ open MetalGoose.xcodeproj
 - MG-CAP-002: ScreenCaptureKit start error.
 - MG-CAP-003: ScreenCaptureKit stop error.
 - MG-CAP-004: Stream stopped with error.
-- MG-CAP-005: Cursor visibility update failed.
 
 ## Engine (MG-ENG)
 - MG-ENG-001: Metal pipeline setup failed.

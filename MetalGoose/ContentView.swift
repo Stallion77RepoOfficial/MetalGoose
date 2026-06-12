@@ -379,10 +379,7 @@ struct ContentView: View {
                               helpText: String(localized: "Include cursor", comment: "Toggle help text"))
 
                     ToggleRow(label: String(localized: "VSync", comment: "Toggle label"), isOn: $settings.vsync,
-                              helpText: String(localized: "Sync to display", comment: "Toggle help text"))
-
-                    ToggleRow(label: String(localized: "Adaptive Sync", comment: "Toggle label"), isOn: $settings.adaptiveSync,
-                              helpText: String(localized: "Auto pacing", comment: "Toggle help text"))
+                              helpText: String(localized: "Sync presentation to the display refresh to avoid tearing", comment: "Toggle help text"))
 
                     SliderRow(label: String(localized: "Sharpness", comment: "Slider label"), value: $settings.sharpening, range: 0...1,
                               helpText: String(localized: "CAS intensity", comment: "Slider help text"))
@@ -474,20 +471,22 @@ struct ContentView: View {
             showAlert = true
             return
         }
-        let targetRefreshRate = Double(settings.targetFPS.intValue)
-        let captureRefreshRate = Int(round(targetRefreshRate))
-        
+        // The panel's refresh rate is the physical ceiling for both capture and
+        // output. Capturing at this rate lets duplicate-frame detection recover
+        // the real source rate so frame generation has headroom.
+        let displayMaxFPS = outputScreen.maximumFramesPerSecond > 0 ? outputScreen.maximumFramesPerSecond : 60
+
         guard let captureManager = windowCaptureManager else { return }
-        
+
         let sourceRes = cgFrame.size
         let scaledOutputSize = outputScreen.frame.size
-        
+
         engine.configure(sourceResolution: sourceRes, outputSize: scaledOutputSize)
-        
-        let success = await captureManager.startCapture(windowID: wid, refreshRate: captureRefreshRate, showsCursor: settings.captureCursor)
+
+        let success = await captureManager.startCapture(windowID: wid, maxFPS: displayMaxFPS)
         if success {
-            await engine.startCaptureFromWindow(captureManager, refreshRate: captureRefreshRate)
-            
+            await engine.startCaptureFromWindow(captureManager, refreshRate: displayMaxFPS)
+
             if let name = app.localizedName {
                 connectedProcessName = name
             } else {
@@ -499,23 +498,22 @@ struct ContentView: View {
             targetDisplayID = displayID
             activeOutputScreen = outputScreen
             isScalingActive = true
-            
+
             let config = OverlayWindowConfig(
                 targetScreen: outputScreen,
                 windowFrame: cgFrame,
                 size: scaledOutputSize,
-                refreshRate: targetRefreshRate,
+                refreshRate: Double(displayMaxFPS),
                 vsyncEnabled: settings.vsync,
-                adaptiveSyncEnabled: settings.adaptiveSync,
                 passThrough: true,
                 scaleFactor: 1.0,
                 captureCursor: settings.captureCursor
             )
-            
+
             if overlay.createOverlay(config: config) {
                 let mtkView = MTKView(frame: CGRect(origin: .zero, size: scaledOutputSize))
                 overlay.setMTKView(mtkView)
-                engine.attachToView(mtkView, refreshRate: captureRefreshRate)
+                engine.attachToView(mtkView, displayRefreshRate: displayMaxFPS)
                 gooseMtkView = mtkView
                 
                 overlay.setTargetWindow(wid, pid: app.processIdentifier)

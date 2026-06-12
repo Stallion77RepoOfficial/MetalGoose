@@ -147,6 +147,9 @@ fragment half4 texture_fragment(
 }
 
 
+// FXAA 3.11 console variant with a relative edge threshold and a subpixel
+// blend pass. Operates purely on the final color image — no depth or motion
+// vectors required.
 kernel void fxaa(
     texture2d<half, access::read> input [[texture(0)]],
     texture2d<half, access::write> output [[texture(1)]],
@@ -160,6 +163,8 @@ kernel void fxaa(
     const half FXAA_REDUCE_MUL = 1.0h / 8.0h;
     const half FXAA_REDUCE_MIN = 1.0h / 128.0h;
     const half FXAA_SPAN_MAX = 8.0h;
+    const half FXAA_EDGE_THRESHOLD_MIN = 1.0h / 24.0h;
+    const half FXAA_SUBPIX = 0.75h;
 
     half3 rgbNW = input.read(uint2(max(0u, gid.x - 1), max(0u, gid.y - 1))).rgb;
     half3 rgbNE = input.read(uint2(min(width - 1, gid.x + 1), max(0u, gid.y - 1))).rgb;
@@ -177,7 +182,10 @@ kernel void fxaa(
     half lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
     half lumaRange = lumaMax - lumaMin;
 
-    if (lumaRange < half(threshold)) {
+    // Relative edge threshold: scale the contrast test with local brightness so
+    // dark and bright regions are treated consistently
+    half edgeThreshold = max(FXAA_EDGE_THRESHOLD_MIN, lumaMax * half(threshold));
+    if (lumaRange < edgeThreshold) {
         output.write(half4(rgbM, 1.0h), gid);
         return;
     }
@@ -205,7 +213,16 @@ kernel void fxaa(
     half3 rgbB = rgbA * 0.5h + (input.read(uint2(pos3)).rgb + input.read(uint2(pos4)).rgb) * 0.25h;
     half lumaB = rgb2luma(rgbB);
 
-    half3 result = (lumaB < lumaMin || lumaB > lumaMax) ? rgbA : rgbB;
+    half3 edgeResult = (lumaB < lumaMin || lumaB > lumaMax) ? rgbA : rgbB;
+
+    // Subpixel aliasing pass: blend toward the local 3x3 average proportional to
+    // how much the center deviates from its neighborhood, softening crawling
+    half3 lowpass = (rgbNW + rgbNE + rgbSW + rgbSE + rgbM) * 0.2h;
+    half lumaLowpass = rgb2luma(lowpass);
+    half subpix = clamp(abs(lumaLowpass - lumaM) / max(lumaRange, FXAA_REDUCE_MIN), 0.0h, 1.0h);
+    subpix = subpix * subpix * FXAA_SUBPIX;
+
+    half3 result = mix(edgeResult, lowpass, subpix);
     output.write(half4(result, 1.0h), gid);
 }
 
@@ -229,6 +246,8 @@ struct AntiAliasParams {
 };
 
 
+// SMAA luma edge detection with local contrast adaptation. This is the base
+// (non-temporal) SMAA pass, so it needs neither depth nor motion vectors.
 kernel void smaaEdgeDetection(
     texture2d<half, access::read> input [[texture(0)]],
     texture2d<half, access::write> edges [[texture(1)]],
@@ -241,21 +260,34 @@ kernel void smaaEdgeDetection(
 
     half threshold = half(params.threshold);
 
-
-    half3 c = input.read(gid).rgb;
-    half3 cLeft = input.read(uint2(max(0u, gid.x - 1), gid.y)).rgb;
-    half3 cTop = input.read(uint2(gid.x, max(0u, gid.y - 1))).rgb;
-
-    half lumaC = rgb2luma(c);
-    half lumaLeft = rgb2luma(cLeft);
-    half lumaTop = rgb2luma(cTop);
-
+    half lumaC    = rgb2luma(input.read(gid).rgb);
+    half lumaLeft = rgb2luma(input.read(uint2(max(0u, gid.x - 1), gid.y)).rgb);
+    half lumaTop  = rgb2luma(input.read(uint2(gid.x, max(0u, gid.y - 1))).rgb);
 
     half2 delta;
     delta.x = abs(lumaC - lumaLeft);
     delta.y = abs(lumaC - lumaTop);
 
     half2 edge = step(threshold, delta);
+    if (edge.x == 0.0h && edge.y == 0.0h) {
+        edges.write(half4(0.0h, 0.0h, 0.0h, 1.0h), gid);
+        return;
+    }
+
+    // Local contrast adaptation: discard edges that are masked by a much
+    // stronger neighbouring edge, which removes most false positives and
+    // ghosting on textured surfaces (standard SMAA refinement).
+    half lumaRight  = rgb2luma(input.read(uint2(min(width - 1, gid.x + 1), gid.y)).rgb);
+    half lumaBottom = rgb2luma(input.read(uint2(gid.x, min(height - 1, gid.y + 1))).rgb);
+    half lumaLeftLeft = rgb2luma(input.read(uint2(max(0u, gid.x - 2), gid.y)).rgb);
+    half lumaTopTop   = rgb2luma(input.read(uint2(gid.x, max(0u, gid.y - 2))).rgb);
+
+    half2 maxDelta;
+    maxDelta.x = max(max(delta.x, abs(lumaC - lumaRight)), abs(lumaLeft - lumaLeftLeft));
+    maxDelta.y = max(max(delta.y, abs(lumaC - lumaBottom)), abs(lumaTop - lumaTopTop));
+
+    half finalDelta = max(maxDelta.x, maxDelta.y);
+    edge *= step(finalDelta * 0.5h, delta);
 
     edges.write(half4(edge.x, edge.y, 0.0h, 1.0h), gid);
 }
@@ -367,86 +399,6 @@ kernel void smaaBlend(
 }
 
 
-
-
-
-
-kernel void temporalAccumulation(
-    texture2d<half, access::read> current [[texture(0)]],
-    texture2d<half, access::read> history [[texture(1)]],
-    texture2d<half, access::write> output [[texture(2)]],
-    constant float& blendFactor [[buffer(0)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint width = current.get_width();
-    uint height = current.get_height();
-    if (gid.x >= width || gid.y >= height) return;
-
-    half4 curr = current.read(gid);
-    half4 hist = history.read(gid);
-
-
-    half4 minNeighbor = curr;
-    half4 maxNeighbor = curr;
-
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            int2 pos = int2(gid) + int2(dx, dy);
-            pos = clamp(pos, int2(0), int2(width - 1, height - 1));
-            half4 neighbor = current.read(uint2(pos));
-            minNeighbor = min(minNeighbor, neighbor);
-            maxNeighbor = max(maxNeighbor, neighbor);
-        }
-    }
-
-
-    half4 clampedHist = clamp(hist, minNeighbor, maxNeighbor);
-
-
-    half4 result = mix(clampedHist, curr, half(blendFactor));
-    output.write(result, gid);
-}
-
-kernel void msaa(
-    texture2d<half, access::read> input [[texture(0)]],
-    texture2d<half, access::write> output [[texture(1)]],
-    constant AntiAliasParams& params [[buffer(0)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint width = input.get_width();
-    uint height = input.get_height();
-    if (gid.x >= width || gid.y >= height) return;
-
-
-    half4 center = input.read(gid);
-    half centerLuma = rgb2luma(center.rgb);
-
-    half4 sum = center;
-    half weightSum = 1.0h;
-
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-
-            int2 pos = int2(gid) + int2(dx, dy);
-            if (pos.x < 0 || pos.x >= int(width) ||
-                pos.y < 0 || pos.y >= int(height)) continue;
-
-            half4 neighbor = input.read(uint2(pos));
-            half neighborLuma = rgb2luma(neighbor.rgb);
-
-
-            half diff = abs(centerLuma - neighborLuma);
-            half weight = exp(-diff * 10.0h) * 0.5h;
-
-            sum += neighbor * weight;
-            weightSum += weight;
-        }
-    }
-
-    output.write(sum / weightSum, gid);
-}
 
 
 

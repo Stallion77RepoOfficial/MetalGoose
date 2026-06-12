@@ -73,8 +73,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     private var smaaEdgePipeline: MTLComputePipelineState?
     private var smaaWeightPipeline: MTLComputePipelineState?
     private var smaaBlendPipeline: MTLComputePipelineState?
-    private var msaaPipeline: MTLComputePipelineState?
-    private var taaAccumulatePipeline: MTLComputePipelineState?
     private var copyPipeline: MTLComputePipelineState?
 
     // Optical flow / frame generation pipelines
@@ -92,10 +90,7 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     private var smaaEdgeTexture: MTLTexture?
     private var smaaWeightTexture: MTLTexture?
     private var smaaOutputTexture: MTLTexture?
-    private var msaaTexture: MTLTexture?
-    private var taaHistoryTexture: MTLTexture?
-    private var taaOutputTexture: MTLTexture?
-    
+
     // Vision framework optical flow (ANE/GPU-powered)
     // Managed by VisionFlowProvider class — no instance variables needed here
     
@@ -174,7 +169,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     private var historyTextureIndex: Int = 0
 
     private var blendTexture: MTLTexture?
-    private var hasTAAHistory: Bool = false
     private var lastProcessedSize: CGSize = .zero
 
     private var scalingType: CaptureSettings.ScalingType = .off
@@ -183,14 +177,11 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     private var renderScaleFactor: Float = 1.0
     private var scaleFactor: Float = 1.0
     private var sharpness: Float = 0.5
-    private var temporalBlend: Float = 0.1
-    private var captureCursor: Bool = true
     private var frameGenEnabled: Bool = false
     private var frameGenMode: CaptureSettings.FrameGenMode = .off
     private var frameGenType: CaptureSettings.FrameGenType = .adaptive
     private var targetFPS: Int = 120
     private var frameGenMultiplier: Int = 2
-    private var adaptiveSync: Bool = true
     private var vsyncEnabled: Bool = true
     private var qualityProfile: QualityProfile = CaptureSettings.QualityMode.balanced.profile
     
@@ -239,13 +230,12 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         casPipeline = makeCompute("contrastAdaptiveSharpening")
         copyPipeline = makeCompute("copyTexture")
         
-        // Anti-aliasing pipelines
+        // Anti-aliasing pipelines (post-process only: FXAA + SMAA work on the
+        // final color image, so they need no depth or motion-vector inputs)
         fxaaPipeline = makeCompute("fxaa")
         smaaEdgePipeline = makeCompute("smaaEdgeDetection")
         smaaWeightPipeline = makeCompute("smaaBlendingWeights")
         smaaBlendPipeline = makeCompute("smaaBlend")
-        msaaPipeline = makeCompute("msaa")
-        taaAccumulatePipeline = makeCompute("temporalAccumulation")
 
         // Optical flow / frame generation pipelines
         flowWarpPipeline = makeCompute("flowWarp")
@@ -554,9 +544,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         smaaEdgeTexture = nil
         smaaWeightTexture = nil
         smaaOutputTexture = nil
-        msaaTexture = nil
-        taaHistoryTexture = nil
-        taaOutputTexture = nil
         historyTextures = Array(repeating: nil, count: historyTextures.count)
         historyTextureIndex = 0
         visionFlowProvider?.reset()
@@ -564,7 +551,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         warpedPrevTexture = nil
         warpedNextTexture = nil
         blendTexture = nil
-        hasTAAHistory = false
         lastProcessedSize = .zero
         if clearFrames {
             frameBuffer.clear()
@@ -598,41 +584,43 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         return sharpness * qualityProfile.sharpnessScale
     }
 
-    private func effectiveTemporalBlend() -> Float {
-        return temporalBlend * qualityProfile.temporalBlendScale
+    /// Source frame rate, measured from the interval between unique captured
+    /// frames (duplicates are dropped upstream in WindowCaptureManager).
+    private func measuredSourceFPS() -> Double {
+        if estimatedCaptureInterval > 0 {
+            return 1.0 / estimatedCaptureInterval
+        }
+        if stats.captureFPS > 0 {
+            return Double(stats.captureFPS)
+        }
+        return 0
     }
 
     private func desiredOutputFPS() -> Int {
+        let sourceFPS = measuredSourceFPS()
         var target: Int
-        let captureFPS: Double = {
-            if estimatedCaptureInterval > 0 {
-                return 1.0 / estimatedCaptureInterval
-            }
-            if stats.captureFPS > 0 {
-                return Double(stats.captureFPS)
-            }
-            return 0
-        }()
+
         if frameGenEnabled {
             switch frameGenType {
             case .adaptive:
-                let maxGenFPS = captureFPS > 0 ? Int(round(captureFPS * Double(frameGenMultiplier))) : targetFPS
-                target = min(targetFPS, maxGenFPS)
+                // Generate as many in-between frames as needed to reach the
+                // target (bounded below by the source rate)
+                target = max(targetFPS, Int(round(sourceFPS)))
             case .fixed:
-                let maxGenFPS = captureFPS > 0 ? Int(round(captureFPS * Double(frameGenMultiplier))) : targetFPS
-                target = maxGenFPS
+                // Present a fixed multiple of the real source frames
+                target = sourceFPS > 0 ? Int(round(sourceFPS * Double(frameGenMultiplier))) : targetFPS
             }
-        } else if adaptiveSync {
-            let capture = Int(round(captureFPS))
-            target = capture
         } else {
-            target = currentRefreshRate
+            // No generation: present source frames as they arrive
+            target = sourceFPS > 0 ? Int(round(sourceFPS)) : currentRefreshRate
         }
 
+        // The display can never present faster than its refresh rate, so the
+        // output is physically capped there (e.g. 120 Hz ProMotion → 120 fps)
         if currentRefreshRate > 0 {
             target = min(target, currentRefreshRate)
         }
-        return target
+        return max(1, target)
     }
 
     private func applyFrameRatePreference(_ preferred: Int) {
@@ -672,17 +660,19 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         return captureInterval >= outputInterval ? captureInterval : outputInterval
     }
     
-    func attachToView(_ view: MTKView, refreshRate: Int) {
+    /// - Parameter displayRefreshRate: the panel's maximum refresh rate, which
+    ///   is the physical ceiling for the output frame rate.
+    func attachToView(_ view: MTKView, displayRefreshRate: Int) {
         view.device = device
         view.delegate = self
-        view.preferredFramesPerSecond = refreshRate
+        view.preferredFramesPerSecond = displayRefreshRate
         view.isPaused = false
         view.enableSetNeedsDisplay = false
         view.colorPixelFormat = .bgra8Unorm
         view.framebufferOnly = false
         applyDisplaySync(to: view)
         self.mtkView = view
-        self.currentRefreshRate = refreshRate
+        self.currentRefreshRate = displayRefreshRate
         applyFrameRatePreference(desiredOutputFPS())
     }
     
@@ -718,40 +708,37 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         let frameGenActive = frameGenEnabled
         var isInterpolated = false
 
-        if frameGenEnabled {
-            guard let (prev, next) = frameBuffer.getFramesForTime(targetTime) else {
-                statsLock.lock()
-                _stats.droppedFrames += 1
-                statsLock.unlock()
-                reportError("Error Code: MG-ENG-006 Frame interpolation failed: missing frame pair")
-                commandBuffer.commit()
-                return
-            }
-            let sameSize = prev.texture.width == next.texture.width &&
-                           prev.texture.height == next.texture.height
-            guard sameSize else {
-                statsLock.lock()
-                _stats.droppedFrames += 1
-                statsLock.unlock()
-                reportError("Error Code: MG-ENG-006 Frame interpolation failed: size mismatch")
-                commandBuffer.commit()
-                return
-            }
+        if frameGenEnabled, let (prev, next) = frameBuffer.getFramesForTime(targetTime),
+           prev.texture.width == next.texture.width,
+           prev.texture.height == next.texture.height {
             let duration = next.timestamp - prev.timestamp
             let timeSincePrev = targetTime - prev.timestamp
             let ratio = duration > 0 ? (timeSincePrev / duration) : 0
             let t = Float(min(max(ratio, 0), 1))
-            guard let interpolated = interpolateFrame(prev: prev, next: next, t: t, commandBuffer: commandBuffer) else {
-                statsLock.lock()
-                _stats.droppedFrames += 1
-                statsLock.unlock()
-                reportError("Error Code: MG-ENG-006 Frame interpolation failed: pipeline error")
-                commandBuffer.commit()
-                return
+
+            // Snap to a real (passthrough) frame when the output time lands
+            // within half an output interval of a captured frame, and only
+            // synthesize a frame for genuine in-between phases. This keeps the
+            // accounting honest: output = passthrough + interpolated, with
+            // passthrough tracking the real captured frames.
+            let outputInterval = targetFPS > 0 ? 1.0 / Double(targetFPS) : 0
+            let snap = outputInterval * 0.5
+
+            if duration <= 0 || timeSincePrev <= snap {
+                outputTex = prev.texture
+            } else if (duration - timeSincePrev) <= snap {
+                outputTex = next.texture
+            } else if let interpolated = interpolateFrame(prev: prev, next: next, t: t, commandBuffer: commandBuffer) {
+                outputTex = interpolated
+                isInterpolated = true
+            } else {
+                // Generation unavailable (e.g. flow not ready yet): show the
+                // nearest real frame rather than dropping the output frame
+                outputTex = t < 0.5 ? prev.texture : next.texture
             }
-            outputTex = interpolated
-            isInterpolated = true
         } else {
+            // Frame generation off, or not enough history yet: present the
+            // newest real frame
             outputTex = frameBuffer.newestFrame?.texture
         }
         
@@ -1115,70 +1102,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
             dispatchThreads(pipeline: blendPipe, encoder: encoder, width: input.width, height: input.height)
             encoder.endEncoding()
             return out
-        case .msaa:
-            guard let msaaPipeline = msaaPipeline,
-                  let out = ensureTexture(&msaaTexture, width: input.width, height: input.height),
-                  let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (MSAA)")
-                return nil
-            }
-            var params = AntiAliasParams(
-                threshold: qualityProfile.aaThreshold,
-                depthThreshold: 0.1,
-                maxSearchSteps: 8,
-                subpixelBlend: 0.5
-            )
-            encoder.setComputePipelineState(msaaPipeline)
-            encoder.setTexture(input, index: 0)
-            encoder.setTexture(out, index: 1)
-            encoder.setBytes(&params, length: MemoryLayout<AntiAliasParams>.size, index: 0)
-            dispatchThreads(pipeline: msaaPipeline, encoder: encoder, width: input.width, height: input.height)
-            encoder.endEncoding()
-            return out
-        case .taa:
-            guard let taaAccumulatePipeline = taaAccumulatePipeline,
-                  let copyPipeline = copyPipeline,
-                  let history = ensureTexture(&taaHistoryTexture, width: input.width, height: input.height),
-                  let out = ensureTexture(&taaOutputTexture, width: input.width, height: input.height) else {
-                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)")
-                return nil
-            }
-
-            if !hasTAAHistory {
-                guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                    reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)")
-                    return nil
-                }
-                encoder.setComputePipelineState(copyPipeline)
-                encoder.setTexture(input, index: 0)
-                encoder.setTexture(history, index: 1)
-                dispatchThreads(pipeline: copyPipeline, encoder: encoder, width: input.width, height: input.height)
-                encoder.endEncoding()
-                hasTAAHistory = true
-                return input
-            }
-
-            // TAA without motion vectors — neighborhood-clamped accumulation
-            // (Vision flow is async & used for frame gen, so no reprojection here)
-            var blendFactor = effectiveTemporalBlend()
-            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (TAA)")
-                return nil
-            }
-            encoder.setComputePipelineState(taaAccumulatePipeline)
-            encoder.setTexture(input, index: 0)
-            encoder.setTexture(history, index: 1)
-            encoder.setTexture(out, index: 2)
-            encoder.setBytes(&blendFactor, length: MemoryLayout<Float>.size, index: 0)
-            dispatchThreads(pipeline: taaAccumulatePipeline, encoder: encoder, width: input.width, height: input.height)
-
-            // Copy to history
-            encoder.setComputePipelineState(copyPipeline)
-            encoder.setTexture(out, index: 0)
-            encoder.setTexture(history, index: 1)
-            dispatchThreads(pipeline: copyPipeline, encoder: encoder, width: input.width, height: input.height)
-            encoder.endEncoding()
-            return out
         }
     }
 
@@ -1283,7 +1206,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
     }
     
     func updateSettings(_ settings: CaptureSettings) {
-        let cursorChanged = settings.captureCursor != captureCursor
         let newScalingType = settings.scalingType
         let newQualityMode = settings.qualityMode
         let newAAMode = settings.aaMode
@@ -1291,18 +1213,18 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         let newRenderScale = shouldScale ? settings.renderScale.multiplier : 1.0
         let newScaleFactor = shouldScale ? settings.scaleFactor.floatValue : 1.0
         let newProfile = newQualityMode.profile
-        
+
         let pipelineChanged =
             newScalingType != scalingType ||
             newQualityMode != qualityMode ||
             newAAMode != aaMode ||
             abs(newRenderScale - renderScaleFactor) > 0.001 ||
             abs(newScaleFactor - scaleFactor) > 0.001
-        
+
         if pipelineChanged {
             resetProcessingState(clearFrames: true)
         }
-        
+
         scalingType = newScalingType
         qualityMode = newQualityMode
         aaMode = newAAMode
@@ -1310,23 +1232,16 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         scaleFactor = newScaleFactor
         qualityProfile = newProfile
         sharpness = settings.sharpening
-        temporalBlend = settings.temporalBlend
-        captureCursor = settings.captureCursor
         frameGenMode = settings.frameGenMode
         frameGenEnabled = settings.frameGenMode != .off
         frameGenType = settings.frameGenType
         targetFPS = settings.targetFPS.intValue
         frameGenMultiplier = settings.frameGenMultiplier.intValue
-        adaptiveSync = settings.adaptiveSync
         vsyncEnabled = settings.vsync
-        
+
         applyFrameRatePreference(desiredOutputFPS())
         if let view = mtkView {
             applyDisplaySync(to: view)
-        }
-
-        if cursorChanged, isCapturing {
-            restartCaptureForCursorChange()
         }
 
         if !frameGenEnabled {
@@ -1338,14 +1253,6 @@ final class GooseEngine: NSObject, ObservableObject, MTKViewDelegate, @unchecked
         }
     }
 
-    private func restartCaptureForCursorChange() {
-        guard let manager = windowCaptureManager else { return }
-        let showsCursor = captureCursor
-        Task {
-            await manager.setShowsCursor(showsCursor)
-        }
-    }
-    
     func startCaptureFromWindow(_ manager: WindowCaptureManager, refreshRate: Int) async {
         resetProcessingState(clearFrames: true)
         resetFrameCounters()

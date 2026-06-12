@@ -9,15 +9,14 @@ import os
 
 @available(macOS 26.0, *)
 final class WindowCaptureManager: NSObject, ObservableObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
-    
+
     private let captureQueue = DispatchQueue(label: "com.metalgoose.capture", qos: .userInteractive)
-    
+
     @Published private(set) var isActive: Bool = false
     @Published private(set) var lastError: String?
     @Published private(set) var currentResolution: CGSize = .zero
-    
+
     private var stream: SCStream?
-    private var configuration: SCStreamConfiguration?
 
     // The pixel buffer must be retained until the GPU finishes reading the
     // IOSurface, otherwise ScreenCaptureKit recycles it mid-frame.
@@ -37,7 +36,10 @@ final class WindowCaptureManager: NSObject, ObservableObject, SCStreamDelegate, 
         return screen?.backingScaleFactor ?? 2.0
     }
 
-    func startCapture(windowID: CGWindowID, refreshRate: Int, showsCursor: Bool) async -> Bool {
+    /// Captures the window at up to `maxFPS` frames per second (typically the
+    /// display's refresh rate). The real source frame rate is recovered by
+    /// dropping duplicate frames, so frame generation has headroom to work.
+    func startCapture(windowID: CGWindowID, maxFPS: Int) async -> Bool {
         await stopCapture()
 
         do {
@@ -59,12 +61,15 @@ final class WindowCaptureManager: NSObject, ObservableObject, SCStreamDelegate, 
             let config = SCStreamConfiguration()
             config.width = Int(pixelSize.width)
             config.height = Int(pixelSize.height)
-            config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(refreshRate))
+            config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, maxFPS)))
             config.pixelFormat = kCVPixelFormatType_32BGRA
-            config.showsCursor = showsCursor
+            // The cursor is never baked into the captured frame; the real
+            // system cursor floats over the overlay at native resolution and
+            // zero latency, so there is exactly one cursor on screen.
+            config.showsCursor = false
 
             // Critical settings for minimum latency and zero-copy mapping
-            config.queueDepth = 2
+            config.queueDepth = 3
             config.captureResolution = .best
             config.shouldBeOpaque = false
             config.backgroundColor = .clear
@@ -74,7 +79,6 @@ final class WindowCaptureManager: NSObject, ObservableObject, SCStreamDelegate, 
             try await captureStream.startCapture()
 
             self.stream = captureStream
-            self.configuration = config
             await MainActor.run {
                 currentResolution = pixelSize
                 isActive = true
@@ -88,20 +92,6 @@ final class WindowCaptureManager: NSObject, ObservableObject, SCStreamDelegate, 
                 lastError = "Error Code: MG-CAP-002 ScreenCaptureKit start error: \(error.localizedDescription)"
             }
             return false
-        }
-    }
-
-    /// Toggles cursor capture on the running stream without a restart
-    func setShowsCursor(_ shows: Bool) async {
-        guard let stream = stream, let configuration = configuration,
-              configuration.showsCursor != shows else { return }
-        configuration.showsCursor = shows
-        do {
-            try await stream.updateConfiguration(configuration)
-        } catch {
-            await MainActor.run {
-                lastError = "Error Code: MG-CAP-005 Cursor visibility update failed: \(error.localizedDescription)"
-            }
         }
     }
 
@@ -119,10 +109,9 @@ final class WindowCaptureManager: NSObject, ObservableObject, SCStreamDelegate, 
             }
         }
         stream = nil
-        configuration = nil
         await MainActor.run { isActive = false }
     }
-    
+
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
         Task { @MainActor in
             let nsError = error as NSError
@@ -132,24 +121,35 @@ final class WindowCaptureManager: NSObject, ObservableObject, SCStreamDelegate, 
             self.stream = nil
         }
     }
-    
+
     nonisolated func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen else { return }
-        
+
         guard let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let attachments = attachmentsArray.first else {
             return
         }
-        
+
         guard let statusRawValue = attachments[SCStreamFrameInfo.status] as? Int,
               let status = SCFrameStatus(rawValue: statusRawValue),
               status == .complete else {
+            // .idle / .blank / .suspended frames carry no new content
             return
         }
-        
+
+        // Drop duplicate frames: when ScreenCaptureKit reports no dirty rects,
+        // the window content is identical to the previous frame. Skipping these
+        // makes the reported capture rate reflect the real source frame rate and
+        // gives frame generation genuinely different frames to interpolate.
+        // If the attachment is absent we conservatively treat the frame as new.
+        if let dirtyRects = attachments[SCStreamFrameInfo.dirtyRects] as? [[String: Any]],
+           dirtyRects.isEmpty {
+            return
+        }
+
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         guard let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue() else { return }
-        
+
         let timestamp = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
 
         onFrameReceived?(surface, pixelBuffer, timestamp)

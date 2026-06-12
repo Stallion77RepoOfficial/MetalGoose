@@ -10,7 +10,6 @@ struct OverlayWindowConfig {
     var size: CGSize
     var refreshRate: Double
     var vsyncEnabled: Bool
-    var adaptiveSyncEnabled: Bool
     var passThrough: Bool
     var scaleFactor: Float
     var captureCursor: Bool
@@ -206,9 +205,10 @@ class MouseConstraintManager {
     func startConstraining(to rect: CGRect) {
         self.targetRect = rect
         if isConstraining { return }
-        
-        CGDisplayHideCursor(CGMainDisplayID())
-        
+
+        // The system cursor stays visible and is the only cursor on screen
+        // (the capture never bakes a cursor into the frame). We only warp it to
+        // keep it within the target window so clicks land where it points.
         let eventMask = (1 << CGEventType.mouseMoved.rawValue) |
                         (1 << CGEventType.leftMouseDragged.rawValue) |
                         (1 << CGEventType.rightMouseDragged.rawValue) |
@@ -263,7 +263,5 @@ class MouseConstraintManager {
         eventTap = nil
         runLoopSource = nil
         isConstraining = false
-        
-        CGDisplayShowCursor(CGMainDisplayID())
     }
 }
