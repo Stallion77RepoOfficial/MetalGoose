@@ -5,72 +5,33 @@ import AppKit
 @MainActor
 final class MGHUDData: ObservableObject {
     @Published var deviceName: String = "Unknown GPU"
-    @Published var driverVersion: String = ""
-    
+
     @Published var captureResolution: String = "-"
     @Published var outputResolution: String = "-"
     @Published var scaleFactor: String = "1.0x"
     @Published var renderScale: String = "100%"
-    
+
     @Published var captureFPS: Float = 0
     @Published var outputFPS: Float = 0
     @Published var interpolatedFPS: Float = 0
     @Published var targetFPS: Int = 120
-    
+
     @Published var frameTime: Float = 0
     @Published var gpuTime: Float = 0
     @Published var captureLatency: Float = 0
-    @Published var presentLatency: Float = 0
-    
+
     @Published var gpuMemoryUsed: UInt64 = 0
     @Published var gpuMemoryTotal: UInt64 = 0
-    @Published var textureMemory: UInt64 = 0
-    
+
     @Published var framesProcessed: UInt64 = 0
     @Published var framesPresented: UInt64 = 0
     @Published var framesInterpolated: UInt64 = 0
     @Published var framesPassthrough: UInt64 = 0
     @Published var framesDropped: UInt64 = 0
-    
+
     @Published var upscaleMode: String = "Off"
     @Published var frameGenMode: String = "Off"
     @Published var aaMode: String = "Off"
-    
-    @Published var computeEncoders: UInt32 = 0
-    @Published var blitEncoders: UInt32 = 0
-    @Published var commandBuffers: UInt32 = 0
-    
-    func update(from stats: PipelineStats, settings: CaptureSettings) {
-        captureFPS = stats.captureFPS
-        outputFPS = stats.outputFPS
-        interpolatedFPS = stats.interpolatedFPS
-        
-        frameTime = stats.frameTime
-        gpuTime = stats.gpuTime
-        captureLatency = stats.captureLatency
-        presentLatency = 0
-        
-        gpuMemoryUsed = stats.gpuMemoryUsed
-        gpuMemoryTotal = stats.gpuMemoryTotal
-        textureMemory = 0
-        
-        framesProcessed = stats.frameCount
-        framesPresented = stats.outputFrameCount
-        framesInterpolated = stats.interpolatedFrameCount
-        framesPassthrough = stats.passthroughFrameCount
-        framesDropped = stats.droppedFrames
-        
-        computeEncoders = 0
-        blitEncoders = 0
-        commandBuffers = 0
-        
-        upscaleMode = settings.scalingType.rawValue
-        frameGenMode = settings.isFrameGenEnabled ? "MGFG-1 \(settings.frameGenMultiplier.rawValue)" : "Off"
-        aaMode = settings.aaMode.rawValue
-        scaleFactor = "\(settings.scaleFactor.rawValue)"
-        renderScale = settings.renderScale.rawValue
-        targetFPS = settings.effectiveTargetFPS
-    }
 }
 
 @available(macOS 26.0, *)
@@ -268,12 +229,6 @@ class MGHUDOverlayView: NSView {
         hostingView = hosting
     }
     
-    func update(stats: PipelineStats, settings: CaptureSettings) {
-        Task { @MainActor in
-            hudData.update(from: stats, settings: settings)
-        }
-    }
-    
     func setDeviceName(_ name: String) {
         Task { @MainActor in
             hudData.deviceName = name
@@ -304,13 +259,12 @@ class MGHUDOverlayView: NSView {
             hudData.gpuMemoryUsed = stats.gpuMemoryUsed
             hudData.gpuMemoryTotal = stats.gpuMemoryTotal
             
-            if stats.outputResolution.width > 0 && stats.outputResolution.height > 0 {
-                hudData.captureResolution = "\(Int(stats.outputResolution.width))x\(Int(stats.outputResolution.height))"
-            }
+            // captureResolution is set once via setResolutions; only the
+            // output resolution changes with pipeline settings
             if stats.outputResolution.width > 0 && stats.outputResolution.height > 0 {
                 hudData.outputResolution = "\(Int(stats.outputResolution.width))x\(Int(stats.outputResolution.height))"
             }
-            
+
             hudData.upscaleMode = settings.scalingType.rawValue
             hudData.frameGenMode = settings.isFrameGenEnabled ? "MGFG-1 \(settings.frameGenMultiplier.rawValue)" : "Off"
             hudData.aaMode = settings.aaMode.rawValue
@@ -388,11 +342,7 @@ final class MGHUDWindowController {
         hudWindow = nil
         hudView = nil
     }
-    
-    func update(stats: PipelineStats, settings: CaptureSettings) {
-        hudView?.update(stats: stats, settings: settings)
-    }
-    
+
     func setDeviceName(_ name: String) {
         hudView?.setDeviceName(name)
     }

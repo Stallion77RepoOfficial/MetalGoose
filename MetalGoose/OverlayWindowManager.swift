@@ -26,43 +26,19 @@ class NonActivatingWindow: NSWindow {
 final class OverlayWindowManager: ObservableObject {
     @Published private(set) var isActive: Bool = false
     @Published private(set) var currentSize: CGSize = .zero
-    @Published private(set) var currentFPS: Double = 0.0
     @Published private(set) var lastError: String?
-    
-    private let device: MTLDevice
-    private let commandQueue: MTLCommandQueue
-    private var textureCache: CVMetalTextureCache?
+
     private var overlayWindow: NSWindow?
     private var mtkView: MTKView?
-    private var lastFrameTime: CFTimeInterval = 0
-    private var frameCount: Int = 0
-    private var fpsStartTime: CFTimeInterval = 0
     private var targetWindowID: CGWindowID = 0
     private var targetPID: pid_t = 0
     private var appObserver: Any?
     private var shouldCaptureCursor: Bool = false
-    
+
     func setCaptureCursorEnabled(_ enabled: Bool) {
         self.shouldCaptureCursor = enabled
     }
-    
-    init?() {
-        guard let dev = MTLCreateSystemDefaultDevice() else {
-            return nil
-        }
-        guard let queue = dev.makeCommandQueue() else {
-            return nil
-        }
-        self.device = dev
-        self.commandQueue = queue
-        
-        var cache: CVMetalTextureCache?
-        let status = CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, dev, nil, &cache)
-        if status == kCVReturnSuccess {
-            self.textureCache = cache
-        }
-    }
-    
+
     deinit {
         if let observer = appObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -136,37 +112,6 @@ final class OverlayWindowManager: ObservableObject {
         overlayWindow = nil
         isActive = false
         currentSize = .zero
-    }
-    
-    func createTexture(from pixelBuffer: CVPixelBuffer) -> MTLTexture? {
-        guard let cache = textureCache else { return nil }
-        
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
-        
-        let mtlPixelFormat: MTLPixelFormat
-        switch pixelFormat {
-        case kCVPixelFormatType_32BGRA: mtlPixelFormat = .bgra8Unorm
-        case kCVPixelFormatType_32RGBA: mtlPixelFormat = .rgba8Unorm
-        case kCVPixelFormatType_64RGBAHalf: mtlPixelFormat = .rgba16Float
-        default:
-            lastError = "Error Code: MG-OV-003 Unsupported pixel format: \(pixelFormat)"
-            return nil
-        }
-        
-        var cvTexture: CVMetalTexture?
-        let status = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, cache, pixelBuffer, nil, mtlPixelFormat, width, height, 0, &cvTexture
-        )
-        guard status == kCVReturnSuccess, let cvTex = cvTexture else { return nil }
-        return CVMetalTextureGetTexture(cvTex)
-    }
-    
-    func flushTextureCache() {
-        if let cache = textureCache {
-            CVMetalTextureCacheFlush(cache, 0)
-        }
     }
     
     func setTargetWindow(_ windowID: CGWindowID, pid: pid_t) {
@@ -247,45 +192,6 @@ final class OverlayWindowManager: ObservableObject {
         }
     }
     
-    var metalDevice: MTLDevice { device }
-    var metalCommandQueue: MTLCommandQueue { commandQueue }
-    
-    var drawableSize: CGSize? {
-        return mtkView?.drawableSize
-    }
-    
-    func setVisible(_ visible: Bool) {
-        if visible { overlayWindow?.orderFrontRegardless() }
-        else { overlayWindow?.orderOut(nil) }
-    }
-}
-
-@available(macOS 26.0, *)
-extension OverlayWindowManager {
-    func createTexture(
-        width: Int, height: Int,
-        pixelFormat: MTLPixelFormat = .rgba16Float,
-        usage: MTLTextureUsage = [.shaderRead, .shaderWrite]
-    ) -> MTLTexture? {
-        let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: pixelFormat, width: width, height: height, mipmapped: false
-        )
-        desc.usage = usage
-        desc.storageMode = .private
-        return device.makeTexture(descriptor: desc)
-    }
-    
-    func createFlowTexture(width: Int, height: Int) -> MTLTexture? {
-        createTexture(width: width, height: height, pixelFormat: .rg16Float, usage: [.shaderRead, .shaderWrite])
-    }
-    
-    func createInterpolatedTexture(width: Int, height: Int) -> MTLTexture? {
-        createTexture(width: width, height: height, pixelFormat: .rgba16Float, usage: [.shaderRead, .shaderWrite])
-    }
-    
-    func createOutputTexture(width: Int, height: Int) -> MTLTexture? {
-        createTexture(width: width, height: height, pixelFormat: .bgra8Unorm, usage: [.shaderRead, .shaderWrite, .renderTarget])
-    }
 }
 
 @available(macOS 26.0, *)
@@ -310,20 +216,22 @@ class MouseConstraintManager {
         
         let info = Unmanaged.passUnretained(self).toOpaque()
         let callback: CGEventTapCallBack = { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-            guard let ref = refcon else { return Unmanaged.passRetained(event) }
+            // Returning the same event requires passUnretained — passRetained
+            // would leak one reference per mouse event
+            guard let ref = refcon else { return Unmanaged.passUnretained(event) }
             let manager = Unmanaged<MouseConstraintManager>.fromOpaque(ref).takeUnretainedValue()
-            
+
             var location = event.location
             let bounds = manager.targetRect
-            
+
             if !bounds.contains(location) {
                 location.x = max(bounds.minX, min(bounds.maxX, location.x))
                 location.y = max(bounds.minY, min(bounds.maxY, location.y))
                 event.location = location
                 CGWarpMouseCursorPosition(location)
             }
-            
-            return Unmanaged.passRetained(event)
+
+            return Unmanaged.passUnretained(event)
         }
         
         eventTap = CGEvent.tapCreate(

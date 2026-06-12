@@ -87,7 +87,7 @@ open MetalGoose.xcodeproj
 
 | Shortcut | Action |
 |----------|--------|
-| `⌘ + T` | Toggle Scale |
+| `⌘ + ⇧ + T` | Toggle Scale |
 
 # MetalGoose Error Codes
 
@@ -95,57 +95,32 @@ open MetalGoose.xcodeproj
 - MG-UI-002: Frontmost app is MetalGoose; user must switch to target window.
 - MG-UI-003: Target window not found for the selected app.
 - MG-UI-004: No display found.
-- MG-UI-005: Fullscreen window detected; virtual display requires windowed or borderless mode.
 - MG-UI-006: Target window bounds unavailable.
 - MG-UI-007: Display ID not found for target screen.
-- MG-UI-008: Display refresh rate unavailable.
+
+## Capture (MG-CAP)
+- MG-CAP-001: Target window not found by ScreenCaptureKit.
+- MG-CAP-002: ScreenCaptureKit start error.
+- MG-CAP-003: ScreenCaptureKit stop error.
+- MG-CAP-004: Stream stopped with error.
+- MG-CAP-005: Cursor visibility update failed.
 
 ## Engine (MG-ENG)
 - MG-ENG-001: Metal pipeline setup failed.
 - MG-ENG-002: Metal device not available.
 - MG-ENG-003: Metal command queue not available.
 - MG-ENG-004: MetalFX Spatial Scaler creation failed.
-- MG-ENG-005: Optical flow pipeline unavailable.
 - MG-ENG-006: Frame interpolation failed.
 - MG-ENG-007: Anti-aliasing pipeline unavailable.
 - MG-ENG-008: Scale pipeline unavailable.
 - MG-ENG-009: CAS pipeline unavailable.
 - MG-ENG-010: IOSurface texture creation failed.
 - MG-ENG-011: Optical flow pipeline unavailable.
-- MG-ENG-012: Optical flow resources unavailable.
 - MG-ENG-013: Frame generation pipeline unavailable.
-
-## Virtual Display (MG-VD)
-- MG-VD-001: CGVirtualDisplayDescriptor creation failed.
-- MG-VD-002: CGVirtualDisplay creation failed.
-- MG-VD-003: CGVirtualDisplayMode creation failed.
-- MG-VD-004: CGVirtualDisplaySettings creation failed.
-- MG-VD-005: Applying virtual display settings failed.
-- MG-VD-006: No active virtual display.
-- MG-VD-007: Virtual display not found in ScreenCaptureKit.
-- MG-VD-008: ScreenCaptureKit start capture failed.
-- MG-VD-009: ScreenCaptureKit stop capture failed.
-- MG-VD-010: ScreenCaptureKit stream stopped with error.
-
-## Accessibility / Window Migration (MG-AX)
-- MG-AX-001: Accessibility permission not granted.
-- MG-AX-002: Failed to read window list from AX API.
-- MG-AX-003: No windows found for target PID.
-- MG-AX-004: Failed to create AX position value.
-- MG-AX-005: Failed to set AX window position.
-- MG-AX-006: Fullscreen window cannot be moved to virtual display.
-- MG-AX-007: Failed to create AX size value.
-- MG-AX-008: Failed to set AX window size.
-- MG-AX-009: Virtual display screen not found.
-- MG-AX-010: Window ID not found for target PID.
 
 ## Overlay (MG-OV)
 - MG-OV-001: Target screen missing for overlay creation.
 - MG-OV-002: Window frame missing for overlay creation.
-- MG-OV-003: Unsupported pixel format for overlay texture creation.
-
-## Mouse Routing (MG-MO)
-- MG-MO-001: Virtual display not configured for mouse routing.
 
 ## License
 
