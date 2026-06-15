@@ -299,16 +299,25 @@ kernel void smaaBlend(
 
     half4 result = c;
 
-    if (w.r + w.g > 0.0h) {
+    // SMAA sub-pixel coverage toward a neighbor maxes near 0.5; the distance-based
+    // weights can approach 1.0 on long edges and over-blur (soft, FXAA-like result).
+    // Clamp each axis to 0.5 while preserving the left/right and up/down ratio so
+    // edges stay anti-aliased but crisp.
+    half hSum = w.r + w.g;
+    if (hSum > 0.5h) { half s = 0.5h / hSum; w.r *= s; w.g *= s; hSum = 0.5h; }
+    half vSum = w.b + w.a;
+    if (vSum > 0.5h) { half s = 0.5h / vSum; w.b *= s; w.a *= s; vSum = 0.5h; }
+
+    if (hSum > 0.0h) {
         half4 left = input.read(uint2(max(0u, gid.x - 1), gid.y));
         half4 right = input.read(uint2(min(width - 1, gid.x + 1), gid.y));
-        result = c * (1.0h - w.r - w.g) + left * w.r + right * w.g;
+        result = c * (1.0h - hSum) + left * w.r + right * w.g;
     }
 
-    if (w.b + w.a > 0.0h) {
+    if (vSum > 0.0h) {
         half4 up = input.read(uint2(gid.x, max(0u, gid.y - 1)));
         half4 down = input.read(uint2(gid.x, min(height - 1, gid.y + 1)));
-        result = result * (1.0h - w.b - w.a) + up * w.b + down * w.a;
+        result = result * (1.0h - vSum) + up * w.b + down * w.a;
     }
 
     output.write(result, gid);

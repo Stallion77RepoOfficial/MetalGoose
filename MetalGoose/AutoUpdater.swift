@@ -35,7 +35,7 @@ enum UpdateState {
 }
 
 @MainActor
-class AutoUpdater: NSObject, ObservableObject, URLSessionDownloadDelegate {
+class AutoUpdater: ObservableObject {
 
     static let shared = AutoUpdater()
 
@@ -44,11 +44,7 @@ class AutoUpdater: NSObject, ObservableObject, URLSessionDownloadDelegate {
 
     @Published var state: UpdateState = .idle
 
-    private var downloadContinuation: CheckedContinuation<URL, Error>?
-    private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.default
-        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
-    }()
+    private init() {}
 
     func checkForUpdates() {
         Task { await _checkForUpdates() }
@@ -70,14 +66,47 @@ class AutoUpdater: NSObject, ObservableObject, URLSessionDownloadDelegate {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
 
-            if latestTag == currentVersion {
-                state = .upToDate
-            } else {
+            if Self.isVersion(latestTag, newerThan: currentVersion) {
                 state = .available(release: release)
+            } else {
+                state = .upToDate
             }
         } catch {
             state = .failed(error.localizedDescription)
         }
+    }
+
+    // Version ordering: numeric components compare first (1.2 < 1.2.1). For equal
+    // numeric components, a trailing letter marks a pre-release of that version
+    // (1.2a < 1.2b < 1.2c < 1.2, and 1.2.1b < 1.2.1).
+    private static func isVersion(_ lhs: String, newerThan rhs: String) -> Bool {
+        let (lhsNumbers, lhsSuffix) = splitVersion(lhs)
+        let (rhsNumbers, rhsSuffix) = splitVersion(rhs)
+
+        let count = max(lhsNumbers.count, rhsNumbers.count)
+        for i in 0..<count {
+            let l = i < lhsNumbers.count ? lhsNumbers[i] : 0
+            let r = i < rhsNumbers.count ? rhsNumbers[i] : 0
+            if l != r { return l > r }
+        }
+
+        switch (lhsSuffix, rhsSuffix) {
+        case (nil, nil): return false
+        case (nil, .some): return true
+        case (.some, nil): return false
+        case (.some(let l), .some(let r)): return l > r
+        }
+    }
+
+    private static func splitVersion(_ version: String) -> ([Int], String?) {
+        var version = version
+        var suffix: String? = nil
+        if let last = version.last, last.isLetter {
+            suffix = String(last)
+            version.removeLast()
+        }
+        let numbers = version.split(separator: ".").map { Int($0) ?? 0 }
+        return (numbers, suffix)
     }
 
     private func _downloadAndInstall(release: GitHubRelease) async {
@@ -101,61 +130,97 @@ class AutoUpdater: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
     }
 
+    // On some networks CFNetwork/URLSession's TCP connection to api.github.com hangs
+    // until timeout (ECH/HTTP3 path probing), even though curl reaches the same host
+    // instantly. Shelling out to curl avoids that path entirely and is reliable here.
     private func fetchLatestRelease() async throws -> GitHubRelease {
-        let url = URL(string: "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest")!
-        var request = URLRequest(url: url)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        let url = "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest"
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw URLError(.badServerResponse)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        task.arguments = [
+            "-sS", "-m", "15",
+            "-H", "Accept: application/vnd.github+json",
+            "-H", "X-GitHub-Api-Version: 2022-11-28",
+            "-H", "User-Agent: MetalGoose-Updater",
+            url
+        ]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        task.standardOutput = outPipe
+        task.standardError = errPipe
+
+        try task.run()
+        while task.isRunning {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+        guard task.terminationStatus == 0 else {
+            let errText = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+            throw NSError(domain: "AutoUpdater", code: Int(task.terminationStatus),
+                          userInfo: [NSLocalizedDescriptionKey: errText.isEmpty
+                              ? "Update check failed (curl exit \(task.terminationStatus))."
+                              : "Update check failed: \(errText)"])
         }
         return try JSONDecoder().decode(GitHubRelease.self, from: data)
     }
 
     private func downloadFile(from url: URL) async throws -> URL {
-        try await withCheckedThrowingContinuation { continuation in
-            self.downloadContinuation = continuation
-            let task = session.downloadTask(with: url)
-            task.resume()
+        let fm = FileManager.default
+        let dest = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".zip")
+        let expectedSize = headContentLength(url)
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        task.arguments = ["-sS", "-L", "-m", "180", "-H", "User-Agent: MetalGoose-Updater", "-o", dest.path, url.absoluteString]
+        try task.run()
+
+        while task.isRunning {
+            if expectedSize > 0,
+               let attrs = try? fm.attributesOfItem(atPath: dest.path),
+               let size = attrs[.size] as? Int64 {
+                state = .downloading(progress: min(0.99, Double(size) / Double(expectedSize)))
+            }
+            try await Task.sleep(nanoseconds: 150_000_000)
         }
+
+        guard task.terminationStatus == 0 else {
+            try? fm.removeItem(at: dest)
+            throw NSError(domain: "AutoUpdater", code: Int(task.terminationStatus),
+                          userInfo: [NSLocalizedDescriptionKey: "Download failed (curl exit \(task.terminationStatus))."])
+        }
+        state = .downloading(progress: 1.0)
+        return dest
     }
 
-    nonisolated func urlSession(_ session: URLSession,
-                                downloadTask: URLSessionDownloadTask,
-                                didFinishDownloadingTo location: URL) {
+    private func headContentLength(_ url: URL) -> Int64 {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        task.arguments = ["-sS", "-I", "-L", "-m", "10", "-H", "User-Agent: MetalGoose-Updater", url.absoluteString]
+        let pipe = Pipe()
+        task.standardOutput = pipe
         do {
-            let dest = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString + ".zip")
-            try FileManager.default.moveItem(at: location, to: dest)
-            Task { @MainActor in self.downloadContinuation?.resume(returning: dest) }
+            try task.run()
         } catch {
-            Task { @MainActor in self.downloadContinuation?.resume(throwing: error) }
+            return 0
         }
-        Task { @MainActor in self.downloadContinuation = nil }
-    }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard let text = String(data: data, encoding: .utf8) else { return 0 }
 
-    nonisolated func urlSession(_ session: URLSession,
-                                downloadTask: URLSessionDownloadTask,
-                                didWriteData bytesWritten: Int64,
-                                totalBytesWritten: Int64,
-                                totalBytesExpectedToWrite: Int64) {
-        guard totalBytesExpectedToWrite > 0 else { return }
-        let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        Task { @MainActor in
-            self.state = .downloading(progress: progress)
+        var length: Int64 = 0
+        for line in text.components(separatedBy: "\n") {
+            let lower = line.lowercased()
+            if lower.hasPrefix("content-length:") {
+                let parts = line.split(separator: ":", maxSplits: 1)
+                if parts.count == 2, let value = Int64(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    length = value
+                }
+            }
         }
-    }
-
-    nonisolated func urlSession(_ session: URLSession,
-                                task: URLSessionTask,
-                                didCompleteWithError error: Error?) {
-        guard let error else { return }
-        Task { @MainActor in
-            self.downloadContinuation?.resume(throwing: error)
-            self.downloadContinuation = nil
-        }
+        return length
     }
 
     private func installFromZip(_ zipURL: URL) throws -> URL {

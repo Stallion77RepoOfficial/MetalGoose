@@ -91,31 +91,34 @@ open MetalGoose.xcodeproj
 
 # MetalGoose Error Codes
 
+All error codes are shown to the user as an in-app alert.
+
 ## UI (MG-UI)
-- MG-UI-002: Frontmost app is MetalGoose; user must switch to target window.
-- MG-UI-003: Target window not found for the selected app.
+- MG-UI-001: Frontmost app is MetalGoose; user must switch to target window.
+- MG-UI-002: Target window not found for the selected app.
+- MG-UI-003: Target window bounds unavailable.
 - MG-UI-004: No display found.
-- MG-UI-006: Target window bounds unavailable.
-- MG-UI-007: Display ID not found for target screen.
+- MG-UI-005: Display ID not found for target screen.
 
 ## Capture (MG-CAP)
 - MG-CAP-001: Target window not found by ScreenCaptureKit.
 - MG-CAP-002: ScreenCaptureKit start error.
 - MG-CAP-003: ScreenCaptureKit stop error.
 - MG-CAP-004: Stream stopped with error.
+- MG-CAP-005: Target entered macOS fullscreen — use windowed or borderless (windowed fullscreen) mode.
 
 ## Engine (MG-ENG)
 - MG-ENG-001: Metal pipeline setup failed.
 - MG-ENG-002: Metal device not available.
 - MG-ENG-003: Metal command queue not available.
 - MG-ENG-004: MetalFX Spatial Scaler creation failed.
-- MG-ENG-007: Anti-aliasing pipeline unavailable.
-- MG-ENG-008: Scale pipeline unavailable.
-- MG-ENG-009: CAS pipeline unavailable.
-- MG-ENG-010: IOSurface texture creation failed.
-- MG-ENG-011: Copy pipeline unavailable.
-- MG-ENG-013: MetalFX Frame Interpolator creation failed.
-- MG-ENG-014: Cursor pipeline setup failed.
+- MG-ENG-005: Anti-aliasing pipeline unavailable.
+- MG-ENG-006: Scale pipeline unavailable.
+- MG-ENG-007: CAS pipeline unavailable.
+- MG-ENG-008: IOSurface texture creation failed.
+- MG-ENG-009: Copy pipeline unavailable.
+- MG-ENG-010: MetalFX Frame Interpolator creation failed.
+- MG-ENG-011: Cursor pipeline setup failed.
 
 ## Overlay (MG-OV)
 - MG-OV-001: Target screen missing for overlay creation.

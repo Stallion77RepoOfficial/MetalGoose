@@ -18,6 +18,8 @@ class NonActivatingWindow: NSWindow {
 
 @MainActor
 final class OverlayWindowManager {
+    private(set) var lastError: String?
+
     private var currentSize: CGSize = .zero
 
     private var overlayWindow: NSWindow?
@@ -43,17 +45,20 @@ final class OverlayWindowManager {
 
     func createOverlay(config: OverlayWindowConfig) -> Bool {
         destroyOverlay()
+        lastError = nil
 
         self.shouldCaptureCursor = config.captureCursor
         self.fullScreenOutput = config.fullScreenOutput
 
         guard let screen = config.targetScreen else {
+            lastError = "Error Code: MG-OV-001 Target screen missing for overlay creation."
             return false
         }
 
         currentSize = config.size
 
         guard let frame = config.windowFrame else {
+            lastError = "Error Code: MG-OV-002 Window frame missing for overlay creation."
             return false
         }
 
@@ -204,6 +209,25 @@ final class OverlayWindowManager {
         } else {
             MouseConstraintManager.shared.stopConstraining()
         }
+    }
+
+    /// Detects the target app entering macOS native (Spaces) fullscreen — the one mode
+    /// the overlay-compositing pipeline cannot support, because the system does not let
+    /// a third-party window draw into another app's fullscreen Space.
+    ///
+    /// Returns true only when the target app is frontmost yet our overlay cannot be
+    /// placed on the active Space:
+    ///  - Borderless/windowed games stay on the normal Space, so the overlay is on the
+    ///    active Space → false (no false positive for the supported modes).
+    ///  - A normal app switch makes the target not frontmost → false.
+    ///
+    /// This is intentionally conservative; callers must additionally require it to hold
+    /// for several consecutive checks to ignore the brief fullscreen-transition animation.
+    func isTargetInUnreachableSpace() -> Bool {
+        guard let window = overlayWindow, targetPID != 0 else { return false }
+        guard let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              frontPID == targetPID else { return false }
+        return !window.isOnActiveSpace
     }
 
 }

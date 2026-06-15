@@ -81,14 +81,6 @@ final class CaptureSettings: ObservableObject {
         case smaa = "SMAA"
 
         var id: String { rawValue }
-
-        var description: String {
-            switch self {
-            case .off: return "No anti-aliasing - sharpest but aliased"
-            case .fxaa: return "Fast Approximate AA - quick, smooths edges on the final image"
-            case .smaa: return "Subpixel Morphological AA - higher quality edge detection"
-            }
-        }
     }
     
     @Published var renderScale: RenderScale = .native
@@ -103,6 +95,13 @@ final class CaptureSettings: ObservableObject {
     @Published var captureCursor: Bool = true
     @Published var showMGHUD: Bool = true
     @Published var vsync: Bool = true
+
+    // Pipeline buffering depth. Lower = less latency (riskier pacing under load),
+    // higher = smoother under load (more latency). 3 = current default.
+    @Published var bufferCount: Int = 3
+
+    static let minBufferCount = 2
+    static let maxBufferCount = 4
 
     var isFrameGenEnabled: Bool {
         return frameGenMode != .off

@@ -39,6 +39,12 @@ struct ContentView: View {
     @State private var statsTimer: Timer?
     @State private var countdownTimer: Timer?
 
+    // Consecutive stats-timer ticks where the target appears to be in an unreachable
+    // (native fullscreen) Space. Must reach the threshold before we act, so the brief
+    // fullscreen-transition animation never triggers a false positive.
+    @State private var fullscreenStrikes = 0
+    private let fullscreenStrikeThreshold = 3
+
     @State private var hudController = MGHUDWindowController()
 
     private var macOSVersionString: String {
@@ -270,42 +276,26 @@ struct ContentView: View {
             Group {
                 ConfigPanel(title: String(localized: "Upscaling", defaultValue: "Upscaling")) {
                         PickerRow(label: String(localized: "Method", defaultValue: "Method"),
-                                  selection: $settings.scalingType,
-                                  helpText: String(localized: "Upscaling mode:\n• Off\n• MGUP-1 (MetalFX Spatial + CAS)",
-                                                    defaultValue: "Upscaling mode:\n• Off\n• MGUP-1 (MetalFX Spatial + CAS)"))
+                                  selection: $settings.scalingType)
 
                         if settings.scalingType != .off {
                             PickerRow(label: String(localized: "Scale Factor", defaultValue: "Scale Factor"),
-                                      selection: $settings.scaleFactor,
-                                      helpText: String(localized: "Upscale multiplier (1.5x – 10x).",
-                                                        defaultValue: "Upscale multiplier (1.5x – 10x)."))
+                                      selection: $settings.scaleFactor)
 
                             PickerRow(label: String(localized: "Render Scale", defaultValue: "Render Scale"),
-                                      selection: $settings.renderScale,
-                                      helpText: String(localized: "Internal capture resolution %.",
-                                                        defaultValue: "Internal capture resolution %."))
+                                      selection: $settings.renderScale)
                         }
                     }
 
                 ConfigPanel(title: String(localized: "Frame Generation", defaultValue: "Frame Generation")) {
                        PickerRow(label: String(localized: "Mode", defaultValue: "Mode"),
-                                 selection: $settings.frameGenMode,
-                                 helpText: String(localized: "• Off: lowest latency\n• MGFG-1: motion-aware interpolation",
-                                                   defaultValue: "• Off: lowest latency\n• MGFG-1: motion-aware interpolation"))
+                                 selection: $settings.frameGenMode)
 
                    }
 
                    ConfigPanel(title: String(localized: "Anti-Aliasing", defaultValue: "Anti-Aliasing")) {
                        PickerRow(label: String(localized: "Mode", defaultValue: "Mode"),
-                                 selection: $settings.aaMode,
-                                 helpText: String(localized: "Post-process anti-aliasing:\n• Off\n• FXAA\n• SMAA",
-                                                   defaultValue: "Post-process anti-aliasing:\n• Off\n• FXAA\n• SMAA"))
-
-                       if settings.aaMode != .off {
-                           Text(settings.aaMode.description)
-                               .font(.caption)
-                               .foregroundColor(.secondary)
-                           }
+                                 selection: $settings.aaMode)
                    }
             }
         }
@@ -317,22 +307,23 @@ struct ContentView: View {
             if settings.scalingType == .mgup1 {
                 ConfigPanel(title: String(localized: "MGUP-1 Settings", comment: "Panel title: MGUP-1 settings")) {
                     PickerRow(label: String(localized: "Quality", comment: "Label: Quality"),
-                              selection: $settings.qualityMode,
-                              helpText: String(localized: "MetalFX + CAS", comment: "Help text: MetalFX + CAS"))
+                              selection: $settings.qualityMode)
 
                 }
             }
 
             Group {
                 ConfigPanel(title: String(localized: "Display Settings", comment: "Panel title: Display settings")) {
-                    ToggleRow(label: String(localized: "Show MG HUD", comment: "Toggle label"), isOn: $settings.showMGHUD,
-                              helpText: String(localized: "Overlay", comment: "Toggle help text"))
+                    ToggleRow(label: String(localized: "Show MG HUD", comment: "Toggle label"), isOn: $settings.showMGHUD)
 
-                    ToggleRow(label: String(localized: "Capture Cursor", comment: "Toggle label"), isOn: $settings.captureCursor,
-                              helpText: String(localized: "Include cursor", comment: "Toggle help text"))
+                    ToggleRow(label: String(localized: "Capture Cursor", comment: "Toggle label"), isOn: $settings.captureCursor)
 
-                    ToggleRow(label: String(localized: "VSync", comment: "Toggle label"), isOn: $settings.vsync,
-                              helpText: String(localized: "Sync presentation to the display refresh to avoid tearing", comment: "Toggle help text"))
+                    ToggleRow(label: String(localized: "VSync", comment: "Toggle label"), isOn: $settings.vsync)
+
+                    StepperSliderRow(label: String(localized: "Frame Buffering", comment: "Slider label: pipeline buffer depth"),
+                                     value: $settings.bufferCount,
+                                     range: CaptureSettings.minBufferCount...CaptureSettings.maxBufferCount)
+                        .disabled(isScalingActive)
                 }
 
                 ConfigPanel(title: String(localized: "Maintenance", comment: "Panel title: Maintenance")) {
@@ -350,12 +341,22 @@ struct ContentView: View {
 
     private func clearMetalCache() {
         let fm = FileManager.default
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.MetalGoose"
         var targets: [URL] = []
+
+        // The real compiled-shader / pipeline cache lives in the Darwin user cache
+        // directory (DARWIN_USER_CACHE_DIR = /var/folders/.../C/), NOT ~/Library/Caches.
+        // temporaryDirectory is .../T/, so its sibling "C" is that cache root.
+        let darwinCache = fm.temporaryDirectory
+            .deletingLastPathComponent()
+            .appendingPathComponent("C", isDirectory: true)
+        for name in [bundleID, "com.apple.metal", "com.apple.metalfx", "com.apple.metalfe"] {
+            targets.append(darwinCache.appendingPathComponent(name, isDirectory: true))
+        }
+
+        // Secondary: app-specific cache under ~/Library/Caches (if present).
         if let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            let bundleID = Bundle.main.bundleIdentifier ?? "com.MetalGoose"
-            targets.append(caches.appendingPathComponent(bundleID))
-            targets.append(caches.appendingPathComponent("com.apple.metal"))
-            targets.append(caches.appendingPathComponent("com.apple.metalfx"))
+            targets.append(caches.appendingPathComponent(bundleID, isDirectory: true))
         }
 
         var removed = 0
@@ -364,6 +365,7 @@ struct ContentView: View {
                 try fm.removeItem(at: url)
                 removed += 1
             } catch {
+                // A locked/in-use cache entry is non-fatal; the rest still clear.
             }
         }
 
@@ -376,11 +378,15 @@ struct ContentView: View {
     private func initializeGooseEngine() {
         guard gooseEngine == nil else { return }
 
-        let engine = GooseEngine()
+        guard let engine = GooseEngine.make() else {
+            alertMessage = GooseEngine.lastInitError ?? "Error Code: MG-ENG-002 Metal device not available."
+            showAlert = true
+            return
+        }
         gooseEngine = engine
         windowCaptureManager = WindowCaptureManager()
         engine.updateSettings(settings)
-        
+
     }
     
     private func startGooseCapture() {
@@ -396,7 +402,7 @@ struct ContentView: View {
     private func startGooseCaptureAsync() async {
         guard let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != NSRunningApplication.current.processIdentifier else {
-            alertMessage = "Error Code: MG-UI-002 Please switch to the target window before starting."
+            alertMessage = "Error Code: MG-UI-001 Please switch to the target window before starting."
             showAlert = true
             return
         }
@@ -405,7 +411,7 @@ struct ContentView: View {
         guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]],
               let targetInfo = list.first(where: { ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier }),
               let wid = targetInfo[kCGWindowNumber as String] as? CGWindowID else {
-            alertMessage = "Error Code: MG-UI-003 Target window not found."
+            alertMessage = "Error Code: MG-UI-002 Target window not found."
             showAlert = true
             return
         }
@@ -415,7 +421,7 @@ struct ContentView: View {
               let boundY = boundsDict["Y"],
               let boundW = boundsDict["Width"],
               let boundH = boundsDict["Height"] else {
-            alertMessage = "Error Code: MG-UI-006 Window bounds unavailable."
+            alertMessage = "Error Code: MG-UI-003 Window bounds unavailable."
             showAlert = true
             return
         }
@@ -445,7 +451,7 @@ struct ContentView: View {
         }
 
         guard let displayID = outputScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
-            alertMessage = "Error Code: MG-UI-007 Display ID not found."
+            alertMessage = "Error Code: MG-UI-005 Display ID not found."
             showAlert = true
             return
         }
@@ -467,6 +473,7 @@ struct ContentView: View {
             connectedPID = app.processIdentifier
             activeOutputScreen = outputScreen
             isScalingActive = true
+            fullscreenStrikes = 0
 
             let config = OverlayWindowConfig(
                 targetScreen: outputScreen,
@@ -477,15 +484,20 @@ struct ContentView: View {
                 fullScreenOutput: shouldFullScreen
             )
 
-            if overlay.createOverlay(config: config) {
-                let mtkView = MTKView(frame: CGRect(origin: .zero, size: scaledOutputSize))
-                overlay.setMTKView(mtkView)
-                engine.attachToView(mtkView, displayRefreshRate: displayMaxFPS)
-
-                overlay.setTargetWindow(wid, pid: app.processIdentifier)
-                overlay.updateWindowPosition()
+            guard overlay.createOverlay(config: config) else {
+                alertMessage = overlay.lastError ?? "Error Code: MG-OV-001 Overlay creation failed."
+                showAlert = true
+                await stopGooseCaptureAsync()
+                return
             }
-            
+
+            let mtkView = MTKView(frame: CGRect(origin: .zero, size: scaledOutputSize))
+            overlay.setMTKView(mtkView)
+            engine.attachToView(mtkView, displayRefreshRate: displayMaxFPS)
+
+            overlay.setTargetWindow(wid, pid: app.processIdentifier)
+            overlay.updateWindowPosition()
+
             startStatsTimer()
             
             if settings.showMGHUD {
@@ -588,9 +600,31 @@ struct ContentView: View {
                 if let engine = self.gooseEngine {
                     let stats = engine.stats
                     self.hudController.updateFromGooseEngine(stats: stats, settings: self.settings)
+                    if let engineError = engine.consumePendingError() {
+                        self.alertMessage = engineError
+                        self.showAlert = true
+                    }
                 }
                 self.overlayManager?.setCaptureCursorEnabled(self.settings.captureCursor)
                 self.overlayManager?.updateWindowPosition()
+
+                // Native (Spaces) fullscreen can't be overlaid. Detect it conservatively
+                // and stop with guidance instead of leaving a silently-hidden overlay.
+                if self.isScalingActive, self.overlayManager?.isTargetInUnreachableSpace() == true {
+                    self.fullscreenStrikes += 1
+                    if self.fullscreenStrikes >= self.fullscreenStrikeThreshold {
+                        self.fullscreenStrikes = 0
+                        await self.stopGooseCaptureAsync()
+                        // Our window was hidden when scaling started and the target now
+                        // owns a fullscreen Space, so pull MetalGoose back to the front
+                        // (switching Spaces) — otherwise the alert is stuck behind the game.
+                        self.bringAppToFront()
+                        self.alertMessage = "Error Code: MG-CAP-005 Target entered macOS fullscreen, which cannot be captured with the overlay. Please use windowed or borderless (windowed fullscreen) mode."
+                        self.showAlert = true
+                    }
+                } else {
+                    self.fullscreenStrikes = 0
+                }
             }
         }
     }
@@ -615,6 +649,15 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func bringAppToFront() {
+        // The main window is ordered out while scaling; order it back (which also
+        // switches to its Space) and activate the app so a follow-up alert is visible.
+        if let window = NSApp.windows.first(where: { $0.title.contains("MetalGoose") }) {
+            window.makeKeyAndOrderFront(nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func stop() {
@@ -651,9 +694,8 @@ struct ConfigPanel<Content: View>: View {
 struct PickerRow<T: Hashable & Identifiable & RawRepresentable & CaseIterable>: View where T.RawValue == String {
     let label: String
     @Binding var selection: T
-    var helpText: String? = nil
     var body: some View {
-        let row = HStack {
+        HStack {
             Text(label).foregroundColor(.gray)
             Spacer()
             Picker("", selection: $selection) {
@@ -664,21 +706,42 @@ struct PickerRow<T: Hashable & Identifiable & RawRepresentable & CaseIterable>: 
             .labelsHidden()
             .frame(minWidth: 160, maxWidth: 220)
         }
-        if let helpText { row.help(helpText) } else { row }
     }
 }
 
 struct ToggleRow: View {
     let label: String
     @Binding var isOn: Bool
-    var helpText: String? = nil
     var body: some View {
-        let row = HStack {
+        HStack {
             Text(label).foregroundColor(.gray)
             Spacer()
             Toggle("", isOn: $isOn).labelsHidden()
         }
-        if let helpText { row.help(helpText) } else { row }
+    }
+}
+
+struct StepperSliderRow: View {
+    let label: String
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    var body: some View {
+        HStack {
+            Text(label).foregroundColor(.gray)
+            Spacer()
+            Slider(
+                value: Binding(
+                    get: { Double(value) },
+                    set: { value = min(range.upperBound, max(range.lowerBound, Int($0.rounded()))) }
+                ),
+                in: Double(range.lowerBound)...Double(range.upperBound),
+                step: 1
+            )
+            .frame(minWidth: 120, maxWidth: 180)
+            Text("\(value)")
+                .font(.system(.caption, design: .monospaced))
+                .frame(width: 16, alignment: .trailing)
+        }
     }
 }
 

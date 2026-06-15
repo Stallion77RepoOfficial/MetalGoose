@@ -48,14 +48,44 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         return _stats
     }
 
+    // Error surfacing. Engine errors are never printed to the terminal; they are
+    // queued here (deduplicated) and drained by the UI, which shows them as alerts.
+    private let errorLock = OSAllocatedUnfairLock()
+    private var reportedErrors: Set<String> = []
+    private var pendingErrors: [String] = []
+
+    // Set by the factory when the engine cannot be created at all (no Metal device /
+    // command queue), so the UI can surface the reason instead of crashing.
+    nonisolated(unsafe) static private(set) var lastInitError: String?
+
     private func reportError(_ message: String) {
-        print(message)
+        errorLock.lock()
+        defer { errorLock.unlock() }
+        // Each distinct error surfaces once per capture session (frame-loop failures
+        // would otherwise fire every frame).
+        guard reportedErrors.insert(message).inserted else { return }
+        pendingErrors.append(message)
+    }
+
+    // Drained by the UI's stats timer; returns one queued error per call (FIFO).
+    func consumePendingError() -> String? {
+        errorLock.lock()
+        defer { errorLock.unlock() }
+        return pendingErrors.isEmpty ? nil : pendingErrors.removeFirst()
+    }
+
+    private func resetErrorReporting() {
+        errorLock.lock()
+        reportedErrors.removeAll()
+        pendingErrors.removeAll()
+        errorLock.unlock()
     }
 
     private let processingQueue = DispatchQueue(label: "com.metalgoose.processing", qos: .userInteractive)
     
-    private let inFlightSemaphore = DispatchSemaphore(value: 3)
-    
+    private var inFlightSemaphore = DispatchSemaphore(value: 3)
+    private var bufferDepth: Int = 3
+
     var deviceName: String { device.name }
 
     private let device: MTLDevice
@@ -185,23 +215,34 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var outputSize: CGSize = .zero
     private var currentRefreshRate: Int = 0
     
-    override init() {
+    // Use this instead of init(): it fails gracefully (returning nil + setting
+    // lastInitError) rather than crashing when Metal is unavailable, so the UI can
+    // present MG-ENG-002 / MG-ENG-003 as an alert.
+    static func make() -> GooseEngine? {
         guard let dev = MTLCreateSystemDefaultDevice() else {
-            fatalError("Error Code: MG-ENG-002 Metal device not available")
+            lastInitError = "Error Code: MG-ENG-002 Metal device not available."
+            return nil
         }
         guard let queue = dev.makeCommandQueue() else {
-            fatalError("Error Code: MG-ENG-003 Metal command queue not available")
+            lastInitError = "Error Code: MG-ENG-003 Metal command queue not available."
+            return nil
         }
-        
-        self.device = dev
-        self.commandQueue = queue
-        
+        lastInitError = nil
+        return GooseEngine(device: dev, commandQueue: queue)
+    }
+
+    private init(device: MTLDevice, commandQueue: MTLCommandQueue) {
+        self.device = device
+        self.commandQueue = commandQueue
         super.init()
         setupPipelines()
     }
     
     private func setupPipelines() {
-        guard let library = device.makeDefaultLibrary() else { return }
+        guard let library = device.makeDefaultLibrary() else {
+            reportError("Error Code: MG-ENG-001 Metal pipeline setup failed.")
+            return
+        }
         
         func makeCompute(_ name: String) -> MTLComputePipelineState? {
             guard let function = library.makeFunction(name: name) else { return nil }
@@ -247,7 +288,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
                 cursorPipeline = try device.makeRenderPipelineState(descriptor: desc)
             }
         } catch {
-            reportError("Error Code: MG-ENG-014 Cursor pipeline setup failed: \(error)")
+            reportError("Error Code: MG-ENG-011 Cursor pipeline setup failed: \(error)")
         }
 
         loadCursorTexture()
@@ -316,7 +357,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         descriptor.outputHeight = height
 
         guard let interpolator = descriptor.makeFrameInterpolator(device: device) else {
-            reportError("Error Code: MG-ENG-013 MetalFX Frame Interpolator creation failed")
+            reportError("Error Code: MG-ENG-010 MetalFX Frame Interpolator creation failed")
             return nil
         }
 
@@ -353,7 +394,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
                             commandBuffer: MTLCommandBuffer) -> Bool {
         guard let copyPipeline = copyPipeline,
               let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            reportError("Error Code: MG-ENG-011 Copy pipeline unavailable")
+            reportError("Error Code: MG-ENG-009 Copy pipeline unavailable")
             return false
         }
         encoder.setComputePipelineState(copyPipeline)
@@ -518,6 +559,11 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
             view.enableSetNeedsDisplay = false
             view.colorPixelFormat = .bgra8Unorm
             view.framebufferOnly = false
+            // Presentation latency knob. CAMetalLayer accepts only 2 or 3 drawables;
+            // the processing-pipeline depth (inFlightSemaphore) carries the rest.
+            if let layer = view.layer as? CAMetalLayer {
+                layer.maximumDrawableCount = min(max(2, bufferDepth), 3)
+            }
         }
         applyDisplaySync(to: view)
         self.mtkView = view
@@ -782,7 +828,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
         desc.usage = [.shaderRead]
         guard let inputTex = device.makeTexture(descriptor: desc, iosurface: surface, plane: 0) else {
-            reportError("Error Code: MG-ENG-010 IOSurface texture creation failed")
+            reportError("Error Code: MG-ENG-008 IOSurface texture creation failed")
             inFlightSemaphore.signal()
             return
         }
@@ -825,7 +871,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
             guard let scalePipeline = scalePipeline,
                   let renderTex = ensureTexture(&renderTexture, width: renderWidth, height: renderHeight),
                   let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                reportError("Error Code: MG-ENG-008 Scale pipeline unavailable")
+                reportError("Error Code: MG-ENG-006 Scale pipeline unavailable")
                 commandBuffer.commit()
                 return
             }
@@ -841,7 +887,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         if shouldScale || targetWidth != workingTex.width || targetHeight != workingTex.height {
             guard let outputTex = ensureTexture(&scaledTexture, width: targetWidth, height: targetHeight,
                                                  usage: [.shaderRead, .shaderWrite, .renderTarget]) else {
-                reportError("Error Code: MG-ENG-008 Scale pipeline unavailable")
+                reportError("Error Code: MG-ENG-006 Scale pipeline unavailable")
                 commandBuffer.commit()
                 return
             }
@@ -866,7 +912,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
                     guard let casPipeline = casPipeline,
                           let casOut = ensureTexture(&casTexture, width: targetWidth, height: targetHeight),
                           let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                        reportError("Error Code: MG-ENG-009 CAS pipeline unavailable")
+                        reportError("Error Code: MG-ENG-007 CAS pipeline unavailable")
                         commandBuffer.commit()
                         return
                     }
@@ -940,7 +986,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
             guard let fxaaPipeline = fxaaPipeline,
                   let out = ensureTexture(&fxaaTexture, width: input.width, height: input.height),
                   let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (FXAA)")
+                reportError("Error Code: MG-ENG-005 Anti-aliasing pipeline unavailable (FXAA)")
                 return nil
             }
             var threshold = qualityProfile.aaThreshold
@@ -958,7 +1004,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
                   let edges = ensureTexture(&smaaEdgeTexture, width: input.width, height: input.height),
                   let weights = ensureTexture(&smaaWeightTexture, width: input.width, height: input.height),
                   let out = ensureTexture(&smaaOutputTexture, width: input.width, height: input.height) else {
-                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (SMAA)")
+                reportError("Error Code: MG-ENG-005 Anti-aliasing pipeline unavailable (SMAA)")
                 return nil
             }
             var params = AntiAliasParams(
@@ -966,7 +1012,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
                 maxSearchSteps: Int32(qualityProfile.smaaSearchSteps)
             )
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                reportError("Error Code: MG-ENG-007 Anti-aliasing pipeline unavailable (SMAA)")
+                reportError("Error Code: MG-ENG-005 Anti-aliasing pipeline unavailable (SMAA)")
                 return nil
             }
             encoder.setComputePipelineState(edgePipe)
@@ -1073,6 +1119,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         frameGenEnabled = settings.frameGenMode != .off
         vsyncEnabled = settings.vsync
         captureCursorEnabled = settings.captureCursor
+        bufferDepth = max(2, min(4, settings.bufferCount))
 
         applyFrameRatePreference(desiredOutputFPS())
         if let view = mtkView {
@@ -1091,6 +1138,10 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
     func startCaptureFromWindow(_ manager: WindowCaptureManager, refreshRate _: Int) async {
         resetProcessingStateAsync(clearFrames: true)
         resetFrameCounters()
+        resetErrorReporting()
+        // Rebuild the in-flight semaphore at the chosen depth. Safe here because a
+        // fresh capture has no frames in flight (start is gated behind a stopped state).
+        inFlightSemaphore = DispatchSemaphore(value: max(2, min(4, bufferDepth)))
         self.windowCaptureManager = manager
         
         manager.onFrameReceived = { [weak self] surface, pixelBuffer, timestamp, isSceneCut in

@@ -1,531 +1,485 @@
 {
-  "sourceLanguage" : "en",
-  "strings" : {
-    "" : {
-
-    },
-    "[ PASS ]" : {
-      "comment" : "A label indicating that a feature is currently working as intended.",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "[ JÓVÁHAGYVA ]"
+  "sourceLanguage": "en",
+  "strings": {
+    "": {},
+    "[ PASS ]": {
+      "comment": "A label indicating that a feature is currently working as intended.",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[ JÓVÁHAGYVA ]"
           }
         }
       }
     },
-    "[ REQUIRED ]" : {
-      "comment" : "A label indicating that a feature is not yet available.",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "[ SZÜKSÉGES ]"
+    "[ REQUIRED ]": {
+      "comment": "A label indicating that a feature is not yet available.",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[ SZÜKSÉGES ]"
           }
         }
       }
     },
-    "%lld" : {
-
+    "%lld": {},
+    "A new version is available: %@\nWould you like to download and install it now?": {
+      "comment": "Update body"
     },
-    "• Off: lowest latency\n• MGFG-1: motion-aware interpolation" : {
-
-    },
-    "A new version is available: %@\nWould you like to download and install it now?" : {
-      "comment" : "Update body"
-    },
-    "About" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Névjegy"
+    "About": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Névjegy"
           }
         }
       }
     },
-    "Active" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Aktív"
+    "Active": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aktív"
           }
         }
       }
     },
-    "Adaptive or Fixed" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Adaptív vagy fix"
+    "Adaptive or Fixed": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adaptív vagy fix"
           }
         }
       }
     },
-    "Adaptive Sync" : {
-      "comment" : "Toggle label",
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Adaptív szinkron"
+    "Adaptive Sync": {
+      "comment": "Toggle label",
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adaptív szinkron"
           }
         }
       }
     },
-    "Already up to date" : {
-      "comment" : "Update alert title"
+    "Already up to date": {
+      "comment": "Update alert title"
     },
-    "Anti-Aliasing" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Élsimítás"
+    "Anti-Aliasing": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Élsimítás"
           }
         }
       }
     },
-    "Capture Cursor" : {
-      "comment" : "Toggle label",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Kurzor rögzítése"
+    "Capture Cursor": {
+      "comment": "Toggle label",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kurzor rögzítése"
           }
         }
       }
     },
-    "Check for Updates" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Frissítések keresése"
+    "Check for Updates": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Frissítések keresése"
           }
         }
       }
     },
-    "Checking for Updates…" : {
-      "comment" : "Update sheet title"
+    "Checking for Updates…": {
+      "comment": "Update sheet title"
     },
-    "Clear Metal Cache" : {
-      "comment" : "Button: clear Metal shader cache"
+    "Clear Metal Cache": {
+      "comment": "Button: clear Metal shader cache"
     },
-    "Display Settings" : {
-      "comment" : "Panel title: Display settings",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Kijelző beállítások"
+    "Display Settings": {
+      "comment": "Panel title: Display settings",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kijelző beállítások"
           }
         }
       }
     },
-    "Download & Install" : {
-      "comment" : "Update button"
+    "Download & Install": {
+      "comment": "Update button"
     },
-    "Downloading Update…" : {
-      "comment" : "Update sheet title"
+    "Downloading Update…": {
+      "comment": "Update sheet title"
     },
-    "Frame" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Képkocka"
+    "Frame": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Képkocka"
           }
         }
       }
     },
-    "Frame Generation" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Képkockagenerálás"
+    "Frame Generation": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Képkockagenerálás"
           }
         }
       }
     },
-    "GRANT" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "JÓVÁHAGYÁS"
+    "GRANT": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "JÓVÁHAGYÁS"
           }
         }
       }
     },
-    "Idle" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Készenlétben"
+    "Idle": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Készenlétben"
           }
         }
       }
     },
-    "Include cursor" : {
-      "comment" : "Toggle help text",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Kurzor mutatása"
+    "Installing Update…": {
+      "comment": "Update sheet title"
+    },
+    "Latency": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Késleltetés"
           }
         }
       }
     },
-    "Installing Update…" : {
-      "comment" : "Update sheet title"
+    "Later": {
+      "comment": "Dismiss update"
     },
-    "Internal capture resolution %." : {
-
+    "Maintenance": {
+      "comment": "Panel title: Maintenance"
     },
-    "Latency" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Késleltetés"
+    "Metal cache cleared (%lld location(s)). Restart MetalGoose so shaders rebuild cleanly.": {
+      "comment": "Alert: cache cleared"
+    },
+    "MetalGoose": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MetalGoose"
           }
         }
       }
     },
-    "Later" : {
-      "comment" : "Dismiss update"
+    "MetalGoose is already up to date.": {
+      "comment": "Update alert body"
     },
-    "Maintenance" : {
-      "comment" : "Panel title: Maintenance"
-    },
-    "Metal cache cleared (%lld location(s)). Restart MetalGoose so shaders rebuild cleanly." : {
-      "comment" : "Alert: cache cleared"
-    },
-    "MetalFX + CAS" : {
-      "comment" : "Help text: MetalFX + CAS"
-    },
-    "MetalGoose" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "MetalGoose"
+    "MetalGoose requires macOS 26.0 or newer": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A MetalGoose futtatásához macOS 26.0 vagy újabb rendszer szükséges"
           }
         }
       }
     },
-    "MetalGoose is already up to date." : {
-      "comment" : "Update alert body"
-    },
-    "MetalGoose requires macOS 26.0 or newer" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "A MetalGoose futtatásához macOS 26.0 vagy újabb rendszer szükséges"
+    "Method": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Methódus"
           }
         }
       }
     },
-    "Method" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Methódus"
+    "MGUP-1 Settings": {
+      "comment": "Panel title: MGUP-1 settings",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MGUP-1 Beállítások"
           }
         }
       }
     },
-    "MGUP-1 Settings" : {
-      "comment" : "Panel title: MGUP-1 settings",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "MGUP-1 Beállítások"
+    "Mode": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mód"
           }
         }
       }
     },
-    "Mode" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mód"
+    "Multiplier": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Szorzó"
           }
         }
       }
     },
-    "Multiplier" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Szorzó"
+    "No Metal cache found to clear.": {
+      "comment": "Alert: nothing to clear"
+    },
+    "OK": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OK"
           }
         }
       }
     },
-    "No Metal cache found to clear." : {
-      "comment" : "Alert: nothing to clear"
-    },
-    "OK" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "OK"
+    "Process": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Folyamat"
           }
         }
       }
     },
-    "Overlay" : {
-      "comment" : "Toggle help text"
-    },
-    "Post-process anti-aliasing:\n• Off\n• FXAA\n• SMAA" : {
-
-    },
-    "Process" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Folyamat"
+    "Quality": {
+      "comment": "Label: Quality",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minőség"
           }
         }
       }
     },
-    "Quality" : {
-      "comment" : "Label: Quality",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Minőség"
+    "Reduce Latency": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Késleltetés csökkentése"
           }
         }
       }
     },
-    "Reduce Latency" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Késleltetés csökkentése"
+    "Relaunching MetalGoose…": {
+      "comment": "Update done label"
+    },
+    "Render Scale": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Renderelési arány"
           }
         }
       }
     },
-    "Relaunching MetalGoose…" : {
-      "comment" : "Update done label"
-    },
-    "Render Scale" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Renderelési arány"
+    "Scale Factor": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skálázási tényező"
           }
         }
       }
     },
-    "Scale Factor" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Skálázási tényező"
+    "Scaling Info": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Információk"
           }
         }
       }
     },
-    "Scaling Info" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Információk"
+    "Sharpness": {
+      "comment": "Slider label",
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Élesség"
           }
         }
       }
     },
-    "Sharpness" : {
-      "comment" : "Slider label",
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Élesség"
+    "Show MG HUD": {
+      "comment": "Toggle label",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MG HUD Megjelenítése"
           }
         }
       }
     },
-    "Show MG HUD" : {
-      "comment" : "Toggle label",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "MG HUD Megjelenítése"
+    "START SCALING": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "KÉPFELSKÁLÁZÁS INDÍTÁSA"
           }
         }
       }
     },
-    "START SCALING" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "KÉPFELSKÁLÁZÁS INDÍTÁSA"
+    "Status": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Státusz"
           }
         }
       }
     },
-    "Status" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Státusz"
+    "STOP SCALING": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "KÉPFELSKÁLÁZÁS MEGÁLLÍTÁSA"
           }
         }
       }
     },
-    "STOP SCALING" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "KÉPFELSKÁLÁZÁS MEGÁLLÍTÁSA"
+    "Target FPS": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Célzott FPS"
           }
         }
       }
     },
-    "Sync presentation to the display refresh to avoid tearing" : {
-      "comment" : "Toggle help text"
-    },
-    "Target FPS" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Célzott FPS"
+    "Target FPS.": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cél FPS"
           }
         }
       }
     },
-    "Target FPS." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Cél FPS"
+    "Update Available": {
+      "comment": "Update alert title"
+    },
+    "Update Failed": {
+      "comment": "Update error title"
+    },
+    "Update Installed!": {
+      "comment": "Update sheet title"
+    },
+    "Upscaling": {
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Képfelskálázás"
           }
         }
       }
     },
-    "Update Available" : {
-      "comment" : "Update alert title"
-    },
-    "Update Failed" : {
-      "comment" : "Update error title"
-    },
-    "Update Installed!" : {
-      "comment" : "Update sheet title"
-    },
-    "Upscale multiplier (1.5x – 10x)." : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Felskálázás szorzója (1.5x - 10x)."
+    "Use GooseEngine": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GooseEngine motor használata"
           }
         }
       }
     },
-    "Upscaling" : {
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Képfelskálázás"
+    "Using MGUP-1 Spatial Upscaling": {
+      "comment": "Description text",
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MGUP-1 térbeli felskálázás használata"
           }
         }
       }
     },
-    "Upscaling mode:\n• Off\n• MGUP-1 (MetalFX Spatial + CAS)" : {
-
-    },
-    "Use GooseEngine" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "GooseEngine motor használata"
+    "Version Info": {
+      "extractionState": "stale",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verzió"
           }
         }
       }
     },
-    "Using MGUP-1 Spatial Upscaling" : {
-      "comment" : "Description text",
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "MGUP-1 térbeli felskálázás használata"
-          }
-        }
-      }
-    },
-    "Version Info" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Verzió"
-          }
-        }
-      }
-    },
-    "VSync" : {
-      "comment" : "Toggle label",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Vertikális szinkron"
+    "VSync": {
+      "comment": "Toggle label",
+      "localizations": {
+        "hu": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vertikális szinkron"
           }
         }
       }
     }
   },
-  "version" : "1.1"
+  "version": "1.1"
 }

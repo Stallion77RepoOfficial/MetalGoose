@@ -273,7 +273,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2b;
+				MARKETING_VERSION = 1.2.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					CoreMedia,
@@ -322,7 +322,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2b;
+				MARKETING_VERSION = 1.2.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					CoreMedia,
