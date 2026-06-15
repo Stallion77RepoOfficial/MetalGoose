@@ -6,6 +6,7 @@ import Carbon.HIToolbox
 struct ContentView: View {
 
     @StateObject var settings = CaptureSettings.shared
+    @StateObject private var updater = AutoUpdater.shared
 
     @State private var countdown = 5
     @State private var isCountingDown = false
@@ -79,9 +80,7 @@ struct ContentView: View {
                     showAlert = true
                 }
                 Button("Check for Updates") {
-                    if let url = URL(string: "https://github.com/Stallion77RepoOfficial/MetalGoose/releases/latest") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    updater.checkForUpdates()
                 }
             } label: {
                 Image(systemName: "gearshape")
@@ -184,6 +183,59 @@ struct ContentView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(alertMessage)
+        }
+        // Update: already up to date
+        .alert(String(localized: "Already up to date", comment: "Update alert title"),
+               isPresented: Binding(
+                get: { if case .upToDate = updater.state { return true }; return false },
+                set: { if !$0 { updater.state = .idle } }
+               )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(String(localized: "MetalGoose is already up to date.", comment: "Update alert body"))
+        }
+        // Update: new version available
+        .alert(String(localized: "Update Available", comment: "Update alert title"),
+               isPresented: Binding(
+                get: { if case .available = updater.state { return true }; return false },
+                set: { if !$0 { updater.state = .idle } }
+               )) {
+            if case .available(let release) = updater.state {
+                Button(String(localized: "Download & Install", comment: "Update button")) {
+                    updater.downloadAndInstall(release: release)
+                }
+            }
+            Button(String(localized: "Later", comment: "Dismiss update"), role: .cancel) {
+                updater.state = .idle
+            }
+        } message: {
+            if case .available(let release) = updater.state {
+                Text(String(format: String(localized: "A new version is available: %@\nWould you like to download and install it now?", comment: "Update body"), release.tagName))
+            }
+        }
+        // Update: error
+        .alert(String(localized: "Update Failed", comment: "Update error title"),
+               isPresented: Binding(
+                get: { if case .failed = updater.state { return true }; return false },
+                set: { if !$0 { updater.state = .idle } }
+               )) {
+            Button("OK", role: .cancel) { updater.state = .idle }
+        } message: {
+            if case .failed(let msg) = updater.state {
+                Text(msg)
+            }
+        }
+        // Update: downloading / installing progress sheet
+        .sheet(isPresented: Binding(
+            get: {
+                switch updater.state {
+                case .checking, .downloading, .installing, .done: return true
+                default: return false
+                }
+            },
+            set: { _ in }
+        )) {
+            UpdateProgressSheet(state: updater.state)
         }
     }
     
@@ -683,5 +735,67 @@ struct StatusPill: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .cornerRadius(6)
+    }
+}
+
+// MARK: - Update Progress Sheet
+
+struct UpdateProgressSheet: View {
+    let state: UpdateState
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Image(systemName: iconName)
+                .font(.system(size: 40))
+                .foregroundColor(iconColor)
+
+            Text(title)
+                .font(.headline)
+
+            if case .downloading(let progress) = state {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .frame(width: 260)
+                Text(String(format: "%.0f%%", progress * 100))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else if case .checking = state {
+                ProgressView()
+                    .progressViewStyle(.circular)
+            } else if case .installing = state {
+                ProgressView()
+                    .progressViewStyle(.circular)
+            } else if case .done = state {
+                Text(String(localized: "Relaunching MetalGoose…", comment: "Update done label"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(32)
+        .frame(width: 320)
+    }
+
+    private var title: String {
+        switch state {
+        case .checking:   return String(localized: "Checking for Updates…", comment: "Update sheet title")
+        case .downloading: return String(localized: "Downloading Update…", comment: "Update sheet title")
+        case .installing: return String(localized: "Installing Update…", comment: "Update sheet title")
+        case .done:       return String(localized: "Update Installed!", comment: "Update sheet title")
+        default:          return ""
+        }
+    }
+
+    private var iconName: String {
+        switch state {
+        case .done: return "checkmark.circle.fill"
+        default:    return "arrow.down.circle"
+        }
+    }
+
+    private var iconColor: Color {
+        switch state {
+        case .done: return .green
+        default:    return .accentColor
+        }
     }
 }

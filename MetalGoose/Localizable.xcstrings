@@ -32,6 +32,9 @@
     "• Off: lowest latency\n• MGFG-1: motion-aware interpolation" : {
 
     },
+    "A new version is available: %@\nWould you like to download and install it now?" : {
+      "comment" : "Update body"
+    },
     "About" : {
       "localizations" : {
         "hu" : {
@@ -76,6 +79,9 @@
         }
       }
     },
+    "Already up to date" : {
+      "comment" : "Update alert title"
+    },
     "Anti-Aliasing" : {
       "localizations" : {
         "hu" : {
@@ -107,6 +113,9 @@
         }
       }
     },
+    "Checking for Updates…" : {
+      "comment" : "Update sheet title"
+    },
     "Clear Metal Cache" : {
       "comment" : "Button: clear Metal shader cache"
     },
@@ -120,6 +129,12 @@
           }
         }
       }
+    },
+    "Download & Install" : {
+      "comment" : "Update button"
+    },
+    "Downloading Update…" : {
+      "comment" : "Update sheet title"
     },
     "Frame" : {
       "extractionState" : "stale",
@@ -174,6 +189,9 @@
         }
       }
     },
+    "Installing Update…" : {
+      "comment" : "Update sheet title"
+    },
     "Internal capture resolution %." : {
 
     },
@@ -187,6 +205,9 @@
           }
         }
       }
+    },
+    "Later" : {
+      "comment" : "Dismiss update"
     },
     "Maintenance" : {
       "comment" : "Panel title: Maintenance"
@@ -206,6 +227,9 @@
           }
         }
       }
+    },
+    "MetalGoose is already up to date." : {
+      "comment" : "Update alert body"
     },
     "MetalGoose requires macOS 26.0 or newer" : {
       "extractionState" : "stale",
@@ -311,6 +335,9 @@
           }
         }
       }
+    },
+    "Relaunching MetalGoose…" : {
+      "comment" : "Update done label"
     },
     "Render Scale" : {
       "localizations" : {
@@ -421,6 +448,15 @@
           }
         }
       }
+    },
+    "Update Available" : {
+      "comment" : "Update alert title"
+    },
+    "Update Failed" : {
+      "comment" : "Update error title"
+    },
+    "Update Installed!" : {
+      "comment" : "Update sheet title"
     },
     "Upscale multiplier (1.5x – 10x)." : {
       "localizations" : {

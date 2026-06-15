@@ -460,10 +460,6 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         var target: Int
 
         if frameGenEnabled {
-            // Drive the panel at its full refresh rate rather than letting ProMotion drop to 2x
-            // the source. MetalFX still yields one unique midpoint per pair (true uniqueness is
-            // ~2x), but pinning the panel high keeps real frames low-latency and the extra vsync
-            // slots presenting, which is noticeably smoother in practice for gaming.
             let doubled = sourceFPS > 0 ? sourceFPS * 2.0 : Double(currentRefreshRate)
             let fill = currentRefreshRate > 0 ? Double(currentRefreshRate) : doubled
             target = snapToRefreshDivisor(max(fill, doubled))
@@ -594,7 +590,6 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
             let t = Float(min(max(ratio, 0), 1))
 
             let outputInterval = targetFPS > 0 ? 1.0 / Double(targetFPS) : 0
-            // Narrow snap window so vsync slots interpolate instead of snapping to a real frame.
             let snap = outputInterval * 0.25
 
             if duration <= 0 || timeSincePrev <= snap {

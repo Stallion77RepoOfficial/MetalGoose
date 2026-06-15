@@ -7,7 +7,7 @@
 	<key>NSAccessibilityUsageDescription</key>
 	<string>MetalGoose needs accessibility access to move game windows to the virtual display for optimal capture performance.</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1rc</string>
+	<string>1.2b</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSSupportsGameMode</key>
