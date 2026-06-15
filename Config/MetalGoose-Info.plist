@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>MetalGoose needs screen recording to capture and enhance game windows with upscaling and frame generation.</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>MetalGoose needs accessibility access to move game windows to the virtual display for optimal capture performance.</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.1rc</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSSupportsGameMode</key>
+	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.games</string>
+</dict>
+</plist>

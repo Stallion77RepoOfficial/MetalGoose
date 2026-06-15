@@ -1,0 +1,495 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "" : {
+
+    },
+    "[ PASS ]" : {
+      "comment" : "A label indicating that a feature is currently working as intended.",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "[ JÓVÁHAGYVA ]"
+          }
+        }
+      }
+    },
+    "[ REQUIRED ]" : {
+      "comment" : "A label indicating that a feature is not yet available.",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "[ SZÜKSÉGES ]"
+          }
+        }
+      }
+    },
+    "%lld" : {
+
+    },
+    "• Off: lowest latency\n• MGFG-1: motion-aware interpolation" : {
+
+    },
+    "About" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Névjegy"
+          }
+        }
+      }
+    },
+    "Active" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aktív"
+          }
+        }
+      }
+    },
+    "Adaptive or Fixed" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Adaptív vagy fix"
+          }
+        }
+      }
+    },
+    "Adaptive Sync" : {
+      "comment" : "Toggle label",
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Adaptív szinkron"
+          }
+        }
+      }
+    },
+    "Anti-Aliasing" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Élsimítás"
+          }
+        }
+      }
+    },
+    "Capture Cursor" : {
+      "comment" : "Toggle label",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kurzor rögzítése"
+          }
+        }
+      }
+    },
+    "Check for Updates" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Frissítések keresése"
+          }
+        }
+      }
+    },
+    "Clear Metal Cache" : {
+      "comment" : "Button: clear Metal shader cache"
+    },
+    "Display Settings" : {
+      "comment" : "Panel title: Display settings",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kijelző beállítások"
+          }
+        }
+      }
+    },
+    "Frame" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Képkocka"
+          }
+        }
+      }
+    },
+    "Frame Generation" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Képkockagenerálás"
+          }
+        }
+      }
+    },
+    "GRANT" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "JÓVÁHAGYÁS"
+          }
+        }
+      }
+    },
+    "Idle" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Készenlétben"
+          }
+        }
+      }
+    },
+    "Include cursor" : {
+      "comment" : "Toggle help text",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kurzor mutatása"
+          }
+        }
+      }
+    },
+    "Internal capture resolution %." : {
+
+    },
+    "Latency" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Késleltetés"
+          }
+        }
+      }
+    },
+    "Maintenance" : {
+      "comment" : "Panel title: Maintenance"
+    },
+    "Metal cache cleared (%lld location(s)). Restart MetalGoose so shaders rebuild cleanly." : {
+      "comment" : "Alert: cache cleared"
+    },
+    "MetalFX + CAS" : {
+      "comment" : "Help text: MetalFX + CAS"
+    },
+    "MetalGoose" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        }
+      }
+    },
+    "MetalGoose requires macOS 26.0 or newer" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A MetalGoose futtatásához macOS 26.0 vagy újabb rendszer szükséges"
+          }
+        }
+      }
+    },
+    "Method" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Methódus"
+          }
+        }
+      }
+    },
+    "MGUP-1 Settings" : {
+      "comment" : "Panel title: MGUP-1 settings",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MGUP-1 Beállítások"
+          }
+        }
+      }
+    },
+    "Mode" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mód"
+          }
+        }
+      }
+    },
+    "Multiplier" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Szorzó"
+          }
+        }
+      }
+    },
+    "No Metal cache found to clear." : {
+      "comment" : "Alert: nothing to clear"
+    },
+    "OK" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "OK"
+          }
+        }
+      }
+    },
+    "Overlay" : {
+      "comment" : "Toggle help text"
+    },
+    "Post-process anti-aliasing:\n• Off\n• FXAA\n• SMAA" : {
+
+    },
+    "Process" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Folyamat"
+          }
+        }
+      }
+    },
+    "Quality" : {
+      "comment" : "Label: Quality",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Minőség"
+          }
+        }
+      }
+    },
+    "Reduce Latency" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Késleltetés csökkentése"
+          }
+        }
+      }
+    },
+    "Render Scale" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Renderelési arány"
+          }
+        }
+      }
+    },
+    "Scale Factor" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Skálázási tényező"
+          }
+        }
+      }
+    },
+    "Scaling Info" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Információk"
+          }
+        }
+      }
+    },
+    "Sharpness" : {
+      "comment" : "Slider label",
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Élesség"
+          }
+        }
+      }
+    },
+    "Show MG HUD" : {
+      "comment" : "Toggle label",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MG HUD Megjelenítése"
+          }
+        }
+      }
+    },
+    "START SCALING" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "KÉPFELSKÁLÁZÁS INDÍTÁSA"
+          }
+        }
+      }
+    },
+    "Status" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Státusz"
+          }
+        }
+      }
+    },
+    "STOP SCALING" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "KÉPFELSKÁLÁZÁS MEGÁLLÍTÁSA"
+          }
+        }
+      }
+    },
+    "Sync presentation to the display refresh to avoid tearing" : {
+      "comment" : "Toggle help text"
+    },
+    "Target FPS" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Célzott FPS"
+          }
+        }
+      }
+    },
+    "Target FPS." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cél FPS"
+          }
+        }
+      }
+    },
+    "Upscale multiplier (1.5x – 10x)." : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Felskálázás szorzója (1.5x - 10x)."
+          }
+        }
+      }
+    },
+    "Upscaling" : {
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Képfelskálázás"
+          }
+        }
+      }
+    },
+    "Upscaling mode:\n• Off\n• MGUP-1 (MetalFX Spatial + CAS)" : {
+
+    },
+    "Use GooseEngine" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GooseEngine motor használata"
+          }
+        }
+      }
+    },
+    "Using MGUP-1 Spatial Upscaling" : {
+      "comment" : "Description text",
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MGUP-1 térbeli felskálázás használata"
+          }
+        }
+      }
+    },
+    "Version Info" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verzió"
+          }
+        }
+      }
+    },
+    "VSync" : {
+      "comment" : "Toggle label",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vertikális szinkron"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.1"
+}
