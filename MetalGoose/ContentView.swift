@@ -39,9 +39,6 @@ struct ContentView: View {
     @State private var statsTimer: Timer?
     @State private var countdownTimer: Timer?
 
-    // Consecutive stats-timer ticks where the target appears to be in an unreachable
-    // (native fullscreen) Space. Must reach the threshold before we act, so the brief
-    // fullscreen-transition animation never triggers a false positive.
     @State private var fullscreenStrikes = 0
     private let fullscreenStrikeThreshold = 3
 
@@ -172,7 +169,7 @@ struct ContentView: View {
         .onChange(of: settings.showMGHUD, initial: false) { _, newValue in
             if newValue && isScalingActive {
                 if let screen = activeOutputScreen {
-                    hudController.show(on: screen, compact: false)
+                    hudController.show(on: screen)
                     if let engine = gooseEngine {
                         hudController.setDeviceName(engine.deviceName)
                     }
@@ -190,7 +187,6 @@ struct ContentView: View {
         } message: {
             Text(alertMessage)
         }
-        // Update: already up to date
         .alert(String(localized: "Already up to date", comment: "Update alert title"),
                isPresented: Binding(
                 get: { if case .upToDate = updater.state { return true }; return false },
@@ -200,7 +196,6 @@ struct ContentView: View {
         } message: {
             Text(String(localized: "MetalGoose is already up to date.", comment: "Update alert body"))
         }
-        // Update: new version available
         .alert(String(localized: "Update Available", comment: "Update alert title"),
                isPresented: Binding(
                 get: { if case .available = updater.state { return true }; return false },
@@ -219,7 +214,6 @@ struct ContentView: View {
                 Text(String(format: String(localized: "A new version is available: %@\nWould you like to download and install it now?", comment: "Update body"), release.tagName))
             }
         }
-        // Update: error
         .alert(String(localized: "Update Failed", comment: "Update error title"),
                isPresented: Binding(
                 get: { if case .failed = updater.state { return true }; return false },
@@ -231,7 +225,6 @@ struct ContentView: View {
                 Text(msg)
             }
         }
-        // Update: downloading / installing progress sheet
         .sheet(isPresented: Binding(
             get: {
                 switch updater.state {
@@ -291,6 +284,11 @@ struct ContentView: View {
                        PickerRow(label: String(localized: "Mode", defaultValue: "Mode"),
                                  selection: $settings.frameGenMode)
 
+                       if settings.frameGenMode != .off {
+                           StepperSliderRow(label: String(localized: "Multiplier", defaultValue: "Multiplier"),
+                                            value: $settings.frameGenMultiplier,
+                                            range: CaptureSettings.minFrameGenMultiplier...CaptureSettings.maxFrameGenMultiplier)
+                       }
                    }
 
                    ConfigPanel(title: String(localized: "Anti-Aliasing", defaultValue: "Anti-Aliasing")) {
@@ -344,9 +342,6 @@ struct ContentView: View {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.MetalGoose"
         var targets: [URL] = []
 
-        // The real compiled-shader / pipeline cache lives in the Darwin user cache
-        // directory (DARWIN_USER_CACHE_DIR = /var/folders/.../C/), NOT ~/Library/Caches.
-        // temporaryDirectory is .../T/, so its sibling "C" is that cache root.
         let darwinCache = fm.temporaryDirectory
             .deletingLastPathComponent()
             .appendingPathComponent("C", isDirectory: true)
@@ -354,7 +349,6 @@ struct ContentView: View {
             targets.append(darwinCache.appendingPathComponent(name, isDirectory: true))
         }
 
-        // Secondary: app-specific cache under ~/Library/Caches (if present).
         if let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
             targets.append(caches.appendingPathComponent(bundleID, isDirectory: true))
         }
@@ -365,7 +359,6 @@ struct ContentView: View {
                 try fm.removeItem(at: url)
                 removed += 1
             } catch {
-                // A locked/in-use cache entry is non-fatal; the rest still clear.
             }
         }
 
@@ -458,13 +451,16 @@ struct ContentView: View {
 
         let displayMaxFPS = outputScreen.maximumFramesPerSecond > 0 ? outputScreen.maximumFramesPerSecond : 60
 
+        let minInterval = outputScreen.minimumRefreshInterval
+        let maxInterval = outputScreen.maximumRefreshInterval
+        let isProMotion = minInterval > 0 && maxInterval > minInterval + 0.0001
+        let displayMinFPS = (isProMotion && maxInterval > 0) ? Int(round(1.0 / maxInterval)) : displayMaxFPS
+
         guard let captureManager = windowCaptureManager else { return }
 
         let sourceRes = cgFrame.size
         let shouldFullScreen = settings.scalingType != .off
         let scaledOutputSize = shouldFullScreen ? outputScreen.frame.size : sourceRes
-
-        engine.configure(outputSize: scaledOutputSize)
 
         let success = await captureManager.startCapture(windowID: wid, maxFPS: displayMaxFPS, showsCursor: false)
         if success {
@@ -493,7 +489,7 @@ struct ContentView: View {
 
             let mtkView = MTKView(frame: CGRect(origin: .zero, size: scaledOutputSize))
             overlay.setMTKView(mtkView)
-            engine.attachToView(mtkView, displayRefreshRate: displayMaxFPS)
+            engine.attachToView(mtkView, displayRefreshRate: displayMaxFPS, minRefreshRate: displayMinFPS, isProMotion: isProMotion)
 
             overlay.setTargetWindow(wid, pid: app.processIdentifier)
             overlay.updateWindowPosition()
@@ -501,7 +497,7 @@ struct ContentView: View {
             startStatsTimer()
             
             if settings.showMGHUD {
-                hudController.show(on: outputScreen, compact: false)
+                hudController.show(on: outputScreen)
                 hudController.setDeviceName(engine.deviceName)
                 hudController.setPID(connectedPID)
 
@@ -608,16 +604,11 @@ struct ContentView: View {
                 self.overlayManager?.setCaptureCursorEnabled(self.settings.captureCursor)
                 self.overlayManager?.updateWindowPosition()
 
-                // Native (Spaces) fullscreen can't be overlaid. Detect it conservatively
-                // and stop with guidance instead of leaving a silently-hidden overlay.
                 if self.isScalingActive, self.overlayManager?.isTargetInUnreachableSpace() == true {
                     self.fullscreenStrikes += 1
                     if self.fullscreenStrikes >= self.fullscreenStrikeThreshold {
                         self.fullscreenStrikes = 0
                         await self.stopGooseCaptureAsync()
-                        // Our window was hidden when scaling started and the target now
-                        // owns a fullscreen Space, so pull MetalGoose back to the front
-                        // (switching Spaces) — otherwise the alert is stuck behind the game.
                         self.bringAppToFront()
                         self.alertMessage = "Error Code: MG-CAP-005 Target entered macOS fullscreen, which cannot be captured with the overlay. Please use windowed or borderless (windowed fullscreen) mode."
                         self.showAlert = true
@@ -652,8 +643,6 @@ struct ContentView: View {
     }
 
     private func bringAppToFront() {
-        // The main window is ordered out while scaling; order it back (which also
-        // switches to its Space) and activate the app so a follow-up alert is visible.
         if let window = NSApp.windows.first(where: { $0.title.contains("MetalGoose") }) {
             window.makeKeyAndOrderFront(nil)
         }
@@ -800,8 +789,6 @@ struct StatusPill: View {
         .cornerRadius(6)
     }
 }
-
-// MARK: - Update Progress Sheet
 
 struct UpdateProgressSheet: View {
     let state: UpdateState

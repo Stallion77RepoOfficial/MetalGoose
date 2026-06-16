@@ -90,18 +90,21 @@ final class CaptureSettings: ObservableObject {
     
     @Published var frameGenMode: FrameGenMode = .off
 
+    @Published var frameGenMultiplier: Int = 2
+
+    static let minFrameGenMultiplier = 2
+    static let maxFrameGenMultiplier = 4
+
     @Published var aaMode: AAMode = .off
 
     @Published var captureCursor: Bool = true
     @Published var showMGHUD: Bool = true
     @Published var vsync: Bool = true
 
-    // Pipeline buffering depth. Lower = less latency (riskier pacing under load),
-    // higher = smoother under load (more latency). 3 = current default.
     @Published var bufferCount: Int = 3
 
     static let minBufferCount = 2
-    static let maxBufferCount = 4
+    static let maxBufferCount = 3
 
     var isFrameGenEnabled: Bool {
         return frameGenMode != .off

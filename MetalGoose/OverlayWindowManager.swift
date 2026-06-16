@@ -30,7 +30,6 @@ final class OverlayWindowManager {
 
     private var shouldCaptureCursor: Bool = false
     private var fullScreenOutput: Bool = true
-    private var sourceRectCG: CGRect = .zero
     private var displayBoundsCG: CGRect = .zero
 
     func setCaptureCursorEnabled(_ enabled: Bool) {
@@ -62,7 +61,6 @@ final class OverlayWindowManager {
             return false
         }
 
-        sourceRectCG = frame
         displayBoundsCG = config.displayBounds
 
         let window = NonActivatingWindow(
@@ -112,7 +110,6 @@ final class OverlayWindowManager {
         overlayWindow?.orderOut(nil)
         overlayWindow = nil
         currentSize = .zero
-        sourceRectCG = .zero
         displayBoundsCG = .zero
     }
 
@@ -168,7 +165,6 @@ final class OverlayWindowManager {
               let screen = window.screen else { return }
 
         let cgFrame = CGRect(x: boundX, y: boundY, width: boundW, height: boundH)
-        sourceRectCG = cgFrame
 
         let nsFrame: CGRect
         if fullScreenOutput {
@@ -211,18 +207,6 @@ final class OverlayWindowManager {
         }
     }
 
-    /// Detects the target app entering macOS native (Spaces) fullscreen — the one mode
-    /// the overlay-compositing pipeline cannot support, because the system does not let
-    /// a third-party window draw into another app's fullscreen Space.
-    ///
-    /// Returns true only when the target app is frontmost yet our overlay cannot be
-    /// placed on the active Space:
-    ///  - Borderless/windowed games stay on the normal Space, so the overlay is on the
-    ///    active Space → false (no false positive for the supported modes).
-    ///  - A normal app switch makes the target not frontmost → false.
-    ///
-    /// This is intentionally conservative; callers must additionally require it to hold
-    /// for several consecutive checks to ignore the brief fullscreen-transition animation.
     func isTargetInUnreachableSpace() -> Bool {
         guard let window = overlayWindow, targetPID != 0 else { return false }
         guard let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
@@ -407,7 +391,7 @@ final class MouseConstraintManager: @unchecked Sendable {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
         }
 
-        for _ in 0...hideCount {
+        for _ in 0..<hideCount {
             CGDisplayShowCursor(CGMainDisplayID())
         }
 

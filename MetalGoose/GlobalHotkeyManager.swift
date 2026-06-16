@@ -8,9 +8,7 @@ final class GlobalHotkeyManager {
         let ref: EventHotKeyRef?
         let id: UInt32
     }
-    // Keyed by (keyCode, modifiers) so re-registering the same combo replaces the
-    // old one instead of stacking. Stacking caused one keypress to fire multiple
-    // callbacks, which under load slipped past the debounce and double-toggled.
+
     private var entries: [UInt64: Entry] = [:]
     private var eventHandler: EventHandlerRef?
     private var callbacks: [UInt32: () -> Void] = [:]

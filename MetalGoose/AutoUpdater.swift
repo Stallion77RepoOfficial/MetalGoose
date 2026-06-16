@@ -76,9 +76,6 @@ class AutoUpdater: ObservableObject {
         }
     }
 
-    // Version ordering: numeric components compare first (1.2 < 1.2.1). For equal
-    // numeric components, a trailing letter marks a pre-release of that version
-    // (1.2a < 1.2b < 1.2c < 1.2, and 1.2.1b < 1.2.1).
     private static func isVersion(_ lhs: String, newerThan rhs: String) -> Bool {
         let (lhsNumbers, lhsSuffix) = splitVersion(lhs)
         let (rhsNumbers, rhsSuffix) = splitVersion(rhs)
@@ -130,9 +127,6 @@ class AutoUpdater: ObservableObject {
         }
     }
 
-    // On some networks CFNetwork/URLSession's TCP connection to api.github.com hangs
-    // until timeout (ECH/HTTP3 path probing), even though curl reaches the same host
-    // instantly. Shelling out to curl avoids that path entirely and is reliable here.
     private func fetchLatestRelease() async throws -> GitHubRelease {
         let url = "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest"
 

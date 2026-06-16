@@ -154,6 +154,8 @@ https://developer.apple.com/documentation/metal/compute-passes
 
 https://developer.apple.com/documentation/ScreenCaptureKit/capturing-screen-content-in-macos
 
+https://developer.apple.com/documentation/quartzcore/cadisplaylink
+
 
 <div align="center">
   <sub>Built with ❤️ using Metal for macOS</sub>

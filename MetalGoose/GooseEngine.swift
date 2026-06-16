@@ -23,7 +23,6 @@ struct PipelineStats: @unchecked Sendable {
     var presentLatency: Float = 0
     var endToEndLatency: Float = 0
     var avgFrameTime: Float = 0
-    var frameTimeJitter: Float = 0
     var framePacingScore: Float = 100
     var frameCount: UInt64 = 0
     var outputFrameCount: UInt64 = 0
@@ -32,8 +31,12 @@ struct PipelineStats: @unchecked Sendable {
     var passthroughFrameCount: UInt64 = 0
     var gpuMemoryUsed: UInt64 = 0
     var gpuMemoryTotal: UInt64 = 0
+    var processMemoryUsed: UInt64 = 0
+    var cpuUsage: Float = 0
     var outputResolution: CGSize = .zero
     var screenRefreshRate: Int = 0
+    var minRefreshRate: Int = 0
+    var isProMotion: Bool = false
     var targetOutputFPS: Int = 0
 }
 
@@ -48,26 +51,19 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         return _stats
     }
 
-    // Error surfacing. Engine errors are never printed to the terminal; they are
-    // queued here (deduplicated) and drained by the UI, which shows them as alerts.
     private let errorLock = OSAllocatedUnfairLock()
     private var reportedErrors: Set<String> = []
     private var pendingErrors: [String] = []
 
-    // Set by the factory when the engine cannot be created at all (no Metal device /
-    // command queue), so the UI can surface the reason instead of crashing.
     nonisolated(unsafe) static private(set) var lastInitError: String?
 
     private func reportError(_ message: String) {
         errorLock.lock()
         defer { errorLock.unlock() }
-        // Each distinct error surfaces once per capture session (frame-loop failures
-        // would otherwise fire every frame).
         guard reportedErrors.insert(message).inserted else { return }
         pendingErrors.append(message)
     }
 
-    // Drained by the UI's stats timer; returns one queued error per call (FIFO).
     func consumePendingError() -> String? {
         errorLock.lock()
         defer { errorLock.unlock() }
@@ -187,6 +183,8 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var historyTextureIndex: Int = 0
 
     private var blendTexture: MTLTexture?
+    private var cachedInterpPrevTimestamp: CFTimeInterval = -1
+    private var cachedInterpNextTimestamp: CFTimeInterval = -1
     private var lastProcessedSize: CGSize = .zero
 
     private var scalingType: CaptureSettings.ScalingType = .off
@@ -196,6 +194,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var scaleFactor: Float = 1.0
     private var frameGenEnabled: Bool = false
     private var frameGenMode: CaptureSettings.FrameGenMode = .off
+    private var frameGenMultiplier: Int = 2
     private var vsyncEnabled: Bool = true
     private var qualityProfile: QualityProfile = CaptureSettings.QualityMode.balanced.profile
     private var captureCursorEnabled: Bool = false
@@ -203,6 +202,8 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
 
     private var estimatedCaptureInterval: Double = 0
     private var lastCaptureTimestamp: CFTimeInterval = 0
+    private var lastCPUSampleTime: CFTimeInterval = 0
+    private var lastCPUTimeNanos: UInt64 = 0
     private var lastPreferredFPS: Int = 0
     private var lastPreferredUpdateTime: CFTimeInterval = 0
 
@@ -212,12 +213,10 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var frameCount: Int = 0
     private var fpsStartTime: CFTimeInterval = 0
     
-    private var outputSize: CGSize = .zero
     private var currentRefreshRate: Int = 0
-    
-    // Use this instead of init(): it fails gracefully (returning nil + setting
-    // lastInitError) rather than crashing when Metal is unavailable, so the UI can
-    // present MG-ENG-002 / MG-ENG-003 as an alert.
+    private var minRefreshRate: Int = 0
+    private var isProMotionDisplay: Bool = false
+
     static func make() -> GooseEngine? {
         guard let dev = MTLCreateSystemDefaultDevice() else {
             lastInitError = "Error Code: MG-ENG-002 Metal device not available."
@@ -435,6 +434,8 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         frameInterpolatorSize = (0, 0)
         frameInterpolatorNeedsHistoryReset = true
         blendTexture = nil
+        cachedInterpPrevTimestamp = -1
+        cachedInterpNextTimestamp = -1
         renderStateLock.unlock()
 
         if clearFrames {
@@ -471,6 +472,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         renderFPSStartTime = CACurrentMediaTime()
         outputFrameTimeHistory.removeAll()
         lastRenderTime = 0
+        pllPhase = 0
     }
 
     private func effectiveSharpness() -> Float {
@@ -501,15 +503,17 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         var target: Int
 
         if frameGenEnabled {
-            let doubled = sourceFPS > 0 ? sourceFPS * 2.0 : Double(currentRefreshRate)
-            let fill = currentRefreshRate > 0 ? Double(currentRefreshRate) : doubled
-            target = snapToRefreshDivisor(max(fill, doubled))
+            let multiplied = sourceFPS > 0 ? sourceFPS * Double(max(2, frameGenMultiplier)) : Double(currentRefreshRate)
+            target = (vsyncEnabled && !isProMotionDisplay) ? snapToRefreshDivisor(multiplied) : Int(round(multiplied))
         } else {
             target = sourceFPS > 0 ? Int(round(sourceFPS)) : currentRefreshRate
         }
 
         if currentRefreshRate > 0 {
             target = min(target, currentRefreshRate)
+        }
+        if isProMotionDisplay, minRefreshRate > 0, target < minRefreshRate {
+            target = minRefreshRate
         }
         return max(1, target)
     }
@@ -550,7 +554,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         return captureInterval >= outputInterval ? captureInterval : outputInterval
     }
     
-    func attachToView(_ view: MTKView, displayRefreshRate: Int) {
+    func attachToView(_ view: MTKView, displayRefreshRate: Int, minRefreshRate: Int, isProMotion: Bool) {
         MainActor.assumeIsolated {
             view.device = device
             view.delegate = self
@@ -559,8 +563,6 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
             view.enableSetNeedsDisplay = false
             view.colorPixelFormat = .bgra8Unorm
             view.framebufferOnly = false
-            // Presentation latency knob. CAMetalLayer accepts only 2 or 3 drawables;
-            // the processing-pipeline depth (inFlightSemaphore) carries the rest.
             if let layer = view.layer as? CAMetalLayer {
                 layer.maximumDrawableCount = min(max(2, bufferDepth), 3)
             }
@@ -568,8 +570,12 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         applyDisplaySync(to: view)
         self.mtkView = view
         self.currentRefreshRate = displayRefreshRate
+        self.minRefreshRate = minRefreshRate > 0 ? min(minRefreshRate, displayRefreshRate) : displayRefreshRate
+        self.isProMotionDisplay = isProMotion
         statsLock.lock()
         _stats.screenRefreshRate = displayRefreshRate
+        _stats.minRefreshRate = self.minRefreshRate
+        _stats.isProMotion = isProMotion
         statsLock.unlock()
         applyFrameRatePreference(desiredOutputFPS())
     }
@@ -594,6 +600,9 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var outputFrameTimeHistory: [Double] = []
     private var lastRenderTime: CFTimeInterval = 0
     private let frameTimeHistoryCapacity = 120
+
+    private var pllPhase: CFTimeInterval = 0
+    private let pllGain: Double = 0.1
 
     @MainActor
     private func renderFrame(in view: MTKView) {
@@ -620,7 +629,21 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         statsLock.lock()
         _stats.targetOutputFPS = targetFPS
         statsLock.unlock()
-        let targetTime = currentTime - interpolationDelay(for: targetFPS)
+
+        let nominalInterval = targetFPS > 0 ? 1.0 / Double(targetFPS) : 0
+        let sampleClock: CFTimeInterval
+        if pllPhase == 0 || nominalInterval <= 0
+            || abs(currentTime - (pllPhase + nominalInterval)) > nominalInterval * 3 {
+            pllPhase = currentTime
+            sampleClock = currentTime
+        } else {
+            let advanced = pllPhase + nominalInterval
+            let phaseError = currentTime - advanced
+            pllPhase = advanced + phaseError * pllGain
+            sampleClock = pllPhase
+        }
+
+        let targetTime = sampleClock - interpolationDelay(for: targetFPS)
 
         var outputTex: MTLTexture?
         var sourceTimestamp: CFTimeInterval?
@@ -696,7 +719,10 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         renderPassDesc.colorAttachments[0].storeAction = .store
         renderPassDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         
-        guard let renEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDesc) else { return }
+        guard let renEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDesc) else {
+            commandBuffer.commit()
+            return
+        }
         renEncoder.setRenderPipelineState(renderPipeline)
         renEncoder.setFragmentTexture(finalTex, index: 0)
         renEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -768,7 +794,6 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
 
         statsLock.lock()
         _stats.avgFrameTime = Float(avg * 1000.0)
-        _stats.frameTimeJitter = Float(jitter * 1000.0)
         _stats.framePacingScore = Float(pacingScore)
         statsLock.unlock()
     }
@@ -780,7 +805,10 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         _stats.frameCount += 1
         _stats.gpuMemoryUsed = UInt64(device.currentAllocatedSize)
         _stats.gpuMemoryTotal = UInt64(device.recommendedMaxWorkingSetSize)
+        _stats.processMemoryUsed = Self.currentProcessMemoryFootprint()
         statsLock.unlock()
+
+        sampleCPUUsage(now: currentTime)
 
         if lastCaptureTimestamp > 0 {
             let interval = currentTime - lastCaptureTimestamp
@@ -814,6 +842,44 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
         statsLock.unlock()
         lastFrameTime = currentTime
+    }
+
+    private static func currentProcessMemoryFootprint() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return info.phys_footprint
+    }
+
+    private func sampleCPUUsage(now: CFTimeInterval) {
+        if lastCPUSampleTime > 0, (now - lastCPUSampleTime) < 0.5 { return }
+
+        var usage = rusage_info_current()
+        let result = withUnsafeMutablePointer(to: &usage) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(getpid(), RUSAGE_INFO_CURRENT, $0)
+            }
+        }
+        guard result == 0 else { return }
+
+        let cpuNanos = usage.ri_user_time + usage.ri_system_time
+        if lastCPUSampleTime > 0 {
+            let wall = now - lastCPUSampleTime
+            if wall > 0, cpuNanos >= lastCPUTimeNanos {
+                let cpuDelta = Double(cpuNanos - lastCPUTimeNanos)
+                let pct = (cpuDelta / 1_000_000_000.0) / wall * 100.0
+                statsLock.lock()
+                _stats.cpuUsage = Float(pct)
+                statsLock.unlock()
+            }
+        }
+        lastCPUSampleTime = now
+        lastCPUTimeNanos = cpuNanos
     }
 
     private func processSurface(_ surface: IOSurfaceRef, pixelBuffer: CVPixelBuffer, timestamp: CFTimeInterval, isSceneCut: Bool) {
@@ -893,8 +959,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
             }
             let baseSharpness = effectiveSharpness()
 
-            switch scalingType {
-            case .mgup1:
+            if scalingType == .mgup1 {
                 guard let scaler = ensureMetalFXSpatialScaler(
                     inputWidth: workingTex.width, inputHeight: workingTex.height,
                     outputWidth: targetWidth, outputHeight: targetHeight
@@ -925,9 +990,6 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
                     encoder.endEncoding()
                     scaledTex = casOut
                 }
-
-            case .off:
-                scaledTex = workingTex
             }
         }
 
@@ -1051,8 +1113,14 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
             renderStateLock.lock()
             let output = ensureTexture(&blendTexture, width: prevTex.width, height: prevTex.height,
                                         usage: [.shaderRead, .shaderWrite, .renderTarget])
+            let cacheHit = output != nil
+                && cachedInterpPrevTimestamp == prev.timestamp
+                && cachedInterpNextTimestamp == next.timestamp
+                && output?.width == prevTex.width && output?.height == prevTex.height
             renderStateLock.unlock()
             guard let output else { return nil }
+
+            if cacheHit { return output }
 
             guard let interpolator = ensureFrameInterpolator(width: prevTex.width, height: prevTex.height) else {
                 return nil
@@ -1076,19 +1144,18 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
             interpolator.deltaTime = Float(max(0.0001, next.timestamp - prev.timestamp))
             interpolator.shouldResetHistory = shouldResetHistory
             interpolator.encode(commandBuffer: commandBuffer)
+
+            renderStateLock.lock()
+            cachedInterpPrevTimestamp = prev.timestamp
+            cachedInterpNextTimestamp = next.timestamp
+            renderStateLock.unlock()
             return output
         case .off:
             return nil
         }
     }
-    
-    func configure(outputSize: CGSize) {
-        if self.outputSize != outputSize {
-            resetProcessingStateAsync(clearFrames: true)
-        }
-        self.outputSize = outputSize
-    }
-    
+
+
     func updateSettings(_ settings: CaptureSettings) {
         let newScalingType = settings.scalingType
         let newQualityMode = settings.qualityMode
@@ -1117,9 +1184,10 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         qualityProfile = newProfile
         frameGenMode = settings.frameGenMode
         frameGenEnabled = settings.frameGenMode != .off
+        frameGenMultiplier = max(2, min(4, settings.frameGenMultiplier))
         vsyncEnabled = settings.vsync
         captureCursorEnabled = settings.captureCursor
-        bufferDepth = max(2, min(4, settings.bufferCount))
+        bufferDepth = max(2, min(3, settings.bufferCount))
 
         applyFrameRatePreference(desiredOutputFPS())
         if let view = mtkView {
@@ -1139,9 +1207,7 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         resetProcessingStateAsync(clearFrames: true)
         resetFrameCounters()
         resetErrorReporting()
-        // Rebuild the in-flight semaphore at the chosen depth. Safe here because a
-        // fresh capture has no frames in flight (start is gated behind a stopped state).
-        inFlightSemaphore = DispatchSemaphore(value: max(2, min(4, bufferDepth)))
+        inFlightSemaphore = DispatchSemaphore(value: max(2, min(3, bufferDepth)))
         self.windowCaptureManager = manager
         
         manager.onFrameReceived = { [weak self] surface, pixelBuffer, timestamp, isSceneCut in
@@ -1156,6 +1222,8 @@ final class GooseEngine: NSObject, MTKViewDelegate, @unchecked Sendable {
         self.frameCount = 0
         self.fpsStartTime = CACurrentMediaTime()
         self.lastCaptureTimestamp = 0
+        self.lastCPUSampleTime = 0
+        self.lastCPUTimeNanos = 0
     }
     
     private func processIOSurfaceFrame(surface: IOSurfaceRef, pixelBuffer: CVPixelBuffer, timestamp: Double, isSceneCut: Bool) {

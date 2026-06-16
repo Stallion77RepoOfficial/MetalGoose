@@ -5,9 +5,9 @@
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>MetalGoose needs screen recording to capture and enhance game windows with upscaling and frame generation.</string>
 	<key>NSAccessibilityUsageDescription</key>
-	<string>MetalGoose needs accessibility access to move game windows to the virtual display for optimal capture performance.</string>
+	<string>MetalGoose needs accessibility access to remap the mouse cursor so clicks align with the upscaled overlay.</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.2.1</string>
+	<string>1.2.2</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSSupportsGameMode</key>

@@ -299,10 +299,6 @@ kernel void smaaBlend(
 
     half4 result = c;
 
-    // SMAA sub-pixel coverage toward a neighbor maxes near 0.5; the distance-based
-    // weights can approach 1.0 on long edges and over-blur (soft, FXAA-like result).
-    // Clamp each axis to 0.5 while preserving the left/right and up/down ratio so
-    // edges stay anti-aliased but crisp.
     half hSum = w.r + w.g;
     if (hSum > 0.5h) { half s = 0.5h / hSum; w.r *= s; w.g *= s; hSum = 0.5h; }
     half vSum = w.b + w.a;
