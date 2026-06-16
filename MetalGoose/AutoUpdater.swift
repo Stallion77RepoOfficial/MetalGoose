@@ -282,10 +282,14 @@ class AutoUpdater: ObservableObject {
     }
 
     private func relaunch(newAppURL: URL) {
-        let script = "sleep 1 && open \"\(newAppURL.path)\""
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let quotedPath = newAppURL.path.replacingOccurrences(of: "'", with: "'\\''")
+        let script = "while /bin/kill -0 \(pid) 2>/dev/null; do sleep 0.1; done; open -n '\(quotedPath)'"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", script]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
         try? p.run()
         NSApplication.shared.terminate(nil)
     }

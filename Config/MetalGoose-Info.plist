@@ -7,7 +7,7 @@
 	<key>NSAccessibilityUsageDescription</key>
 	<string>MetalGoose needs accessibility access to remap the mouse cursor so clicks align with the upscaled overlay.</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.2.2</string>
+	<string>1.2.2a</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSSupportsGameMode</key>
