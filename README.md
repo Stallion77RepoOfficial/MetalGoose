@@ -61,7 +61,8 @@ for depth buffers or motion vectors:
 ### Download Release
 1. Download the latest release from [Releases](https://github.com/Stallion77RepoOfficial/MetalGoose/releases)
 2. Move `MetalGoose.app` to `/Applications`
-3. Grant Screen Recording and Accessibility permissions when prompted
+3. Open `Terminal` and type `xattr -dr com.apple.quarantine /Applications/MetalGoose.app`
+4. Grant Screen Recording and Accessibility permissions when prompted
 
 ### Build from Source
 ```bash
