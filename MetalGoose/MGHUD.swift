@@ -13,7 +13,8 @@ final class MGHUDData: ObservableObject {
 
     @Published var captureFPS: Float = 0
     @Published var outputFPS: Float = 0
-    @Published var interpolatedFPS: Float = 0
+    /// Distinct synthesised images per second, not presents carrying them.
+    @Published var generatedFPS: Float = 0
     @Published var screenRefreshRate: Int = 0
     @Published var proMotion: String = "-"
     @Published var targetOutputFPS: Int = 0
@@ -33,6 +34,7 @@ final class MGHUDData: ObservableObject {
 
     @Published var framesProcessed: UInt64 = 0
     @Published var framesPresented: UInt64 = 0
+    @Published var framesGenerated: UInt64 = 0
     @Published var framesInterpolated: UInt64 = 0
     @Published var framesPassthrough: UInt64 = 0
     @Published var framesDropped: UInt64 = 0
@@ -77,9 +79,9 @@ struct MGHUDView: View {
 
     @ViewBuilder
     private var headerSection: some View {
+        // No icon: the overlay attaches to whatever window was picked, and a game
+        // controller claimed it was for games only. The name is the whole label.
         HStack {
-            Image(systemName: "gamecontroller.fill")
-                .foregroundColor(.green)
             Text("MetalGoose")
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
             Spacer()
@@ -89,14 +91,18 @@ struct MGHUDView: View {
     private var frameRateSection: some View {
         let captureFPSText = "\(Int(data.captureFPS)) FPS"
         let outputFPSText = "\(Int(data.outputFPS)) FPS"
-        let interpFPSText = "\(Int(data.interpolatedFPS)) FPS"
+        let generatedFPSText = "\(Int(data.generatedFPS)) FPS"
 
         return VStack(spacing: 3) {
             HUDRow(label: "Capture", value: captureFPSText, color: fpsColor(data.captureFPS, target: Float(data.targetOutputFPS)))
             HUDRow(label: "Output", value: outputFPSText, color: fpsColor(data.outputFPS, target: Float(data.targetOutputFPS)))
 
-            if data.frameGenMode != "Off" || data.interpolatedFPS > 0 {
-                HUDRow(label: "Interpolated", value: interpFPSText, color: .cyan)
+            if data.frameGenMode != "Off" || data.generatedFPS > 0 {
+                HUDRow(label: "Generated", value: generatedFPSText, color: .cyan)
+                // Output counts presents, not new information. This is the rate
+                // at which the screen actually shows something it has not shown
+                // before, and it is the number worth reading.
+                HUDRow(label: "Unique", value: "\(Int(data.captureFPS + data.generatedFPS)) FPS", color: .cyan)
             }
 
             HUDRow(label: "Screen Refresh", value: "\(data.screenRefreshRate) Hz")
@@ -171,7 +177,12 @@ struct MGHUDView: View {
     private var frameStatsSection: some View {
         HUDRow(label: "Captured", value: "\(data.framesProcessed)")
         HUDRow(label: "Presented", value: "\(data.framesPresented)")
-        HUDRow(label: "Interpolated", value: "\(data.framesInterpolated)")
+        // Generated counts images the pipeline synthesised; Gen Presents counts
+        // the presents that showed one, so the second is the larger of the two
+        // whenever the panel repeats an image. Gen Presents + Passthrough is
+        // Presented.
+        HUDRow(label: "Generated", value: "\(data.framesGenerated)")
+        HUDRow(label: "Gen Presents", value: "\(data.framesInterpolated)")
         HUDRow(label: "Passthrough", value: "\(data.framesPassthrough)")
         HUDRow(label: "Dropped", value: "\(data.framesDropped)", color: data.framesDropped > 0 ? .red : .white)
     }
@@ -234,10 +245,18 @@ class MGHUDOverlayView: NSView {
         wantsLayer = true
         layer?.backgroundColor = .clear
 
+        // Pinned with constraints rather than an autoresizing mask so the SwiftUI
+        // content's own size propagates out through `fittingSize`; the HUD adds
+        // and removes rows at runtime and the window follows it.
         let hosting = NSHostingView(rootView: MGHUDView(data: hudData))
-        hosting.frame = bounds
-        hosting.autoresizingMask = [.width, .height]
+        hosting.translatesAutoresizingMaskIntoConstraints = false
         addSubview(hosting)
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: topAnchor),
+            hosting.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
         hostingView = hosting
     }
 
@@ -253,10 +272,9 @@ class MGHUDOverlayView: NSView {
         }
     }
 
-    func setResolutions(capture: CGSize, output: CGSize) {
+    func setCaptureResolution(_ capture: CGSize) {
         Task { @MainActor in
             hudData.captureResolution = "\(Int(capture.width))x\(Int(capture.height))"
-            hudData.outputResolution = "\(Int(output.width))x\(Int(output.height))"
         }
     }
 
@@ -264,7 +282,7 @@ class MGHUDOverlayView: NSView {
         Task { @MainActor in
             hudData.captureFPS = stats.captureFPS
             hudData.outputFPS = stats.outputFPS
-            hudData.interpolatedFPS = stats.interpolatedFPS
+            hudData.generatedFPS = stats.generatedFPS
             hudData.frameTime = stats.frameTime
             hudData.avgFrameTime = stats.avgFrameTime
             hudData.gpuTime = stats.gpuTime
@@ -278,6 +296,7 @@ class MGHUDOverlayView: NSView {
             hudData.framesProcessed = stats.frameCount
             hudData.framesDropped = stats.droppedFrames
             hudData.framesInterpolated = stats.interpolatedFrameCount
+            hudData.framesGenerated = stats.generatedFrameCount
             hudData.framesPresented = stats.outputFrameCount
             hudData.framesPassthrough = stats.passthroughFrameCount
 
@@ -291,7 +310,18 @@ class MGHUDOverlayView: NSView {
             }
 
             hudData.upscaleMode = settings.scalingType.rawValue
-            hudData.frameGenMode = settings.isFrameGenEnabled ? "MGFG-1 (\(settings.frameGenMultiplier)x)" : "Off"
+            // The multiplier reported is the one the pipeline is configured for.
+            // This used to be outputFPS/captureFPS, which is presents per capture
+            // — on a 120 Hz panel over a 15 fps capture that reads 8.0x whether
+            // frame generation is running or not, so it described the refresh
+            // ratio and never the generator.
+            let factor = String(format: " (%dx)", settings.effectiveFrameGenMultiplier)
+            switch settings.frameGenMode {
+            case .off:           hudData.frameGenMode = "Off"
+            case .interpolation: hudData.frameGenMode = "Interp" + factor
+            case .extrapolation: hudData.frameGenMode = "Extrap" + factor
+            }
+
             hudData.aaMode = settings.aaMode.rawValue
             hudData.scaleFactor = "\(settings.scaleFactor.rawValue)"
             hudData.renderScale = settings.renderScale.rawValue
@@ -307,11 +337,17 @@ final class MGHUDWindowController {
     private let margin: CGFloat = 20
 
     func show(on screen: NSScreen) {
-        let hudSize = CGSize(width: 220, height: 553)
+        // The HUD adds and removes rows at runtime, so its height is whatever
+        // SwiftUI lays the content out to rather than a number kept in step by
+        // hand. `visibleFrame` already excludes the menu bar and Dock, so no
+        // per-screen offset has to be guessed either.
+        let overlay = MGHUDOverlayView(frame: .zero)
+        let hudSize = overlay.fittingSize
+        overlay.frame = CGRect(origin: .zero, size: hudSize)
 
-        let topOffset: CGFloat = (screen == NSScreen.main) ? 24 : 0
-        let origin = CGPoint(x: screen.frame.minX + margin,
-                             y: screen.frame.maxY - hudSize.height - margin - topOffset)
+        let bounds = screen.visibleFrame
+        let origin = CGPoint(x: bounds.minX + margin,
+                             y: bounds.maxY - hudSize.height - margin)
 
         let window = NSWindow(
             contentRect: CGRect(origin: origin, size: hudSize),
@@ -328,7 +364,6 @@ final class MGHUDWindowController {
         window.ignoresMouseEvents = true
         window.collectionBehavior = [.canJoinAllSpaces, .stationary]
 
-        let overlay = MGHUDOverlayView(frame: CGRect(origin: .zero, size: hudSize))
         window.contentView = overlay
         window.orderFront(nil)
 
@@ -350,11 +385,25 @@ final class MGHUDWindowController {
         hudView?.setPID(pid)
     }
 
-    func setResolutions(capture: CGSize, output: CGSize) {
-        hudView?.setResolutions(capture: capture, output: output)
+    /// Output resolution comes from the engine's own stats every second, so only
+    /// the capture side needs seeding before the first update arrives.
+    func setCaptureResolution(_ capture: CGSize) {
+        hudView?.setCaptureResolution(capture)
     }
 
     func updateFromGooseEngine(stats: PipelineStats, settings: CaptureSettings) {
         hudView?.updateFromGooseEngine(stats: stats, settings: settings)
+        fitWindow()
+    }
+
+    /// Rows appear and disappear with the active mode, and values grow as the
+    /// numbers do, so the window tracks the content instead of being sized once.
+    /// Anchored at the top-left corner so growth extends downwards.
+    private func fitWindow() {
+        guard let window = hudWindow, let view = hudView else { return }
+        let size = view.fittingSize
+        guard size.width > 0, size.height > 0, size != window.frame.size else { return }
+        let origin = CGPoint(x: window.frame.minX, y: window.frame.maxY - size.height)
+        window.setFrame(CGRect(origin: origin, size: size), display: true)
     }
 }

@@ -5,10 +5,12 @@ import MetalKit
 struct OverlayWindowConfig {
     var targetScreen: NSScreen?
     var windowFrame: CGRect?
-    var size: CGSize
     var captureCursor: Bool
-    var displayBounds: CGRect
-    var fullScreenOutput: Bool
+    /// Requested magnification. 1.0 overlays the target window exactly; larger
+    /// values grow around the window centre and stop at the screen edges.
+    var outputScale: CGFloat
+    /// Ignores `outputScale` and covers the whole display.
+    var fillsScreen: Bool
 }
 
 class NonActivatingWindow: NSWindow {
@@ -28,12 +30,54 @@ final class OverlayWindowManager {
     private var targetPID: pid_t = 0
     nonisolated(unsafe) private var appObserver: NSObjectProtocol?
 
+    /// Whether the captured app is the one the user is currently in. The overlay
+    /// draws the last frame it was given for as long as it is on screen, so while
+    /// the user is somewhere else that is a still image of the game sitting on
+    /// top of whatever they switched to — which reads as the game refusing to
+    /// give up focus.
+    private var targetIsFrontmost = true
+
     private var shouldCaptureCursor: Bool = false
-    private var fullScreenOutput: Bool = true
+    private var outputScale: CGFloat = 1.0
+    private var fillsScreen: Bool = false
     private var displayBoundsCG: CGRect = .zero
+
+    /// Scales the target window by `outputScale`, keeps the aspect ratio, caps
+    /// the result at the screen, and keeps it centred on the window.
+    private func outputFrame(forWindow cgFrame: CGRect, on screen: NSScreen) -> CGRect {
+        if fillsScreen { return screen.frame }
+
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let windowCocoa = CGRect(x: cgFrame.origin.x,
+                                 y: primaryHeight - cgFrame.maxY,
+                                 width: cgFrame.width,
+                                 height: cgFrame.height)
+        let bounds = screen.frame
+
+        var width = cgFrame.width * outputScale
+        var height = cgFrame.height * outputScale
+        if width > 0, height > 0 {
+            let fit = min(1.0, min(bounds.width / width, bounds.height / height))
+            width *= fit
+            height *= fit
+        }
+
+        var x = windowCocoa.midX - width / 2
+        var y = windowCocoa.midY - height / 2
+        x = min(max(x, bounds.minX), bounds.maxX - width)
+        y = min(max(y, bounds.minY), bounds.maxY - height)
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
 
     func setCaptureCursorEnabled(_ enabled: Bool) {
         self.shouldCaptureCursor = enabled
+    }
+
+    /// Applied on the next `updateWindowPosition`, so the overlay tracks a live
+    /// change of Scale Factor without tearing the capture down.
+    func setOutputScale(_ scale: CGFloat, fillsScreen: Bool) {
+        self.outputScale = max(1.0, scale)
+        self.fillsScreen = fillsScreen
     }
 
     deinit {
@@ -47,24 +91,26 @@ final class OverlayWindowManager {
         lastError = nil
 
         self.shouldCaptureCursor = config.captureCursor
-        self.fullScreenOutput = config.fullScreenOutput
+        self.outputScale = max(1.0, config.outputScale)
+        self.fillsScreen = config.fillsScreen
 
         guard let screen = config.targetScreen else {
             lastError = "Error Code: MG-OV-001 Target screen missing for overlay creation."
             return false
         }
 
-        currentSize = config.size
-
         guard let frame = config.windowFrame else {
             lastError = "Error Code: MG-OV-002 Window frame missing for overlay creation."
             return false
         }
 
-        displayBoundsCG = config.displayBounds
+        // updateWindowPosition drives this from then on, and re-derives the
+        // display bounds from the screen the overlay actually lands on.
+        let initialFrame = outputFrame(forWindow: frame, on: screen)
+        currentSize = initialFrame.size
 
         let window = NonActivatingWindow(
-            contentRect: CGRect(origin: frame.origin, size: config.size),
+            contentRect: initialFrame,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false,
@@ -116,6 +162,11 @@ final class OverlayWindowManager {
     func setTargetWindow(_ windowID: CGWindowID, pid: pid_t) {
         targetWindowID = windowID
         targetPID = pid
+        // Seeded from the world rather than assumed, so the overlay does not show
+        // itself over an app the user never left MetalGoose for. The observer only
+        // fires on a change, and starting a capture from MetalGoose's own window
+        // means the first change is the one that brings the target forward.
+        targetIsFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
 
         if let observer = appObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -132,10 +183,20 @@ final class OverlayWindowManager {
                 guard let self = self else { return }
                 guard self.targetPID != 0, let pid else { return }
 
-                if pid == self.targetPID {
+                // The overlay follows the target app, and so does the pointer
+                // constraint: both only make sense while the user is actually in
+                // the captured window.
+                self.targetIsFrontmost = (pid == self.targetPID)
+                if self.targetIsFrontmost {
                     self.overlayWindow?.orderFrontRegardless()
+                    self.mtkView?.isPaused = false
+                    MouseConstraintManager.shared.setSuspended(false)
                 } else {
                     self.overlayWindow?.orderOut(nil)
+                    // Nothing to present into once it is hidden, and leaving it
+                    // running only keeps pushing the stale frame.
+                    self.mtkView?.isPaused = true
+                    MouseConstraintManager.shared.setSuspended(true)
                 }
             }
         }
@@ -152,8 +213,16 @@ final class OverlayWindowManager {
             return
         }
 
+        // A window the user has switched away from is still "on screen" as far as
+        // the window server is concerned, so this alone never notices that they
+        // left. This runs on a timer, so re-showing the overlay here undid the
+        // hide the activation observer had just performed: switching away flashed
+        // the desktop and then put the overlay back on top, holding the last
+        // frame it was handed. That still image of the game, over whatever the
+        // user had switched to and not reacting to input, is what looked like the
+        // game grabbing focus back.
         let isOnScreen = (info[kCGWindowIsOnscreen as String] as? Bool) == true
-        if !isOnScreen {
+        if !isOnScreen || !targetIsFrontmost {
             window.orderOut(nil)
             return
         }
@@ -165,19 +234,7 @@ final class OverlayWindowManager {
               let screen = window.screen else { return }
 
         let cgFrame = CGRect(x: boundX, y: boundY, width: boundW, height: boundH)
-
-        let nsFrame: CGRect
-        if fullScreenOutput {
-            nsFrame = screen.frame
-        } else {
-            let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
-            nsFrame = CGRect(
-                x: cgFrame.origin.x,
-                y: primaryHeight - cgFrame.maxY,
-                width: cgFrame.width,
-                height: cgFrame.height
-            )
-        }
+        let nsFrame = outputFrame(forWindow: cgFrame, on: screen)
 
         if !window.isVisible {
             window.orderFront(nil)
@@ -229,7 +286,19 @@ final class MouseConstraintManager: @unchecked Sendable {
     private var isConstraining = false
     private var cursorHideTimer: Timer?
     private var cursorSpriteVisible = true
-    private var cursorHideCount = 0
+
+    /// Set while some app other than the capture target is frontmost. The
+    /// constraint exists to hold the pointer inside the captured window while the
+    /// user is playing, and both halves of it are hostile once they have switched
+    /// away: the warp drags the pointer back into the game on the first mouse
+    /// movement, and the hide leaves the whole session without a visible cursor.
+    /// Between them, switching away with Cmd+Tab looked like the game was pulling
+    /// focus back, and nothing else on screen could be used or even seen.
+    private var isSuspended = false
+
+    /// Fast enough that a cursor another process reveals is gone again within a
+    /// frame at any refresh rate this app runs at.
+    private static let cursorReassertInterval: TimeInterval = 0.1
 
     func startConstraining(sourceRect: CGRect, displayBounds: CGRect) {
         lock.lock()
@@ -285,18 +354,44 @@ final class MouseConstraintManager: @unchecked Sendable {
 
         Self.enableBackgroundCursorControl()
         CGDisplayHideCursor(CGMainDisplayID())
-        lock.lock()
-        cursorHideCount += 1
-        lock.unlock()
+        startCursorReassertTimer()
+    }
 
-        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+    /// The hide is reference counted per connection, so re-asserting it has to
+    /// release our own level first or the count climbs by ten a second and the
+    /// teardown has to unwind thousands of levels to get the cursor back. The
+    /// pair leaves our contribution at exactly one.
+    private func startCursorReassertTimer() {
+        cursorHideTimer?.invalidate()
+        let timer = Timer(timeInterval: Self.cursorReassertInterval, repeats: true) { _ in
+            CGDisplayShowCursor(CGMainDisplayID())
             CGDisplayHideCursor(CGMainDisplayID())
-            self?.lock.lock()
-            self?.cursorHideCount += 1
-            self?.lock.unlock()
         }
         RunLoop.current.add(timer, forMode: .common)
         cursorHideTimer = timer
+    }
+
+    /// Suspending releases exactly the one hide level `startConstraining` took,
+    /// so the cursor comes back for the rest of the system; resuming takes it
+    /// again. Anything that leaves the count unbalanced either strands the user
+    /// without a pointer or needs thousands of releases to recover.
+    func setSuspended(_ suspended: Bool) {
+        lock.lock()
+        guard isConstraining, isSuspended != suspended else {
+            lock.unlock()
+            return
+        }
+        isSuspended = suspended
+        lock.unlock()
+
+        if suspended {
+            cursorHideTimer?.invalidate()
+            cursorHideTimer = nil
+            CGDisplayShowCursor(CGMainDisplayID())
+        } else {
+            CGDisplayHideCursor(CGMainDisplayID())
+            startCursorReassertTimer()
+        }
     }
 
     private static func enableBackgroundCursorControl() {
@@ -315,7 +410,8 @@ final class MouseConstraintManager: @unchecked Sendable {
     func currentCursorFraction() -> CGPoint? {
         lock.lock()
         defer { lock.unlock() }
-        guard isConstraining, cursorSpriteVisible, sourceRect.width > 0, sourceRect.height > 0 else { return nil }
+        guard isConstraining, !isSuspended, cursorSpriteVisible,
+              sourceRect.width > 0, sourceRect.height > 0 else { return nil }
         let fx = (lastMappedPoint.x - sourceRect.minX) / sourceRect.width
         let fy = (lastMappedPoint.y - sourceRect.minY) / sourceRect.height
         return CGPoint(x: fx, y: fy)
@@ -331,7 +427,8 @@ final class MouseConstraintManager: @unchecked Sendable {
         lock.lock()
         let src = sourceRect
         let disp = displayBounds
-        guard src.width > 0, src.height > 0, disp.width > 0, disp.height > 0 else {
+        guard !isSuspended,
+              src.width > 0, src.height > 0, disp.width > 0, disp.height > 0 else {
             lock.unlock()
             return
         }
@@ -368,13 +465,16 @@ final class MouseConstraintManager: @unchecked Sendable {
     func stopConstraining() {
         lock.lock()
         let wasOn = isConstraining
+        // A suspended constraint has already given its hide level back, so
+        // releasing again here would take the count below zero and hand a
+        // permanent extra show to whoever hid the cursor next.
+        let wasSuspended = isSuspended
         let tap = eventTap
         let source = runLoopSource
-        let hideCount = cursorHideCount
         eventTap = nil
         runLoopSource = nil
         isConstraining = false
-        cursorHideCount = 0
+        isSuspended = false
         cursorSpriteVisible = true
         lock.unlock()
 
@@ -391,7 +491,8 @@ final class MouseConstraintManager: @unchecked Sendable {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
         }
 
-        for _ in 0..<hideCount {
+        // The re-assert timer balances itself, so exactly one level is ours.
+        if !wasSuspended {
             CGDisplayShowCursor(CGMainDisplayID())
         }
 

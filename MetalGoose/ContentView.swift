@@ -2,6 +2,7 @@ import SwiftUI
 import MetalKit
 import ApplicationServices
 import Carbon.HIToolbox
+import ScreenCaptureKit
 
 struct ContentView: View {
 
@@ -12,8 +13,6 @@ struct ContentView: View {
     @State private var isCountingDown = false
     @State private var isScalingActive = false
 
-
-    
     @State private var gooseEngine: GooseEngine?
     @State private var windowCaptureManager: WindowCaptureManager?
     @State private var overlayManager: OverlayWindowManager?
@@ -111,15 +110,8 @@ struct ContentView: View {
                     PermissionBanner(
                         axGranted: axGranted,
                         recGranted: recGranted,
-                        requestAX: {
-                            let opts = [
-                                "AXTrustedCheckOptionPrompt": true
-                            ] as CFDictionary
-                            AXIsProcessTrustedWithOptions(opts)
-                        },
-                        requestREC: {
-                            _ = CGRequestScreenCaptureAccess()
-                        }
+                        requestAX: { requestAccessibilityAccess() },
+                        requestREC: { requestScreenRecordingAccess() }
                     )
                     .padding(.bottom, 8)
                 }
@@ -158,12 +150,30 @@ struct ContentView: View {
         }
         .onDisappear {
             permTimer?.invalidate()
+            permTimer = nil
             statsTimer?.invalidate()
-            GlobalHotkeyManager.shared.unregisterAll()
+            statsTimer = nil
+            countdownTimer?.invalidate()
+            countdownTimer = nil
+            isCountingDown = false
+            // The hotkeys deliberately outlive the window. Closing it with Cmd+W
+            // leaves the overlay and the capture running, and tearing the hotkeys
+            // down here left no way to stop either: no window to click Stop in,
+            // and Cmd+Shift+T dead. They cost nothing while the process lives and
+            // die with it.
         }
         .onReceive(settings.objectWillChange) { _ in
             DispatchQueue.main.async {
                 gooseEngine?.updateSettings(settings)
+
+                let upscaling = settings.scalingType != .off
+                overlayManager?.setOutputScale(upscaling ? CGFloat(settings.scaleFactor.floatValue) : 1.0,
+                                               fillsScreen: upscaling && settings.scaleFactor.fillsScreen)
+
+                if isScalingActive, let captureManager = windowCaptureManager {
+                    let renderScale = upscaling ? settings.renderScale.multiplier : 1.0
+                    Task { await captureManager.updateRenderScale(renderScale) }
+                }
             }
         }
         .onChange(of: settings.showMGHUD, initial: false) { _, newValue in
@@ -245,19 +255,19 @@ struct ContentView: View {
             Spacer()
 
             if isScalingActive {
-                Button("STOP SCALING") { stop() }
-                    .buttonStyle(ActionButtonStyle(color: .red))
+                Button("Stop Scaling", role: .destructive) { stop() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
 
             } else if isCountingDown {
                 Text("\(countdown)")
-                    .font(.title2)
-                    .foregroundColor(.red)
+                    .font(.title2.monospacedDigit())
 
             } else {
-                Button("START SCALING") { startCountdown() }
-                    .buttonStyle(ActionButtonStyle(color: .green))
+                Button("Start Scaling") { startCountdown() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                     .disabled(!permissionsGranted)
-                    .opacity(permissionsGranted ? 1.0 : 0.5)
             }
         }
         .padding(.bottom, 10)
@@ -284,10 +294,17 @@ struct ContentView: View {
                        PickerRow(label: String(localized: "Mode", defaultValue: "Mode"),
                                  selection: $settings.frameGenMode)
 
-                       if settings.frameGenMode != .off {
-                           StepperSliderRow(label: String(localized: "Multiplier", defaultValue: "Multiplier"),
-                                            value: $settings.frameGenMultiplier,
-                                            range: CaptureSettings.minFrameGenMultiplier...CaptureSettings.maxFrameGenMultiplier)
+                       // Only extrapolation has a multiplier to choose. MetalFX
+                       // interpolation is 2x by construction, and a row that
+                       // reports a figure nothing can change reads as a control
+                       // that stopped responding.
+                       if settings.frameGenMode == .extrapolation {
+                           StepperSliderRow(
+                               label: String(localized: "Multiplier", defaultValue: "Multiplier"),
+                               value: $settings.frameGenMultiplier,
+                               range: CaptureSettings.minFrameGenMultiplier
+                                   ... CaptureSettings.maxFrameGenMultiplier(for: .extrapolation),
+                               format: { "\($0)x" })
                        }
                    }
 
@@ -318,9 +335,8 @@ struct ContentView: View {
 
                     ToggleRow(label: String(localized: "VSync", comment: "Toggle label"), isOn: $settings.vsync)
 
-                    StepperSliderRow(label: String(localized: "Frame Buffering", comment: "Slider label: pipeline buffer depth"),
-                                     value: $settings.bufferCount,
-                                     range: CaptureSettings.minBufferCount...CaptureSettings.maxBufferCount)
+                    ToggleRow(label: String(localized: "Triple Buffering", comment: "Toggle label: pipeline buffer depth"),
+                              isOn: $settings.tripleBuffering)
                         .disabled(isScalingActive)
                 }
 
@@ -449,22 +465,35 @@ struct ContentView: View {
             return
         }
 
-        let displayMaxFPS = outputScreen.maximumFramesPerSecond > 0 ? outputScreen.maximumFramesPerSecond : 60
+        // Two independent readings of the same panel rather than a hardcoded
+        // fallback: AppKit reports the mode's rate, CoreGraphics reports the
+        // active display mode. Some virtual and captured displays leave one of
+        // the two at zero, and no real display leaves both there.
+        let modeFPS = CGDisplayCopyDisplayMode(displayID)?.refreshRate ?? 0
+        let displayMaxFPS = max(outputScreen.maximumFramesPerSecond, Int(modeFPS.rounded()))
+        guard displayMaxFPS > 0 else {
+            alertMessage = "Error Code: MG-UI-006 Display refresh rate unavailable."
+            showAlert = true
+            return
+        }
 
-        let minInterval = outputScreen.minimumRefreshInterval
+        // The panel's own floor. On a fixed-refresh display it equals the
+        // ceiling, which is what tells the engine there is no variable range.
         let maxInterval = outputScreen.maximumRefreshInterval
-        let isProMotion = minInterval > 0 && maxInterval > minInterval + 0.0001
-        let displayMinFPS = (isProMotion && maxInterval > 0) ? Int(round(1.0 / maxInterval)) : displayMaxFPS
+        let displayMinFPS = maxInterval > 0 ? Int((1.0 / maxInterval).rounded()) : displayMaxFPS
 
         guard let captureManager = windowCaptureManager else { return }
 
-        let sourceRes = cgFrame.size
-        let shouldFullScreen = settings.scalingType != .off
-        let scaledOutputSize = shouldFullScreen ? outputScreen.frame.size : sourceRes
+        let upscaling = settings.scalingType != .off
+        let fillsScreen = upscaling && settings.scaleFactor.fillsScreen
+        let outputScale = upscaling ? CGFloat(settings.scaleFactor.floatValue) : 1.0
+        let renderScale = upscaling ? settings.renderScale.multiplier : 1.0
 
-        let success = await captureManager.startCapture(windowID: wid, maxFPS: displayMaxFPS, showsCursor: false)
+        let success = await captureManager.startCapture(windowID: wid, maxFPS: displayMaxFPS,
+                                                        showsCursor: false, renderScale: renderScale,
+                                                        queueDepth: settings.bufferCount)
         if success {
-            await engine.startCaptureFromWindow(captureManager, refreshRate: displayMaxFPS)
+            await engine.startCaptureFromWindow(captureManager)
 
             connectedPID = app.processIdentifier
             activeOutputScreen = outputScreen
@@ -474,10 +503,9 @@ struct ContentView: View {
             let config = OverlayWindowConfig(
                 targetScreen: outputScreen,
                 windowFrame: cgFrame,
-                size: scaledOutputSize,
                 captureCursor: settings.captureCursor,
-                displayBounds: CGDisplayBounds(displayID),
-                fullScreenOutput: shouldFullScreen
+                outputScale: outputScale,
+                fillsScreen: fillsScreen
             )
 
             guard overlay.createOverlay(config: config) else {
@@ -487,9 +515,10 @@ struct ContentView: View {
                 return
             }
 
-            let mtkView = MTKView(frame: CGRect(origin: .zero, size: scaledOutputSize))
+            // setMTKView sizes the view and its drawable from the overlay itself.
+            let mtkView = MTKView(frame: .zero)
             overlay.setMTKView(mtkView)
-            engine.attachToView(mtkView, displayRefreshRate: displayMaxFPS, minRefreshRate: displayMinFPS, isProMotion: isProMotion)
+            engine.attachToView(mtkView, displayRefreshRate: displayMaxFPS, minRefreshRate: displayMinFPS)
 
             overlay.setTargetWindow(wid, pid: app.processIdentifier)
             overlay.updateWindowPosition()
@@ -500,11 +529,7 @@ struct ContentView: View {
                 hudController.show(on: outputScreen)
                 hudController.setDeviceName(engine.deviceName)
                 hudController.setPID(connectedPID)
-
-                let captureScale = outputScreen.backingScaleFactor
-                let capturePixelSize = CGSize(width: sourceRes.width * captureScale,
-                                               height: sourceRes.height * captureScale)
-                hudController.setResolutions(capture: capturePixelSize, output: scaledOutputSize)
+                hudController.setCaptureResolution(captureManager.capturePixelSize)
             }
             
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -536,9 +561,7 @@ struct ContentView: View {
         overlayManager?.destroyOverlay()
         activeOutputScreen = nil
         
-        if let engine = gooseEngine {
-            await engine.stopCapture()
-        }
+        gooseEngine?.stopCapture()
 
         if let captureManager = windowCaptureManager {
             await captureManager.stopCapture()
@@ -579,6 +602,25 @@ struct ContentView: View {
         if isScalingActive { stopGooseCapture() } else { startGooseCapture() }
     }
 
+    private func requestAccessibilityAccess() {
+        guard !AXIsProcessTrusted() else { return }
+        // Raw value of kAXTrustedCheckOptionPrompt. The imported constant is a
+        // global var, which Swift 6 concurrency checking rejects.
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+    }
+
+    /// Mirrors the Accessibility path: check state, then let the framework ask.
+    /// The request has to go through ScreenCaptureKit — any material use of it
+    /// raises the TCC prompt and registers the app under Screen Recording, while
+    /// CGRequestScreenCaptureAccess is the legacy CoreGraphics entry point and
+    /// is known to stay silent on macOS 26 (FB22261705). The CoreGraphics
+    /// preflight check is unaffected and still reports the correct state.
+    private func requestScreenRecordingAccess() {
+        guard !CGPreflightScreenCaptureAccess() else { return }
+        Task { _ = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) }
+    }
+
     private func startPermissionTimer() {
         permTimer?.invalidate()
         permTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
@@ -596,6 +638,11 @@ struct ContentView: View {
                 if let engine = self.gooseEngine {
                     let stats = engine.stats
                     self.hudController.updateFromGooseEngine(stats: stats, settings: self.settings)
+                    // Render scale is applied at the source now, so the capture
+                    // resolution changes at runtime and cannot be set once.
+                    if let capture = self.windowCaptureManager?.capturePixelSize, capture != .zero {
+                        self.hudController.setCaptureResolution(capture)
+                    }
                     if let engineError = engine.consumePendingError() {
                         self.alertMessage = engineError
                         self.showAlert = true
@@ -649,13 +696,13 @@ struct ContentView: View {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// Also reached from `willTerminateNotification`, where the async teardown may
+    /// not get a chance to run. The mouse constraint installs an event tap and
+    /// hides the system cursor, and a hidden cursor outlives the process, so that
+    /// one part is undone synchronously; the rest is idempotent.
     func stop() {
+        MouseConstraintManager.shared.stopConstraining()
         stopGooseCapture()
-        statsTimer?.invalidate()
-        statsTimer = nil
-        hudController.hide()
-        isScalingActive = false
-        connectedPID = 0
     }
 
 }
@@ -675,7 +722,7 @@ struct ConfigPanel<Content: View>: View {
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(NSColor.windowBackgroundColor		))
+        .background(Color(NSColor.windowBackgroundColor))
         .cornerRadius(10)
     }
 }
@@ -698,6 +745,43 @@ struct PickerRow<T: Hashable & Identifiable & RawRepresentable & CaseIterable>: 
     }
 }
 
+struct StepperSliderRow: View {
+    let label: String
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    var format: (Int) -> String = { "\($0)" }
+
+    /// The displayed value is the binding clamped to the range, so a stored
+    /// value the current range cannot reach never shows a figure the pipeline
+    /// is not running at.
+    private var clamped: Int {
+        min(range.upperBound, max(range.lowerBound, value))
+    }
+
+    var body: some View {
+        HStack {
+            Text(label).foregroundColor(.gray)
+            Spacer()
+            // A range with a single value would make the slider divide by its
+            // own zero width, so it is reported as text instead.
+            if range.lowerBound < range.upperBound {
+                Slider(
+                    value: Binding(
+                        get: { Double(clamped) },
+                        set: { value = min(range.upperBound, max(range.lowerBound, Int($0.rounded()))) }
+                    ),
+                    in: Double(range.lowerBound)...Double(range.upperBound),
+                    step: 1
+                )
+                .frame(minWidth: 110, maxWidth: 160)
+            }
+            Text(format(clamped))
+                .font(.system(.caption, design: .monospaced))
+                .frame(width: 28, alignment: .trailing)
+        }
+    }
+}
+
 struct ToggleRow: View {
     let label: String
     @Binding var isOn: Bool
@@ -710,83 +794,44 @@ struct ToggleRow: View {
     }
 }
 
-struct StepperSliderRow: View {
-    let label: String
-    @Binding var value: Int
-    let range: ClosedRange<Int>
-    var body: some View {
-        HStack {
-            Text(label).foregroundColor(.gray)
-            Spacer()
-            Slider(
-                value: Binding(
-                    get: { Double(value) },
-                    set: { value = min(range.upperBound, max(range.lowerBound, Int($0.rounded()))) }
-                ),
-                in: Double(range.lowerBound)...Double(range.upperBound),
-                step: 1
-            )
-            .frame(minWidth: 120, maxWidth: 180)
-            Text("\(value)")
-                .font(.system(.caption, design: .monospaced))
-                .frame(width: 16, alignment: .trailing)
-        }
-    }
-}
-
-struct ActionButtonStyle: ButtonStyle {
-    let color: Color
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .padding()
-            .frame(minWidth: 120)
-            .frame(height: 36)
-            .background(color.opacity(configuration.isPressed ? 0.7 : 1.0))
-            .cornerRadius(8)
-            .fontWeight(.bold)
-    }
-}
-
 struct PermissionBanner: View {
     let axGranted: Bool
     let recGranted: Bool
     let requestAX: () -> Void
     let requestREC: () -> Void
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                StatusPill(label: "Accessibility", ok: axGranted, action: requestAX)
-                StatusPill(label: "Screen Recording", ok: recGranted, action: requestREC)
-                Spacer()
-            }
+        // The panel reads as a section like any other rather than a tinted
+        // warning box. What is missing is already stated in words and marked by
+        // the one control that does anything about it.
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Permissions Required")
+                .font(.title3).bold()
+            Divider()
+            StatusRow(label: "Accessibility", ok: axGranted, action: requestAX)
+            StatusRow(label: "Screen Recording", ok: recGranted, action: requestREC)
         }
-        .padding(12)
-        .background(Color.yellow.opacity(0.15))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.yellow.opacity(0.4), lineWidth: 1))
-        .cornerRadius(8)
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.windowBackgroundColor))
+        .cornerRadius(10)
     }
 }
 
-struct StatusPill: View {
+struct StatusRow: View {
     let label: String
     let ok: Bool
     let action: () -> Void
     var body: some View {
         HStack(spacing: 8) {
-            Text(ok ? "[ PASS ]" : "[ REQUIRED ]")
-                .foregroundColor(ok ? .green : .orange)
-                .font(.system(.caption, design: .monospaced))
             Text(label)
-                .font(.caption)
-            if !ok {
-                Button("GRANT") { action() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.orange)
+            Spacer()
+            if ok {
+                Text("Granted")
+                    .foregroundStyle(.secondary)
+            } else {
+                Button("Grant") { action() }
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .cornerRadius(6)
     }
 }
 
@@ -830,7 +875,7 @@ struct UpdateProgressSheet: View {
         case .checking:   return String(localized: "Checking for Updates…", comment: "Update sheet title")
         case .downloading: return String(localized: "Downloading Update…", comment: "Update sheet title")
         case .installing: return String(localized: "Installing Update…", comment: "Update sheet title")
-        case .done:       return String(localized: "Update Installed!", comment: "Update sheet title")
+        case .done:       return String(localized: "Update Installed", comment: "Update sheet title")
         default:          return ""
         }
     }
@@ -842,10 +887,5 @@ struct UpdateProgressSheet: View {
         }
     }
 
-    private var iconColor: Color {
-        switch state {
-        case .done: return .green
-        default:    return .accentColor
-        }
-    }
+    private var iconColor: Color { .accentColor }
 }

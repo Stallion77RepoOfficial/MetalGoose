@@ -14,6 +14,12 @@ inline half3 clampColor(half3 color) {
     return clamp(color, half3(0.0h), half3(1.0h));
 }
 
+// Signed clamp is mandatory here: gid is uint, so gid.x - 1 wraps to
+// 0xFFFFFFFF at the left/top edge and max(0u, ...) cannot recover it.
+inline uint2 clampCoord(int2 p, uint width, uint height) {
+    return uint2(clamp(p, int2(0), int2(int(width) - 1, int(height) - 1)));
+}
+
 vertex VertexOut texture_vertex(uint vertexID [[vertex_id]]) {
     const float4 positions[4] = {
         float4(-1.0, -1.0, 0.0, 1.0),
@@ -94,10 +100,11 @@ kernel void fxaa(
     const half FXAA_EDGE_THRESHOLD_MIN = 1.0h / 24.0h;
     const half FXAA_SUBPIX = 0.75h;
 
-    half3 rgbNW = input.read(uint2(max(0u, gid.x - 1), max(0u, gid.y - 1))).rgb;
-    half3 rgbNE = input.read(uint2(min(width - 1, gid.x + 1), max(0u, gid.y - 1))).rgb;
-    half3 rgbSW = input.read(uint2(max(0u, gid.x - 1), min(height - 1, gid.y + 1))).rgb;
-    half3 rgbSE = input.read(uint2(min(width - 1, gid.x + 1), min(height - 1, gid.y + 1))).rgb;
+    int2 p = int2(gid);
+    half3 rgbNW = input.read(clampCoord(p + int2(-1, -1), width, height)).rgb;
+    half3 rgbNE = input.read(clampCoord(p + int2( 1, -1), width, height)).rgb;
+    half3 rgbSW = input.read(clampCoord(p + int2(-1,  1), width, height)).rgb;
+    half3 rgbSE = input.read(clampCoord(p + int2( 1,  1), width, height)).rgb;
     half3 rgbM = input.read(gid).rgb;
 
     half lumaNW = rgb2luma(rgbNW);
@@ -124,19 +131,15 @@ kernel void fxaa(
     half rcpDirMin = 1.0h / (min(abs(dir.x), abs(dir.y)) + dirReduce);
     dir = min(half2(FXAA_SPAN_MAX), max(half2(-FXAA_SPAN_MAX), dir * rcpDirMin));
 
-    int2 pos1 = int2(half2(gid) + dir * (1.0h / 3.0h - 0.5h));
-    int2 pos2 = int2(half2(gid) + dir * (2.0h / 3.0h - 0.5h));
-    pos1 = clamp(pos1, int2(0), int2(width - 1, height - 1));
-    pos2 = clamp(pos2, int2(0), int2(width - 1, height - 1));
+    uint2 pos1 = clampCoord(int2(half2(gid) + dir * (1.0h / 3.0h - 0.5h)), width, height);
+    uint2 pos2 = clampCoord(int2(half2(gid) + dir * (2.0h / 3.0h - 0.5h)), width, height);
 
-    half3 rgbA = (input.read(uint2(pos1)).rgb + input.read(uint2(pos2)).rgb) * 0.5h;
+    half3 rgbA = (input.read(pos1).rgb + input.read(pos2).rgb) * 0.5h;
 
-    int2 pos3 = int2(half2(gid) + dir * -0.5h);
-    int2 pos4 = int2(half2(gid) + dir * 0.5h);
-    pos3 = clamp(pos3, int2(0), int2(width - 1, height - 1));
-    pos4 = clamp(pos4, int2(0), int2(width - 1, height - 1));
+    uint2 pos3 = clampCoord(int2(half2(gid) + dir * -0.5h), width, height);
+    uint2 pos4 = clampCoord(int2(half2(gid) + dir * 0.5h), width, height);
 
-    half3 rgbB = rgbA * 0.5h + (input.read(uint2(pos3)).rgb + input.read(uint2(pos4)).rgb) * 0.25h;
+    half3 rgbB = rgbA * 0.5h + (input.read(pos3).rgb + input.read(pos4).rgb) * 0.25h;
     half lumaB = rgb2luma(rgbB);
 
     half3 edgeResult = (lumaB < lumaMin || lumaB > lumaMax) ? rgbA : rgbB;
@@ -151,15 +154,10 @@ kernel void fxaa(
 }
 
 
-
-
-
-
+// Mirrored in GooseEngine.swift — keep field order and types in sync.
 struct SharpenParams {
     float sharpness;
 };
-
-
 
 struct AntiAliasParams {
     float threshold;
@@ -179,9 +177,10 @@ kernel void smaaEdgeDetection(
 
     half threshold = half(params.threshold);
 
+    int2 p = int2(gid);
     half lumaC    = rgb2luma(input.read(gid).rgb);
-    half lumaLeft = rgb2luma(input.read(uint2(max(0u, gid.x - 1), gid.y)).rgb);
-    half lumaTop  = rgb2luma(input.read(uint2(gid.x, max(0u, gid.y - 1))).rgb);
+    half lumaLeft = rgb2luma(input.read(clampCoord(p + int2(-1, 0), width, height)).rgb);
+    half lumaTop  = rgb2luma(input.read(clampCoord(p + int2(0, -1), width, height)).rgb);
 
     half2 delta;
     delta.x = abs(lumaC - lumaLeft);
@@ -193,10 +192,10 @@ kernel void smaaEdgeDetection(
         return;
     }
 
-    half lumaRight  = rgb2luma(input.read(uint2(min(width - 1, gid.x + 1), gid.y)).rgb);
-    half lumaBottom = rgb2luma(input.read(uint2(gid.x, min(height - 1, gid.y + 1))).rgb);
-    half lumaLeftLeft = rgb2luma(input.read(uint2(max(0u, gid.x - 2), gid.y)).rgb);
-    half lumaTopTop   = rgb2luma(input.read(uint2(gid.x, max(0u, gid.y - 2))).rgb);
+    half lumaRight  = rgb2luma(input.read(clampCoord(p + int2( 1, 0), width, height)).rgb);
+    half lumaBottom = rgb2luma(input.read(clampCoord(p + int2(0,  1), width, height)).rgb);
+    half lumaLeftLeft = rgb2luma(input.read(clampCoord(p + int2(-2, 0), width, height)).rgb);
+    half lumaTopTop   = rgb2luma(input.read(clampCoord(p + int2(0, -2), width, height)).rgb);
 
     half2 maxDelta;
     maxDelta.x = max(max(delta.x, abs(lumaC - lumaRight)), abs(lumaLeft - lumaLeftLeft));
@@ -304,15 +303,17 @@ kernel void smaaBlend(
     half vSum = w.b + w.a;
     if (vSum > 0.5h) { half s = 0.5h / vSum; w.b *= s; w.a *= s; vSum = 0.5h; }
 
+    int2 p = int2(gid);
+
     if (hSum > 0.0h) {
-        half4 left = input.read(uint2(max(0u, gid.x - 1), gid.y));
-        half4 right = input.read(uint2(min(width - 1, gid.x + 1), gid.y));
+        half4 left = input.read(clampCoord(p + int2(-1, 0), width, height));
+        half4 right = input.read(clampCoord(p + int2( 1, 0), width, height));
         result = c * (1.0h - hSum) + left * w.r + right * w.g;
     }
 
     if (vSum > 0.0h) {
-        half4 up = input.read(uint2(gid.x, max(0u, gid.y - 1)));
-        half4 down = input.read(uint2(gid.x, min(height - 1, gid.y + 1)));
+        half4 up = input.read(clampCoord(p + int2(0, -1), width, height));
+        half4 down = input.read(clampCoord(p + int2(0,  1), width, height));
         result = result * (1.0h - vSum) + up * w.b + down * w.a;
     }
 
@@ -320,11 +321,94 @@ kernel void smaaBlend(
 }
 
 
+/// Feeds VTMotionEstimation, which takes single-component luma rather than BGRA.
+kernel void bgraToLuma(
+    texture2d<half, access::read> input [[texture(0)]],
+    texture2d<half, access::write> output [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint width = output.get_width();
+    uint height = output.get_height();
+    if (gid.x >= width || gid.y >= height) return;
 
+    uint2 src = clampCoord(int2(gid), input.get_width(), input.get_height());
+    output.write(half4(rgb2luma(input.read(src).rgb), 0.0h, 0.0h, 1.0h), gid);
+}
 
+/// Frame extrapolation. VTMotionEstimation returns backward vectors in pixels:
+/// `mv` at p says where p's content sat in the previous frame, so the content
+/// velocity is -mv per capture interval. Sampling the source at `p + mv * phase`
+/// is therefore a backward warp to a future time — it leaves no holes, unlike
+/// scattering pixels forward, and needs no second frame so it adds no latency.
+kernel void extrapolateFrame(
+    texture2d<half, access::sample> source [[texture(0)]],
+    texture2d<half, access::sample> motion [[texture(1)]],
+    texture2d<half, access::write> output [[texture(2)]],
+    constant float& phase [[buffer(0)]],
+    constant float& blockSize [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint width = output.get_width();
+    uint height = output.get_height();
+    if (gid.x >= width || gid.y >= height) return;
 
+    constexpr sampler linearSampler(filter::linear, address::clamp_to_edge, coord::normalized);
 
+    float2 size = float2(width, height);
+    float2 uv = (float2(gid) + 0.5f) / size;
 
+    // The field is one vector per block, so a linear fetch smooths it for free.
+    float2 mv = float2(motion.sample(linearSampler, uv).xy);
+
+    // Where neighbouring blocks disagree, the field is straddling a motion
+    // boundary it cannot represent — an object edge, or ground opening up behind
+    // something. Warping across that boundary is what smears the image, so the
+    // shift is faded out exactly there and the source pixel shows through.
+    float2 texel = 1.0f / float2(motion.get_width(), motion.get_height());
+    float2 mL = float2(motion.sample(linearSampler, uv - float2(texel.x, 0.0f)).xy);
+    float2 mR = float2(motion.sample(linearSampler, uv + float2(texel.x, 0.0f)).xy);
+    float2 mU = float2(motion.sample(linearSampler, uv - float2(0.0f, texel.y)).xy);
+    float2 mD = float2(motion.sample(linearSampler, uv + float2(0.0f, texel.y)).xy);
+    // One block is the field's own resolution, so it is also the scale at which
+    // neighbouring vectors are allowed to differ: beyond that they describe a
+    // boundary the grid cannot represent, and the warp fades to the source.
+    float disagreement = max(max(length(mv - mL), length(mv - mR)),
+                             max(length(mv - mU), length(mv - mD)));
+
+    // How far a mistrusted vector actually misplaces the pixel is its
+    // disagreement times the phase, so the tolerance is measured in those terms
+    // rather than in the field's resolution alone. Fading by disagreement only
+    // treats a vector identically at phase 0.25 and 0.75, where the second one
+    // lands the pixel three times further from where it belongs — which is why
+    // the higher multipliers smear so much more than 2x. Half a block reproduces
+    // the previous fade exactly at phase 0.5; below that this is more permissive,
+    // above it less.
+    float confidence = saturate(1.0f - (disagreement * phase) / (blockSize * 0.5f));
+
+    float2 delta = mv * phase * confidence;
+
+    // The linear fetch above blends across two blocks, which is exactly how far
+    // the field can carry a shift before the warp tears between blocks. Past
+    // that the result degrades towards the unwarped source instead.
+    //
+    // Holding the length at the limit — which is what this did — is not that: an
+    // over-range pixel keeps moving at full speed while its slower neighbours
+    // track their own vectors, and the whole point of the limit was that this
+    // pixel's vector is no longer trustworthy. That differential across a
+    // neighbourhood is what reads as the image melting, and it shows up worst in
+    // fast camera motion, where the most pixels are over range. Fading the shift
+    // out instead costs sharpness in those regions and hands back the source,
+    // which reads as a held frame rather than a stretched one.
+    float maxDisplacement = blockSize * 2.0f;
+    float len = length(delta);
+    if (len > maxDisplacement && len > 0.0f) {
+        float excess = saturate(len / maxDisplacement - 1.0f);
+        delta *= (maxDisplacement / len) * (1.0f - excess);
+    }
+
+    float2 sourceUV = (float2(gid) + 0.5f + delta) / size;
+    output.write(source.sample(linearSampler, clamp(sourceUV, 0.0f, 1.0f)), gid);
+}
 
 kernel void copyTexture(
     texture2d<half, access::read> input [[texture(0)]],
@@ -339,45 +423,6 @@ kernel void copyTexture(
 }
 
 
-kernel void blitScaleBilinear(
-    texture2d<half, access::read> input [[texture(0)]],
-    texture2d<half, access::write> output [[texture(1)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint outWidth = output.get_width();
-    uint outHeight = output.get_height();
-    if (gid.x >= outWidth || gid.y >= outHeight) return;
-
-    uint inWidth = input.get_width();
-    uint inHeight = input.get_height();
-
-
-    float2 srcPos = (float2(gid) + 0.5f) * float2(inWidth, inHeight) / float2(outWidth, outHeight) - 0.5f;
-    srcPos = max(srcPos, float2(0.0f));
-
-    uint2 srcBase = uint2(srcPos);
-    float2 frac = srcPos - float2(srcBase);
-
-
-    uint2 p00 = min(srcBase, uint2(inWidth - 1, inHeight - 1));
-    uint2 p10 = min(srcBase + uint2(1, 0), uint2(inWidth - 1, inHeight - 1));
-    uint2 p01 = min(srcBase + uint2(0, 1), uint2(inWidth - 1, inHeight - 1));
-    uint2 p11 = min(srcBase + uint2(1, 1), uint2(inWidth - 1, inHeight - 1));
-
-
-    half4 c00 = input.read(p00);
-    half4 c10 = input.read(p10);
-    half4 c01 = input.read(p01);
-    half4 c11 = input.read(p11);
-
-    half4 top = mix(c00, c10, half(frac.x));
-    half4 bot = mix(c01, c11, half(frac.x));
-    half4 result = mix(top, bot, half(frac.y));
-
-    output.write(result, gid);
-}
-
-
 kernel void contrastAdaptiveSharpening(
     texture2d<half, access::read> input [[texture(0)]],
     texture2d<half, access::write> output [[texture(1)]],
@@ -388,17 +433,17 @@ kernel void contrastAdaptiveSharpening(
     uint height = input.get_height();
     if (gid.x >= width || gid.y >= height) return;
     
-    uint2 maxCoord = uint2(width - 1, height - 1);
-    
-    half3 a = input.read(uint2(max(0u, gid.x - 1), max(0u, gid.y - 1))).rgb;
-    half3 b = input.read(uint2(gid.x, max(0u, gid.y - 1))).rgb;
-    half3 c = input.read(uint2(min(maxCoord.x, gid.x + 1), max(0u, gid.y - 1))).rgb;
-    half3 d = input.read(uint2(max(0u, gid.x - 1), gid.y)).rgb;
+    int2 p = int2(gid);
+
+    half3 a = input.read(clampCoord(p + int2(-1, -1), width, height)).rgb;
+    half3 b = input.read(clampCoord(p + int2( 0, -1), width, height)).rgb;
+    half3 c = input.read(clampCoord(p + int2( 1, -1), width, height)).rgb;
+    half3 d = input.read(clampCoord(p + int2(-1,  0), width, height)).rgb;
     half3 e = input.read(gid).rgb;
-    half3 f = input.read(uint2(min(maxCoord.x, gid.x + 1), gid.y)).rgb;
-    half3 g = input.read(uint2(max(0u, gid.x - 1), min(maxCoord.y, gid.y + 1))).rgb;
-    half3 h = input.read(uint2(gid.x, min(maxCoord.y, gid.y + 1))).rgb;
-    half3 i = input.read(uint2(min(maxCoord.x, gid.x + 1), min(maxCoord.y, gid.y + 1))).rgb;
+    half3 f = input.read(clampCoord(p + int2( 1,  0), width, height)).rgb;
+    half3 g = input.read(clampCoord(p + int2(-1,  1), width, height)).rgb;
+    half3 h = input.read(clampCoord(p + int2( 0,  1), width, height)).rgb;
+    half3 i = input.read(clampCoord(p + int2( 1,  1), width, height)).rgb;
     
     half3 minRGB = min(min(min(d, e), min(f, b)), h);
     half3 maxRGB = max(max(max(d, e), max(f, b)), h);

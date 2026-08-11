@@ -58,10 +58,12 @@ class AutoUpdater: ObservableObject {
         state = .checking
         do {
             let release = try await fetchLatestRelease()
-            let latestTag = release.tagName
+            // Only the tag's `v` prefix is decoration. Removing every `v` also
+            // mangles suffixes like `1.2.3-preview`.
+            var latestTag = release.tagName
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
-                .replacingOccurrences(of: "v", with: "")
+            if latestTag.hasPrefix("v") { latestTag.removeFirst() }
             let currentVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
@@ -110,6 +112,18 @@ class AutoUpdater: ObservableObject {
         guard let asset = release.assets.first(where: { $0.name.hasSuffix(".zip") }),
               let downloadURL = URL(string: asset.browserDownloadURL) else {
             state = .failed("No downloadable .zip asset found in release.")
+            return
+        }
+
+        // The installer replaces the running bundle and strips quarantine, so the
+        // download has to come from GitHub over TLS and nowhere else. A free
+        // Apple ID Personal Team cannot issue a Developer ID certificate, so this
+        // and a published checksum are the only verification available.
+        guard downloadURL.scheme == "https",
+              let host = downloadURL.host()?.lowercased(),
+              host == "github.com" || host.hasSuffix(".github.com")
+                || host == "githubusercontent.com" || host.hasSuffix(".githubusercontent.com") else {
+            state = .failed("Release asset is not served from GitHub over HTTPS; refusing to install it.")
             return
         }
 
