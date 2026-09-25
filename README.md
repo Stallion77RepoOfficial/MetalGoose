@@ -132,9 +132,6 @@ All error codes are shown as an in-app alert.
 
 This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
 
-<div align="center">
-  <sub>Built with ❤️ using Metal for macOS</sub>
-</div>
 ## References
 
 Apple documentation this project was built against:
@@ -151,3 +148,7 @@ Apple documentation this project was built against:
 - [CADisplayLink](https://developer.apple.com/documentation/quartzcore/cadisplaylink)
   — the frame clock the pacing loop runs on
 - [AppKit](https://developer.apple.com/documentation/appkit) — the overlay window
+
+  <div align="center">
+  <sub>Built with ❤️ using Metal for macOS</sub>
+</div>
