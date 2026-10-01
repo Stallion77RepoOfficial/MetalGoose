@@ -54,7 +54,7 @@ An image is never presented twice, so **Generated + Passthrough = Presented** in
 Post-process anti-aliasing that runs on the final captured image, with no need
 for depth buffers or motion vectors:
 - **FXAA** — Fast approximate anti-aliasing (relative edge threshold + subpixel pass)
-- **SMAA** — Subpixel morphological AA with local contrast adaptation
+- **SMAA** — Morphological AA: pattern-based edge blending with local contrast adaptation and sharp-corner preservation
 
 ### Performance Monitoring
 A HUD overlay reports, live:

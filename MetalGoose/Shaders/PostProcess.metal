@@ -119,70 +119,164 @@ kernel void smaaEdgeDetection(
     edges.write(half4(edge.x, edge.y, 0.0h, 1.0h), gid);
 }
 
+/// A run of edges of one orientation along a border, and how the edge line leaves it at each end.
+struct EdgeRun {
+    /// Pixels between the one being looked at and the run's first and last pixel.
+    int before;
+    int after;
+    /// Where the estimated edge line meets the run's ends, in pixels from the border the run lies on:
+    /// negative towards lower coordinates (above, or left), positive towards higher ones, 0 where the run
+    /// simply ends or the end was not found within the search distance.
+    float startOffset;
+    float endOffset;
+};
+
+/// An edge corner whose crossing edge goes on past the next pixel is a real corner of the image, as a
+/// window or a glyph has, and keeps most of its sharpness.
+constant float cornerKept = 0.25f;
+
+/// One channel of the edge texture; outside the image there are no edges.
+inline half edgeAt(texture2d<half, access::read> edges, int2 p, bool green, int2 size) {
+    if (any(p < 0) || any(p >= size)) return 0.0h;
+    half2 e = edges.read(uint2(p)).rg;
+    return green ? e.g : e.r;
+}
+
+/// Where the edge line leaves a run at the border position `q`: the edges that cross the run's border
+/// there, on either side of it. A crossing on one side puts the line half a pixel to that side; none, or
+/// one on both sides, leaves it on the border.
+inline float crossingOffset(texture2d<half, access::read> edges, int2 q, int2 across, bool crossIsGreen,
+                            int2 size, thread bool& crossed) {
+    half negative = edgeAt(edges, q - across, crossIsGreen, size);
+    half positive = edgeAt(edges, q, crossIsGreen, size);
+    crossed = negative > 0.0h || positive > 0.0h;
+    if (!crossed) return 0.0f;
+
+    float offset = 0.5f * float(positive - negative);
+    bool continues = (negative > 0.0h && edgeAt(edges, q - 2 * across, crossIsGreen, size) > 0.0h)
+                  || (positive > 0.0h && edgeAt(edges, q + across, crossIsGreen, size) > 0.0h);
+    return continues ? offset * cornerKept : offset;
+}
+
+/// Follows the run of edges through `p` in both directions. A horizontal run is made of top-border edges
+/// (green) and is crossed by left-border edges (red); a vertical run is the other way round. The search
+/// stops where the run ends or something crosses it.
+inline EdgeRun followRun(texture2d<half, access::read> edges, int2 p, bool horizontal, int maxSteps, int2 size) {
+    const int2 along = horizontal ? int2(1, 0) : int2(0, 1);
+    const int2 across = horizontal ? int2(0, 1) : int2(1, 0);
+    const bool runIsGreen = horizontal;
+
+    EdgeRun run = { 0, 0, 0.0f, 0.0f };
+
+    int2 q = p;
+    for (int i = 0; i < maxSteps; i++) {
+        bool crossed;
+        float offset = crossingOffset(edges, q, across, !runIsGreen, size, crossed);
+        if (crossed) { run.startOffset = offset; break; }
+        if (edgeAt(edges, q - along, runIsGreen, size) == 0.0h) break;
+        q -= along;
+        run.before++;
+    }
+
+    q = p;
+    for (int i = 0; i < maxSteps; i++) {
+        bool crossed;
+        float offset = crossingOffset(edges, q + along, across, !runIsGreen, size, crossed);
+        if (crossed) { run.endOffset = offset; break; }
+        if (edgeAt(edges, q + along, runIsGreen, size) == 0.0h) break;
+        q += along;
+        run.after++;
+    }
+    return run;
+}
+
+/// Area between a straight piece of the edge line and its border, split by the side of the border it
+/// lies on: x for the negative side, y for the positive.
+inline void addArea(thread float2& area, float t0, float h0, float t1, float h1) {
+    float width = t1 - t0;
+    if (width <= 0.0f) return;
+    if (h0 >= 0.0f && h1 >= 0.0f) {
+        area.y += 0.5f * (h0 + h1) * width;
+    } else if (h0 <= 0.0f && h1 <= 0.0f) {
+        area.x -= 0.5f * (h0 + h1) * width;
+    } else {
+        float meets = width * h0 / (h0 - h1);
+        float first = 0.5f * abs(h0) * meets;
+        float second = 0.5f * abs(h1) * (width - meets);
+        if (h0 > 0.0f) { area.y += first; area.x += second; } else { area.x += first; area.y += second; }
+    }
+}
+
+/// How much of this pixel's column lies on each side of the border, for the edge line the run implies.
+/// Ends on opposite sides are joined by one straight line; otherwise the line comes down to the border
+/// in the middle of the run, from the end that crosses (an L) or from both (a U). A run with nothing
+/// crossing is a straight edge, which has no stair-steps to smooth.
+inline float2 lineAreas(EdgeRun run) {
+    float2 area = float2(0.0f);
+    float o1 = run.startOffset;
+    float o2 = run.endOffset;
+    if (o1 == 0.0f && o2 == 0.0f) return area;
+
+    float length = float(run.before + run.after + 1);
+    float column = float(run.before);
+    float t[3], h[3];
+    if (o1 * o2 < 0.0f) {
+        t[0] = 0.0f; t[1] = length; t[2] = length;
+        h[0] = o1;   h[1] = o2;     h[2] = o2;
+    } else {
+        t[0] = 0.0f; t[1] = 0.5f * length; t[2] = length;
+        h[0] = o1;   h[1] = 0.0f;          h[2] = o2;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (t[i + 1] <= t[i]) continue;
+        float a = max(t[i], column);
+        float b = min(t[i + 1], column + 1.0f);
+        if (b <= a) continue;
+        float slope = (h[i + 1] - h[i]) / (t[i + 1] - t[i]);
+        addArea(area, a, h[i] + slope * (a - t[i]), b, h[i] + slope * (b - t[i]));
+    }
+    return area;
+}
+
+/// Blend weights, one set per pixel for the two borders it owns (its top and its left):
+///   r  the pixel above the top border, towards the pixel below it
+///   g  the pixel below the top border, towards the pixel above it
+///   b  the pixel left of the left border, towards the pixel right of it
+///   a  the pixel right of the left border, towards the pixel left of it
 kernel void smaaBlendingWeights(
     texture2d<half, access::read> edges [[texture(0)]],
     texture2d<half, access::write> weights [[texture(1)]],
     constant AntiAliasParams& params [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    uint width = edges.get_width();
-    uint height = edges.get_height();
-    if (gid.x >= width || gid.y >= height) return;
+    int2 size = int2(edges.get_width(), edges.get_height());
+    if (int(gid.x) >= size.x || int(gid.y) >= size.y) return;
 
     half2 e = edges.read(gid).rg;
+    half4 result = half4(0.0h);
+    int2 p = int2(gid);
 
-    if (e.x == 0.0h && e.y == 0.0h) {
-        weights.write(half4(0.0h), gid);
-        return;
+    if (e.g > 0.0h) {
+        float2 area = lineAreas(followRun(edges, p, true, params.maxSearchSteps, size));
+        result.r = half(area.x);
+        result.g = half(area.y);
     }
-
-    half4 weight = half4(0.0h);
-
-    if (e.x > 0.0h) {
-        int leftDist = 0;
-        int rightDist = 0;
-
-        for (int i = 1; i <= params.maxSearchSteps; i++) {
-            if (gid.x >= uint(i) && edges.read(uint2(gid.x - i, gid.y)).r > 0.0h)
-                leftDist = i;
-            else break;
-        }
-
-        for (int i = 1; i <= params.maxSearchSteps; i++) {
-            if (gid.x + i < width && edges.read(uint2(gid.x + i, gid.y)).r > 0.0h)
-                rightDist = i;
-            else break;
-        }
-
-        half totalDist = half(leftDist + rightDist + 1);
-        weight.r = half(leftDist) / totalDist;
-        weight.g = half(rightDist) / totalDist;
+    if (e.r > 0.0h) {
+        float2 area = lineAreas(followRun(edges, p, false, params.maxSearchSteps, size));
+        result.b = half(area.x);
+        result.a = half(area.y);
     }
-
-    if (e.y > 0.0h) {
-        int upDist = 0;
-        int downDist = 0;
-
-        for (int i = 1; i <= params.maxSearchSteps; i++) {
-            if (gid.y >= uint(i) && edges.read(uint2(gid.x, gid.y - i)).g > 0.0h)
-                upDist = i;
-            else break;
-        }
-
-        for (int i = 1; i <= params.maxSearchSteps; i++) {
-            if (gid.y + i < height && edges.read(uint2(gid.x, gid.y + i)).g > 0.0h)
-                downDist = i;
-            else break;
-        }
-
-        half totalDist = half(upDist + downDist + 1);
-        weight.b = half(upDist) / totalDist;
-        weight.a = half(downDist) / totalDist;
-    }
-
-    weights.write(weight, gid);
+    weights.write(result, gid);
 }
 
+inline half4 weightsAt(texture2d<half, access::read> weights, int2 p, int2 size) {
+    if (any(p < 0) || any(p >= size)) return half4(0.0h);
+    return weights.read(uint2(p));
+}
+
+/// Mixes each pixel with the neighbour the weights name. A pixel can be asked to blend across more than
+/// one border; only the axis with the larger weight is used, so a corner is smoothed in one direction
+/// instead of being blurred in two.
 kernel void smaaBlend(
     texture2d<half, access::read> input [[texture(0)]],
     texture2d<half, access::read> weights [[texture(1)]],
@@ -193,36 +287,32 @@ kernel void smaaBlend(
     uint height = input.get_height();
     if (gid.x >= width || gid.y >= height) return;
 
-    half4 w = weights.read(gid);
-    half4 c = input.read(gid);
+    int2 size = int2(width, height);
+    int2 p = int2(gid);
+    half4 center = input.read(gid);
 
-    if (w.r == 0.0h && w.g == 0.0h && w.b == 0.0h && w.a == 0.0h) {
-        output.write(c, gid);
+    float above = float(weightsAt(weights, p, size).g);
+    float below = float(weightsAt(weights, p + int2(0, 1), size).r);
+    float left  = float(weightsAt(weights, p, size).a);
+    float right = float(weightsAt(weights, p + int2(1, 0), size).b);
+
+    if (above + below + left + right < 1e-5f) {
+        output.write(center, gid);
         return;
     }
 
-    half4 result = c;
+    bool horizontal = max(left, right) > max(above, below);
+    float first = horizontal ? left : above;
+    float second = horizontal ? right : below;
+    int2 firstStep = horizontal ? int2(-1, 0) : int2(0, -1);
+    int2 secondStep = horizontal ? int2(1, 0) : int2(0, 1);
 
-    half hSum = w.r + w.g;
-    if (hSum > 0.5h) { half s = 0.5h / hSum; w.r *= s; w.g *= s; hSum = 0.5h; }
-    half vSum = w.b + w.a;
-    if (vSum > 0.5h) { half s = 0.5h / vSum; w.b *= s; w.a *= s; vSum = 0.5h; }
-
-    int2 p = int2(gid);
-
-    if (hSum > 0.0h) {
-        half4 left = input.read(clampCoord(p + int2(-1, 0), width, height));
-        half4 right = input.read(clampCoord(p + int2( 1, 0), width, height));
-        result = c * (1.0h - hSum) + left * w.r + right * w.g;
-    }
-
-    if (vSum > 0.0h) {
-        half4 up = input.read(clampCoord(p + int2(0, -1), width, height));
-        half4 down = input.read(clampCoord(p + int2(0,  1), width, height));
-        result = result * (1.0h - vSum) + up * w.b + down * w.a;
-    }
-
-    output.write(result, gid);
+    float4 c = float4(center);
+    float4 a = float4(input.read(clampCoord(p + firstStep, width, height)));
+    float4 b = float4(input.read(clampCoord(p + secondStep, width, height)));
+    float total = first + second;
+    float4 result = (first / total) * mix(c, a, first) + (second / total) * mix(c, b, second);
+    output.write(half4(result), gid);
 }
 
 // MARK: - Contrast-adaptive sharpening
