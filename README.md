@@ -82,7 +82,7 @@ open MetalGoose.xcodeproj
 
 ## Usage
 
-1. Launch MetalGoose and grant Screen Recording and Accessibility access.
+1. Launch MetalGoose and grant Screen Recording access (and Accessibility while Capture Cursor is on).
 2. Configure upscaling (MGUP-1), frame generation (MGFG-1), and anti-aliasing. Changes apply
    to a running session.
 3. Switch to the window you want to capture — it has to be frontmost, since
@@ -154,3 +154,7 @@ Apple documentation this project was built against:
   the media engine and low-latency frame interpolation on the Neural Engine, and
   [Vision](https://developer.apple.com/documentation/vision) for optical flow
 - [AppKit](https://developer.apple.com/documentation/appkit) — the overlay window
+
+<div align="center">
+  <sub>Built with ❤️ using Metal for macOS</sub>
+</div>
