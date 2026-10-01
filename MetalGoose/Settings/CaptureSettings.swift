@@ -1,0 +1,105 @@
+import SwiftUI
+
+/// What the user has chosen, persisted across launches. The pipeline never sees this
+/// object: it reads an immutable `EngineConfig` snapshot instead, so a change made
+/// while a frame is in flight cannot tear that frame.
+@MainActor
+final class CaptureSettings: ObservableObject {
+    static let shared = CaptureSettings()
+
+    @Published var scalingMethod: ScalingMethod = .off          { didSet { save(scalingMethod.rawValue, .scalingMethod) } }
+    @Published var scaleFactor: ScaleFactor = .x1               { didSet { save(scaleFactor.rawValue, .scaleFactor) } }
+    @Published var renderScale: RenderScale = .native           { didSet { save(renderScale.rawValue, .renderScale) } }
+    @Published var sharpening: Sharpening = .strong             { didSet { save(sharpening.rawValue, .sharpening) } }
+    @Published var frameGenMode: FrameGenMode = .off            { didSet { save(frameGenMode.rawValue, .frameGenMode) } }
+    /// How many presented images the pipeline aims for per captured frame. Stored raw and
+    /// clamped on read, so switching to interpolation and back does not destroy an
+    /// extrapolation setting the user chose.
+    @Published var frameGenMultiplier: Int = 2                  { didSet { save(frameGenMultiplier, .frameGenMultiplier) } }
+    @Published var motionSource: MotionSource = .mediaEngine    { didSet { save(motionSource.rawValue, .motionSource) } }
+    @Published var interpolationEngine: InterpolationEngine = .neuralEngine { didSet { save(interpolationEngine.rawValue, .interpolationEngine) } }
+    @Published var aaMode: AAMode = .off                        { didSet { save(aaMode.rawValue, .aaMode) } }
+    @Published var captureCursor: Bool = true                   { didSet { save(captureCursor, .captureCursor) } }
+    @Published var showMGHUD: Bool = true                       { didSet { save(showMGHUD, .showMGHUD) } }
+    @Published var vsync: Bool = true                           { didSet { save(vsync, .vsync) } }
+    /// Double versus triple buffering. Stored as a flag because the pipeline only ever
+    /// supported those two depths.
+    @Published var tripleBuffering: Bool = true                 { didSet { save(tripleBuffering, .tripleBuffering) } }
+
+    var bufferCount: Int { tripleBuffering ? 3 : 2 }
+
+    /// Whether scaling is active at all. Scale Factor and Render Scale only mean
+    /// something while it is.
+    var isUpscaling: Bool { scalingMethod != .off }
+
+    /// The multiplier the pipeline actually runs at: the stored value clamped to what the
+    /// selected mode can deliver. `off` generates nothing, so 1.
+    var effectiveMultiplier: Int {
+        guard frameGenMode != .off else { return 1 }
+        let range = frameGenMode.multiplierRange
+        return min(range.upperBound, max(range.lowerBound, frameGenMultiplier))
+    }
+
+    var engineConfig: EngineConfig {
+        EngineConfig(upscaling: isUpscaling,
+                     antiAliasing: aaMode,
+                     frameGeneration: frameGenMode,
+                     multiplier: effectiveMultiplier,
+                     vsync: vsync,
+                     profile: sharpening.profile,
+                     bufferDepth: bufferCount,
+                     motionSource: motionSource,
+                     interpolationEngine: interpolationEngine)
+    }
+
+    // MARK: - Persistence
+
+    private enum Key: String {
+        case scalingMethod = "scalingType"   // the key predates the rename and is kept for stored values
+        case scaleFactor, renderScale, frameGenMode, frameGenMultiplier, motionSource, interpolationEngine
+        case sharpening = "qualityMode"      // ditto
+        case aaMode, captureCursor, showMGHUD, vsync, tripleBuffering
+
+        var path: String { "MetalGoose." + rawValue }
+    }
+
+    private let defaults: UserDefaults
+
+    private init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        // Observers do not fire for assignments made from the initializer, so restoring a
+        // value does not write it straight back.
+        scalingMethod       = restore(.scalingMethod, scalingMethod)
+        scaleFactor         = restore(.scaleFactor, scaleFactor)
+        renderScale         = restore(.renderScale, renderScale)
+        sharpening          = restore(.sharpening, sharpening)
+        frameGenMode        = restore(.frameGenMode, frameGenMode)
+        frameGenMultiplier  = restore(.frameGenMultiplier, frameGenMultiplier)
+        motionSource        = restore(.motionSource, motionSource)
+        interpolationEngine = restore(.interpolationEngine, interpolationEngine)
+        aaMode              = restore(.aaMode, aaMode)
+        captureCursor       = restore(.captureCursor, captureCursor)
+        showMGHUD           = restore(.showMGHUD, showMGHUD)
+        vsync               = restore(.vsync, vsync)
+        tripleBuffering     = restore(.tripleBuffering, tripleBuffering)
+    }
+
+    private func save(_ value: Any, _ key: Key) {
+        defaults.set(value, forKey: key.path)
+    }
+
+    /// An unrecognised stored value means the option was renamed or removed, so the
+    /// current default stands rather than a forced fallback elsewhere.
+    private func restore<T: RawRepresentable>(_ key: Key, _ fallback: T) -> T where T.RawValue == String {
+        guard let raw = defaults.string(forKey: key.path), let value = T(rawValue: raw) else { return fallback }
+        return value
+    }
+
+    private func restore(_ key: Key, _ fallback: Bool) -> Bool {
+        defaults.object(forKey: key.path) as? Bool ?? fallback
+    }
+
+    private func restore(_ key: Key, _ fallback: Int) -> Int {
+        defaults.object(forKey: key.path) as? Int ?? fallback
+    }
+}

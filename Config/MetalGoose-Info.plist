@@ -3,16 +3,14 @@
 <plist version="1.0">
 <dict>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>MetalGoose needs screen recording to capture and enhance game windows with upscaling and frame generation.</string>
+	<string>MetalGoose needs screen recording to capture the window you choose and enhance it with upscaling and frame generation.</string>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>MetalGoose needs accessibility access to remap the mouse cursor so clicks align with the upscaled overlay.</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.2.2a</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>LSSupportsGameMode</key>
-	<true/>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.games</string>
+	<string>public.app-category.utilities</string>
 </dict>
 </plist>

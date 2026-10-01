@@ -1,19 +1,10 @@
 <div align="center">
   <img src="Assets/logo.png" alt="MetalGoose Logo" width="128" height="128">
-  
-  # MetalGoose
-  
-  **GPU-accelerated upscaling and frame generation for macOS**
-  
-  [![macOS](https://img.shields.io/badge/macOS-26.0%2B-blue?logo=apple)](https://www.apple.com/macos/)
-  [![Metal](https://img.shields.io/badge/Metal-4.0-orange?logo=apple)](https://developer.apple.com/metal/)
-  [![License](https://img.shields.io/badge/License-GPL--3.0-green)](LICENSE)
-  [![Swift](https://img.shields.io/badge/Swift-6.4-FA7343?logo=swift)](https://swift.org)
-  
-  [Features](#features) • [Installation](#installation) • [Usage](#usage) • [Requirements](#requirements) • [Building](#building) • [License](#license)
 </div>
 
----
+# MetalGoose
+
+**GPU-accelerated upscaling and frame generation for macOS**
 
 ## Overview
 
@@ -25,17 +16,30 @@ only games — anything that renders faster than it is being watched.
 ## Features
 
 ### MGUP-1 Upscaling
-- MetalFX Spatial upscaling with three quality profiles:
-  - **Performance** — Fastest upscaling with minimal latency
-  - **Balanced** — Optimal quality/performance ratio
-  - **Ultra** — Maximum visual fidelity
-- Multiple render scales: Native, 75%, 67%, 50%, 33%
-- Contrast-adaptive sharpening (CAS)
+- MetalFX Spatial upscaling to the overlay's size. **Scale Factor** (1.0x–10.0x, or Fullscreen)
+  sets the overlay size; **Render Scale** (Native, 75%, 67%, 50%, 33%) lowers the resolution
+  ScreenCaptureKit delivers.
+- **Sharpening** — Light, Balanced or Strong: contrast-adaptive sharpening (CAS) strength and
+  anti-aliasing sensitivity.
 
 ### MGFG-1 Frame Generation
-- MetalFX Frame Interpolation — generates one intermediate frame between two captured frames (2x output)
-- Scene-cut detection to avoid interpolating across hard cuts (falls back to passthrough)
-- Output frame rate is snapped to a divisor of the display refresh rate
+- **MGFG-1-Interpolation** — synthesises the midpoint between two captured frames. Highest
+  quality; the newest frame is held back by three quarters of a capture interval plus the time
+  the midpoint takes to make (measured live). One image per pair, so the mode is 2x. Two engines:
+  - **Neural Engine** (default) — VideoToolbox low-latency frame interpolation. The GPU only
+    converts pixel formats. Limited to the sizes the processor supports; larger windows, or a
+    processor failure, fall back to MetalFX automatically.
+  - **GPU (MetalFX)** — MetalFX Frame Interpolation with the media engine's motion field. Not
+    limited in size, but it uses GPU time.
+- **MGFG-1-Extrapolation** — warps the newest frame forward along measured motion. Nothing is
+  held back, so latency is unchanged. The gap can be sampled at 2, 3, or 4 points; quality
+  degrades around disocclusions and at each additional point. Motion comes from the media engine
+  (VideoToolbox) or Vision optical flow, and is despeckled before use.
+- **Multiplier** — images presented per captured frame. Extrapolation: 2x–4x. Interpolation is
+  fixed at 2x.
+- Scene-cut detection avoids generating across hard cuts.
+
+An image is never presented twice, so **Generated + Passthrough = Presented** in the HUD.
 
 ### Anti-Aliasing
 Post-process anti-aliasing that runs on the final captured image, with no need
@@ -45,19 +49,20 @@ for depth buffers or motion vectors:
 
 ### Performance Monitoring
 A HUD overlay reports, live:
-- **Capture / Output / Generated / Unique** frame rates
-- Capture time, GPU time, and the latency the pipeline adds before present
+- **Capture / Output / Generated** frame rates, and the panel's refresh rate and target
+- Capture time, GPU time, **GPU load** (the pipeline's own share of the GPU), latency, present
+  latency, end-to-end latency, and a frame-pacing score
 - VRAM, process memory, and CPU
-- Cumulative counters, where `Gen Presents + Passthrough = Presented`
+- Cumulative counters: Captured, Presented, Generated, Passthrough, Dropped
 
 ## Requirements
 
 | Component | Requirement |
 |-----------|-------------|
-| **macOS** | 26.5 (Tahoe) or later |
+| **macOS** | 27.0 or later |
 | **Chip** | Apple Silicon (M1/M2/M3/M4) |
-| **Xcode** | 26.6 or later (macOS 26.5 SDK) |
-| **Swift** | 6.3 toolchain, Swift 6 language mode |
+| **Xcode** | 27 or later (macOS 27 SDK) |
+| **Swift** | 6.4 toolchain, Swift 6 language mode |
 | **RAM** | 8 GB minimum, 16 GB recommended |
 
 ## Installation
@@ -66,7 +71,7 @@ A HUD overlay reports, live:
 1. Download the latest release from [Releases](https://github.com/Stallion77RepoOfficial/MetalGoose/releases)
 2. Move `MetalGoose.app` to `/Applications`
 3. Open `Terminal` and type `xattr -dr com.apple.quarantine /Applications/MetalGoose.app`
-4. Grant Screen Recording and Accessibility permissions when prompted
+4. Grant Screen Recording (and Accessibility, if Capture Cursor is on) when prompted
 
 ### Build from Source
 ```bash
@@ -78,7 +83,8 @@ open MetalGoose.xcodeproj
 ## Usage
 
 1. Launch MetalGoose and grant Screen Recording and Accessibility access.
-2. Configure upscaling (MGUP-1), frame generation (MGFG-1), and anti-aliasing.
+2. Configure upscaling (MGUP-1), frame generation (MGFG-1), and anti-aliasing. Changes apply
+   to a running session.
 3. Switch to the window you want to capture — it has to be frontmost, since
    MetalGoose targets whichever app is in front when scaling starts.
 4. Press `⌘⇧T`, or return to MetalGoose and click **Start Scaling**.
@@ -100,9 +106,10 @@ All error codes are shown as an in-app alert.
 ### UI (MG-UI)
 - MG-UI-001: Frontmost app is MetalGoose; user must switch to target window.
 - MG-UI-002: Target window not found for the selected app.
-- MG-UI-003: Target window bounds unavailable.
 - MG-UI-004: No display found.
 - MG-UI-005: Display ID not found for target screen.
+- MG-UI-006: Display refresh rate unavailable for target screen.
+- MG-UI-007: A global shortcut (`⌘⇧T` or `⌘⇧C`) is already registered by another app.
 
 ### Capture (MG-CAP)
 - MG-CAP-001: Target window not found by ScreenCaptureKit.
@@ -120,21 +127,14 @@ All error codes are shown as an in-app alert.
 - MG-ENG-005: Anti-aliasing pipeline unavailable.
 - MG-ENG-007: CAS pipeline unavailable.
 - MG-ENG-008: IOSurface texture creation failed.
-- MG-ENG-009: Copy pipeline unavailable.
 - MG-ENG-010: MetalFX Frame Interpolator creation failed.
-- MG-ENG-011: Cursor pipeline setup failed.
 
-### Overlay (MG-OV)
-- MG-OV-001: Target screen missing for overlay creation.
-- MG-OV-002: Window frame missing for overlay creation.
+Codes are identifiers and are not renumbered when one is retired, so the lists have gaps.
 
 ## License
 
 This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
 
-<div align="center">
-  <sub>Built with ❤️ using Metal for macOS</sub>
-</div>
 ## References
 
 Apple documentation this project was built against:
@@ -148,6 +148,9 @@ Apple documentation this project was built against:
 - [MTLTexture](https://developer.apple.com/documentation/metal/mtltexture) and
   [CVPixelBuffer](https://developer.apple.com/documentation/corevideo/cvpixelbuffer)
   — the IOSurface-backed path between capture and render
-- [CADisplayLink](https://developer.apple.com/documentation/quartzcore/cadisplaylink)
-  — the frame clock the pacing loop runs on
+- [CAMetalDisplayLink](https://developer.apple.com/documentation/quartzcore/cametaldisplaylink)
+  — the frame clock the render thread runs on
+- [VideoToolbox](https://developer.apple.com/documentation/videotoolbox) — motion estimation on
+  the media engine and low-latency frame interpolation on the Neural Engine, and
+  [Vision](https://developer.apple.com/documentation/vision) for optical flow
 - [AppKit](https://developer.apple.com/documentation/appkit) — the overlay window

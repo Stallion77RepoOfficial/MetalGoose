@@ -4,7 +4,16 @@
     "" : {
 
     },
-    "%lld" : {
+    "33%" : {
+
+    },
+    "50%" : {
+
+    },
+    "67%" : {
+
+    },
+    "75%" : {
 
     },
     "A new version is available: %@\nWould you like to download and install it now?" : {
@@ -20,6 +29,9 @@
         }
       }
     },
+    "Accessibility" : {
+
+    },
     "Already up to date" : {
       "comment" : "Update alert title"
     },
@@ -32,6 +44,9 @@
           }
         }
       }
+    },
+    "Balanced" : {
+
     },
     "Capture Cursor" : {
       "comment" : "Toggle label",
@@ -77,6 +92,9 @@
     "Downloading Update…" : {
       "comment" : "Update sheet title"
     },
+    "Engine" : {
+
+    },
     "Frame Generation" : {
       "localizations" : {
         "hu" : {
@@ -86,6 +104,15 @@
           }
         }
       }
+    },
+    "Fullscreen" : {
+
+    },
+    "FXAA" : {
+
+    },
+    "GPU (MetalFX)" : {
+
     },
     "Grant" : {
       "localizations" : {
@@ -113,8 +140,14 @@
     "Later" : {
       "comment" : "Dismiss update"
     },
+    "Light" : {
+
+    },
     "Maintenance" : {
       "comment" : "Panel title: Maintenance"
+    },
+    "Media Engine" : {
+
     },
     "Metal cache cleared (%lld location(s)). Restart MetalGoose so shaders rebuild cleanly." : {
       "comment" : "Alert: cache cleared"
@@ -142,6 +175,15 @@
         }
       }
     },
+    "MGFG-1-Extrapolation" : {
+
+    },
+    "MGFG-1-Interpolation" : {
+
+    },
+    "MGUP-1" : {
+
+    },
     "MGUP-1 Settings" : {
       "comment" : "Panel title: MGUP-1 settings",
       "localizations" : {
@@ -163,6 +205,9 @@
         }
       }
     },
+    "Motion" : {
+
+    },
     "Multiplier" : {
       "localizations" : {
         "hu" : {
@@ -173,8 +218,17 @@
         }
       }
     },
+    "Native (100%)" : {
+
+    },
+    "Neural Engine" : {
+
+    },
     "No Metal cache found to clear." : {
       "comment" : "Alert: nothing to clear"
+    },
+    "Off" : {
+
     },
     "OK" : {
       "localizations" : {
@@ -186,23 +240,18 @@
         }
       }
     },
+    "Open Settings" : {
+
+    },
+    "Optical Flow" : {
+
+    },
     "Permissions Required" : {
       "localizations" : {
         "hu" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Szükséges engedélyek"
-          }
-        }
-      }
-    },
-    "Quality" : {
-      "comment" : "Label: Quality",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Minőség"
           }
         }
       }
@@ -230,6 +279,12 @@
         }
       }
     },
+    "Screen Recording" : {
+
+    },
+    "Sharpening" : {
+
+    },
     "Show MG HUD" : {
       "comment" : "Toggle label",
       "localizations" : {
@@ -240,6 +295,9 @@
           }
         }
       }
+    },
+    "SMAA" : {
+
     },
     "Start Scaling" : {
       "localizations" : {
@@ -260,6 +318,9 @@
           }
         }
       }
+    },
+    "Strong" : {
+
     },
     "Triple Buffering" : {
       "comment" : "Toggle label: pipeline buffer depth"

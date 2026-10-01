@@ -12,3 +12,9 @@ package.sh
 DEVLOG.md
 /MetalGoose-old
 /Tools
+
+# SwiftPM
+.build/
+.swiftpm/
+/Tests
+/Package.swift
