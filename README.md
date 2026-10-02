@@ -38,7 +38,10 @@ only games — anything that renders faster than it is being watched.
   low-latency frame interpolation), which leaves the GPU to the captured app; the GPU only
   converts pixel formats. A window larger than the processor takes (1920 px, 2.07 MP), or a
   processor failure, falls back to **MetalFX** frame interpolation with the media engine's motion
-  field, automatically; it makes the midpoint only and uses GPU time.
+  field, automatically; it makes the midpoint only and uses GPU time. With Render Scale below 100%,
+  generation works on the reduced capture and the final scale-up treats captured and generated
+  frames alike; only the Neural Engine takes the window's own size, when that fits it, which
+  measured closer to the real image.
 - **MGFG-1-Extrapolation** — warps the newest frame forward along measured motion. Nothing is
   held back, so latency is unchanged. The gap can be sampled at 2, 3, or 4 points; quality
   degrades around disocclusions and at each additional point. Motion comes from the media engine

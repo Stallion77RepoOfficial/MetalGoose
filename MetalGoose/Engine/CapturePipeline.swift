@@ -205,18 +205,19 @@ final class CapturePipeline: @unchecked Sendable {
 
         // ScreenCaptureKit delivers the render resolution directly and the spatial upscale runs once
         // per presented frame, so the capture path only sharpens and anti-aliases before the frame
-        // enters the ring. Render scale reduces the capture, but frame generation must not inherit
-        // that reduction: interpolation and the motion field would then work on a fraction of the
-        // pixels and smear. Bring the frame back to the window's native size first.
-        //
-        // Frame generation is the only reason this pass exists, so it is also its only condition.
-        // Without it the restore would be a second full MetalFX pass per captured frame, with the
-        // sharpening and anti-aliasing running at native size instead of the reduced one — the
-        // opposite of what Render Scale is for. The presentation step covers the whole gap from the
-        // capture to the drawable on its own.
+        // enters the ring, at the reduced size. Generation works on the capture as it is: bringing it
+        // back to the window's size first was measured to add nothing for MetalFX and extrapolation,
+        // and costs a MetalFX pass per capture and every later stage at four times the pixels. Only
+        // the Neural Engine takes the window's own size, when that fits it, and a window that does
+        // not fit it goes to MetalFX on the capture (`CaptureRestore`).
         let native = frame.nativePixelSize
-        let restores = config.upscaling && config.generatesFrames
-            && native.width >= CGFloat(input.width) + 1 && native.height >= CGFloat(input.height) + 1
+        let isReduced = native.width >= CGFloat(input.width) + 1 && native.height >= CGFloat(input.height) + 1
+        let windowWidth = isReduced ? Int(native.width) : input.width
+        let windowHeight = isReduced ? Int(native.height) : input.height
+        let neuralEngineFitsWindow = config.frameGeneration == .interpolation
+            && NeuralInterpolator.supports(width: windowWidth, height: windowHeight)
+        let restores = CaptureRestore.isRestored(upscaling: config.upscaling, mode: config.frameGeneration,
+                                                 isReduced: isReduced, neuralEngineFitsWindow: neuralEngineFitsWindow)
         let width = restores ? Int(native.width) : input.width
         let height = restores ? Int(native.height) : input.height
 
@@ -301,7 +302,7 @@ final class CapturePipeline: @unchecked Sendable {
 
         // The Neural Engine takes the capture in 4:2:0, converted here and handed over once the GPU has
         // written it. A size it cannot take, or a processor that failed, falls back to MetalFX.
-        let backend = interpolationBackend(for: config, width: width, height: height)
+        let backend = interpolationBackend(neuralEngineFitsWindow: neuralEngineFitsWindow)
         let backendChanged = shared.interpolationBackend.withLock { current -> Bool in
             defer { current = backend }
             return current != backend
@@ -346,14 +347,10 @@ final class CapturePipeline: @unchecked Sendable {
         shared.metalFX.feed(previous: frames[index - 1], next: next, field: field)
     }
 
-    /// Which engine interpolates this frame's pair: the Neural Engine while it can take frames of this size
-    /// and has not failed, and MetalFX is what is left.
-    private func interpolationBackend(for config: EngineConfig, width: Int, height: Int) -> InterpolationEngine {
-        guard config.frameGeneration == .interpolation,
-              NeuralInterpolator.supports(width: width, height: height), !shared.neural.hasFailed else {
-            return .metalFX
-        }
-        return .neuralEngine
+    /// Which engine interpolates this frame's pair: the Neural Engine while it can take the window's own size
+    /// (which is the size it is given) and has not failed, and MetalFX is what is left.
+    private func interpolationBackend(neuralEngineFitsWindow: Bool) -> InterpolationEngine {
+        neuralEngineFitsWindow && !shared.neural.hasFailed ? .neuralEngine : .metalFX
     }
 
     /// The steps this frame's pair is cut into, and what the render thread plans with. MetalFX makes the
