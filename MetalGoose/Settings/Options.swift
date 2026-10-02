@@ -94,11 +94,11 @@ enum ScaleFactor: String, SettingOption {
 enum FrameGenMode: String, SettingOption {
     case off = "Off"
     /// Blends between two captured frames. Highest quality, but the newest frame has
-    /// to be held back: the schedule runs behind real time by three quarters of a
-    /// capture interval plus the time the midpoint takes to make, because the midpoint
-    /// cannot be shown before it exists and a clock any closer to real time asks for it
-    /// too early. The generators synthesise one image per pair — the midpoint — so the
-    /// unique image rate is twice the capture rate.
+    /// to be held back: the schedule runs behind real time by most of a capture interval
+    /// plus the time the first generated image takes to make, because an image cannot be
+    /// shown before it exists and a clock any closer to real time asks for it too early.
+    /// The Neural Engine makes the midpoint of each pair, or its quarters; MetalFX, which
+    /// takes over when the Neural Engine cannot take the frames, makes only the midpoint.
     case interpolation = "MGFG-1-Interpolation"
     /// Warps the newest frame forward along its motion. Lower quality around
     /// disocclusions, but nothing is held back, so latency is unchanged, and the warp
@@ -114,13 +114,14 @@ enum FrameGenMode: String, SettingOption {
         }
     }
 
-    /// Interpolation synthesises exactly one image per frame pair — the midpoint — so
-    /// it is 2x and cannot be anything else. The warp used by extrapolation takes a
+    /// The multipliers the mode can deliver, lowest first. Interpolation cuts a pair into two steps, the
+    /// midpoint, or four, its quarters, and nothing in between. The warp used by extrapolation takes a
     /// continuous phase, so it can be sampled at as many points in the gap as asked for.
-    var multiplierRange: ClosedRange<Int> {
+    var multipliers: [Int] {
         switch self {
-        case .off, .interpolation: return 2...2
-        case .extrapolation:       return 2...4
+        case .off:           return [1]
+        case .interpolation: return [2, 4]
+        case .extrapolation: return [2, 3, 4]
         }
     }
 }
@@ -169,21 +170,4 @@ struct QualityProfile: Equatable, Sendable {
     let sharpnessScale: Float
     let aaThreshold: Float
     let smaaSearchSteps: Int
-}
-
-/// What synthesises the midpoint frame in interpolation mode.
-enum InterpolationEngine: String, SettingOption {
-    /// The Neural Engine, through VideoToolbox's low-latency frame interpolation. The
-    /// GPU only converts pixel formats, which leaves it to the captured app.
-    case neuralEngine
-    /// MetalFX on the GPU. Faster per frame and not limited in size, but it takes GPU
-    /// time from whatever is being captured.
-    case metalFX
-
-    var title: LocalizedStringResource {
-        switch self {
-        case .neuralEngine: return "Neural Engine"
-        case .metalFX:      return "GPU (MetalFX)"
-        }
-    }
 }

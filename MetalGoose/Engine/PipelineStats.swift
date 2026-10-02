@@ -39,6 +39,7 @@ struct PipelineStats: Sendable, Equatable {
     var outputResolution: CGSize = .zero
     var screenRefreshRate: Int = 0
     var isProMotion = false
+    /// Images per second the screen should be given: the capture rate times the multiplier in use.
     var targetOutputFPS: Int = 0
 
     /// The counters that describe one mode's behaviour. Carrying them across a mode switch

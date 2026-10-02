@@ -48,6 +48,12 @@ final class CapturePipeline: @unchecked Sendable {
     private var smaaWeights: MTLTexture?
     private var processedSize: CGSize = .zero
 
+    /// The steps interpolation is cut into now, 2 or 4. The choice has memory: a rate near the limit of what
+    /// four steps need does not flip between the two.
+    private var steps = InterpolationSteps.halves
+    private var quartersAllowedAfter: CFTimeInterval = 0
+    private static let quartersCooldown: CFTimeInterval = 10
+
     /// ScreenCaptureKit recycles a small pool of surfaces, so the same few come back frame after
     /// frame. Wrapping each in a texture again for every capture allocated for surfaces that were
     /// already wrapped.
@@ -165,6 +171,8 @@ final class CapturePipeline: @unchecked Sendable {
         shared.renderResetRequested.withLock { $0 = true }
         shared.ring.clear()
         shared.stats.withLock { $0.resetCumulativeCounters() }
+        steps = InterpolationSteps.halves
+        quartersAllowedAfter = 0
     }
 
     // MARK: - One frame
@@ -301,13 +309,14 @@ final class CapturePipeline: @unchecked Sendable {
         // The two engines take different times to make an image, so one's measurement says nothing about
         // the other's.
         if backendChanged { shared.generationLatency.reset() }
+        let steps = interpolationSteps(for: config, backend: backend)
         let yuv = backend == .neuralEngine
             ? shared.neural.encodeConversion(of: history, commandBuffer: commandBuffer) : nil
 
         commandBuffer.addCompletedHandler { [shared] buffer in
             let gpuTime = Float((buffer.gpuEndTime - buffer.gpuStartTime) * 1000)
             shared.stats.withLock { $0.captureGPUTime = gpuTime }
-            if let yuv { shared.neural.frameConverted(yuv, timestamp: now) }
+            if let yuv { shared.neural.frameConverted(yuv, timestamp: now, steps: steps) }
         }
         commandBuffer.commit()
 
@@ -337,14 +346,39 @@ final class CapturePipeline: @unchecked Sendable {
         shared.metalFX.feed(previous: frames[index - 1], next: next, field: field)
     }
 
-    /// Which engine interpolates this frame's pair. The setting is a preference: the Neural Engine is
-    /// used only while it can take frames of this size and has not failed, and MetalFX is what is left.
+    /// Which engine interpolates this frame's pair: the Neural Engine while it can take frames of this size
+    /// and has not failed, and MetalFX is what is left.
     private func interpolationBackend(for config: EngineConfig, width: Int, height: Int) -> InterpolationEngine {
-        guard config.frameGeneration == .interpolation, config.interpolationEngine == .neuralEngine,
+        guard config.frameGeneration == .interpolation,
               NeuralInterpolator.supports(width: width, height: height), !shared.neural.hasFailed else {
             return .metalFX
         }
         return .neuralEngine
+    }
+
+    /// The steps this frame's pair is cut into, and what the render thread plans with. MetalFX makes the
+    /// midpoint alone. The Neural Engine makes quarters when they are asked for, as long as it can make three
+    /// images inside the time between captures and the panel can show them.
+    private func interpolationSteps(for config: EngineConfig, backend: InterpolationEngine) -> Int {
+        let now = CACurrentMediaTime()
+        if config.frameGeneration == .interpolation, backend == .neuralEngine {
+            let chosen = InterpolationSteps.choose(
+                requested: config.multiplier, current: steps,
+                midpointTime: shared.neural.midpointTime, quartersTime: shared.neural.quartersTime,
+                captureInterval: shared.captureInterval.withLock { $0.value },
+                refreshRate: shared.stats.withLock { $0.screenRefreshRate },
+                mayEnter: now >= quartersAllowedAfter)
+            // Having just failed to keep up, four steps are not tried again for a while: the first time
+            // they were tried is what showed they did not fit, and trying costs a pair its images.
+            if steps == InterpolationSteps.quarters, chosen == InterpolationSteps.halves {
+                quartersAllowedAfter = now + Self.quartersCooldown
+            }
+            steps = chosen
+        } else {
+            steps = InterpolationSteps.halves
+        }
+        shared.interpolationSteps.withLock { $0 = steps }
+        return steps
     }
 
     /// The single way a captured frame is abandoned. Going through one function makes the accounting

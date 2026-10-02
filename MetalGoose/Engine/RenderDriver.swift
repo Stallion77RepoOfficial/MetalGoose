@@ -46,7 +46,6 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             self.link = link
             let rate = Float(displayRate.maximum)
             link.preferredFrameRateRange = CAFrameRateRange(minimum: rate, maximum: rate, preferred: rate)
-            shared.stats.withLock { $0.targetOutputFPS = displayRate.maximum }
             link.add(to: .current, forMode: .default)
         }
         // Scheduling a block does not wake a run loop that is asleep waiting for a source.

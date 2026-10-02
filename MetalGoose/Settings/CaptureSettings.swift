@@ -13,10 +13,9 @@ final class CaptureSettings: ObservableObject {
     @Published var sharpening: Sharpening = .strong             { didSet { save(sharpening.rawValue, .sharpening) } }
     @Published var frameGenMode: FrameGenMode = .off            { didSet { save(frameGenMode.rawValue, .frameGenMode) } }
     /// How many presented images the pipeline aims for per captured frame. Stored raw and
-    /// clamped on read, so switching to interpolation and back does not destroy an
-    /// extrapolation setting the user chose.
+    /// read as the nearest value the mode can deliver, so switching between modes does not
+    /// destroy a setting the user chose.
     @Published var frameGenMultiplier: Int = 2                  { didSet { save(frameGenMultiplier, .frameGenMultiplier) } }
-    @Published var interpolationEngine: InterpolationEngine = .neuralEngine { didSet { save(interpolationEngine.rawValue, .interpolationEngine) } }
     @Published var aaMode: AAMode = .off                        { didSet { save(aaMode.rawValue, .aaMode) } }
     @Published var captureCursor: Bool = true                   { didSet { save(captureCursor, .captureCursor) } }
     @Published var showMGHUD: Bool = true                       { didSet { save(showMGHUD, .showMGHUD) } }
@@ -31,12 +30,11 @@ final class CaptureSettings: ObservableObject {
     /// something while it is.
     var isUpscaling: Bool { scalingMethod != .off }
 
-    /// The multiplier the pipeline actually runs at: the stored value clamped to what the
-    /// selected mode can deliver. `off` generates nothing, so 1.
+    /// The multiplier the pipeline is asked to run at: the highest one the selected mode offers that
+    /// the stored value reaches, and the lowest if it reaches none. `off` generates nothing, so 1.
     var effectiveMultiplier: Int {
-        guard frameGenMode != .off else { return 1 }
-        let range = frameGenMode.multiplierRange
-        return min(range.upperBound, max(range.lowerBound, frameGenMultiplier))
+        let offered = frameGenMode.multipliers
+        return offered.last { $0 <= frameGenMultiplier } ?? offered[0]
     }
 
     var engineConfig: EngineConfig {
@@ -46,15 +44,14 @@ final class CaptureSettings: ObservableObject {
                      multiplier: effectiveMultiplier,
                      vsync: vsync,
                      profile: sharpening.profile,
-                     bufferDepth: bufferCount,
-                     interpolationEngine: interpolationEngine)
+                     bufferDepth: bufferCount)
     }
 
     // MARK: - Persistence
 
     private enum Key: String {
         case scalingMethod = "scalingType"   // the key predates the rename and is kept for stored values
-        case scaleFactor, renderScale, frameGenMode, frameGenMultiplier, interpolationEngine
+        case scaleFactor, renderScale, frameGenMode, frameGenMultiplier
         case sharpening = "qualityMode"      // ditto
         case aaMode, captureCursor, showMGHUD, vsync, tripleBuffering
 
@@ -73,7 +70,6 @@ final class CaptureSettings: ObservableObject {
         sharpening          = restore(.sharpening, sharpening)
         frameGenMode        = restore(.frameGenMode, frameGenMode)
         frameGenMultiplier  = restore(.frameGenMultiplier, frameGenMultiplier)
-        interpolationEngine = restore(.interpolationEngine, interpolationEngine)
         aaMode              = restore(.aaMode, aaMode)
         captureCursor       = restore(.captureCursor, captureCursor)
         showMGHUD           = restore(.showMGHUD, showMGHUD)

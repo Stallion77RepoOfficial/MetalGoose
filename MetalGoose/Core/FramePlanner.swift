@@ -17,8 +17,9 @@ enum PresentationPlan: Equatable {
     case nothing
     /// A captured frame, exactly as captured.
     case captured(Int)
-    /// The midpoint between two captures.
-    case interpolated(previous: Int, next: Int)
+    /// The image `step` of `steps` of the way from one capture to the next: the midpoint of a pair at 2 steps,
+    /// its quarters at 4.
+    case interpolated(previous: Int, next: Int, step: Int, steps: Int)
     /// The newest capture warped `step` of `steps` of the way into the next interval.
     case extrapolated(source: Int, step: Int, steps: Int)
 }
@@ -28,14 +29,17 @@ enum PresentationPlan: Equatable {
 /// does not need to be drawn.
 enum PresentedImage: Equatable {
     case captured(CFTimeInterval)
-    case interpolated(previous: CFTimeInterval, next: CFTimeInterval)
+    /// `phase` is how far from `previous` to `next` the image sits: the midpoint is 0.5 whether the pair was cut
+    /// into two steps or four, so the same image is the same image either way.
+    case interpolated(previous: CFTimeInterval, next: CFTimeInterval, phase: Double)
     case extrapolated(source: CFTimeInterval, step: Int)
 }
 
 struct PlanningInput {
     var mode: FrameGenMode
-    /// How many images each capture interval should carry. Only extrapolation uses it:
-    /// MetalFX synthesises one image per pair, the midpoint, so interpolation is 2x.
+    /// How many images each capture interval should carry. Extrapolation samples its warp at that many
+    /// points. Interpolation takes the steps its engine can make: 2, the midpoint of each pair, or 4, its
+    /// quarters.
     var multiplier: Int
     /// The time at which to sample the capture timeline, on the same clock as the frame timestamps: the
     /// moment of the display callback.
@@ -82,8 +86,9 @@ enum FramePlanner {
             return nil
         case .captured(let i):
             return .captured(frames[i].timestamp)
-        case .interpolated(let previous, let next):
-            return .interpolated(previous: frames[previous].timestamp, next: frames[next].timestamp)
+        case .interpolated(let previous, let next, let step, let steps):
+            return .interpolated(previous: frames[previous].timestamp, next: frames[next].timestamp,
+                                 phase: Double(step) / Double(steps))
         case .extrapolated(let source, let step, _):
             return .extrapolated(source: frames[source].timestamp, step: step)
         }
@@ -128,31 +133,37 @@ enum FramePlanner {
 
     // MARK: - Interpolation
 
-    /// A pair offers three images: `previous` at position 0, the generated midpoint at 0.5 and `next` at
-    /// 1. Each position is served by whichever is nearest, which puts the midpoint's share at a quarter
-    /// to three quarters of the way through — the same at any capture rate and any refresh rate. (A
-    /// tuned snap window in output-interval units did the same job only while the output rate happened
-    /// to match.)
-    private static let midpointStart = 0.25
+    /// A pair offers `steps + 1` images: `previous` at position 0, the generated ones at k/steps and `next` at
+    /// 1. Each position is served by whichever is nearest, so the first generated image's share starts half a
+    /// step in — a quarter of the way through a pair at 2 steps, an eighth at 4 — the same at any capture
+    /// rate and any refresh rate. (A tuned snap window in output-interval units did the same job only while
+    /// the output rate happened to match.)
+    private static func firstImageStart(steps: Int) -> Double { 0.5 / Double(steps) }
 
     /// How far behind real time the frame clock samples.
     ///
     /// Interpolation blends between a pair that has already arrived, so the clock runs behind the
-    /// newest capture. How far is set by the midpoint: it is first wanted when the clock is a quarter
-    /// of the way from `previous` to `next`, which with a delay of `d` happens `d` minus three quarters
-    /// of an interval after `next` arrived — and it cannot be shown before it has been made. So the
-    /// delay is three quarters of an interval plus the time the midpoint takes to arrive. Any less and
-    /// it is asked for before it exists, the screen holds the previous capture instead, and the pair
-    /// goes by without its midpoint; any more is latency for nothing.
+    /// newest capture. How far is set by the first generated image: it is first wanted when the clock is
+    /// `firstImageStart` of the way from `previous` to `next`, which with a delay of `d` happens `d` minus the
+    /// rest of an interval after `next` arrived — and it cannot be shown before it has been made. So the
+    /// delay is that rest of an interval plus the time the image takes to arrive. Any less and it is asked
+    /// for before it exists, the screen holds the previous capture instead, and the pair goes by without it;
+    /// any more is latency for nothing.
+    ///
+    /// The later images of a pair are wanted later than the first and come out of the same call, so the first
+    /// sets the delay and the rest are in time.
     ///
     /// Ring timestamps are arrival times, so with this delay the sample sweeps from `previous` to `next`
     /// as the gap fills in, and every phase in the bracket is reachable.
-    static func interpolationDelay(captureInterval: CFTimeInterval, generationLatency: CFTimeInterval) -> CFTimeInterval {
-        (1 - midpointStart) * captureInterval + generationLatency
+    static func interpolationDelay(captureInterval: CFTimeInterval, generationLatency: CFTimeInterval,
+                                   steps: Int = 2) -> CFTimeInterval {
+        (1 - firstImageStart(steps: steps)) * captureInterval + generationLatency
     }
 
     private static func interpolate<F: TimedFrame>(_ frames: [F], _ input: PlanningInput) -> PresentationPlan {
-        let delay = interpolationDelay(captureInterval: input.captureInterval, generationLatency: input.generationLatency)
+        let steps = InterpolationSteps.steps(for: input.multiplier)
+        let delay = interpolationDelay(captureInterval: input.captureInterval, generationLatency: input.generationLatency,
+                                       steps: steps)
         let targetTime = input.sampleTime - delay
         let (previousIndex, nextIndex) = bracket(frames, around: targetTime)
         let previous = frames[previousIndex]
@@ -162,10 +173,11 @@ enum FramePlanner {
         guard duration > 0 else { return .captured(previousIndex) }
         let position = min(max((targetTime - previous.timestamp) / duration, 0), 1)
 
-        if position < midpointStart { return .captured(previousIndex) }
+        let step = Int((position * Double(steps)).rounded())
+        if step <= 0 { return .captured(previousIndex) }
         // Nothing may be generated across a cut: the new shot is shown as soon as it is wanted.
-        if position >= 1 - midpointStart || next.isSceneCut { return .captured(nextIndex) }
-        return .interpolated(previous: previousIndex, next: nextIndex)
+        if step >= steps || next.isSceneCut { return .captured(nextIndex) }
+        return .interpolated(previous: previousIndex, next: nextIndex, step: step, steps: steps)
     }
 
     /// The two adjacent frames whose timestamps bracket `time`. A time past the newest

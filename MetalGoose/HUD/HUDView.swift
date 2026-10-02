@@ -57,16 +57,18 @@ struct HUDView: View {
     private func frameRates(_ stats: PipelineStats, _ info: HUDInfo) -> some View {
         let target = Float(stats.targetOutputFPS)
         return VStack(spacing: 3) {
-            HUDRow(label: "Capture", value: "\(Int(stats.captureFPS)) FPS", color: fpsColor(stats.captureFPS, target: target))
+            // The rate the captured window produces is what it is, not a shortfall to colour.
+            HUDRow(label: "Capture", value: "\(Int(stats.captureFPS)) FPS")
             // Images the screen was given per second. The panel repeats whatever it last showed, so
             // its refresh rate is not a measure of this — new images are.
             HUDRow(label: "Output", value: "\(Int(stats.outputFPS)) FPS", color: fpsColor(stats.outputFPS, target: target))
             if info.frameGeneration != "Off" || stats.generatedFPS > 0 {
                 HUDRow(label: "Generated", value: "\(Int(stats.generatedFPS)) FPS", color: .cyan)
             }
+            // What Output should be: the capture rate times the multiplier in use, not the panel's rate.
+            HUDRow(label: "Target", value: "\(stats.targetOutputFPS) FPS")
             HUDRow(label: "Screen Refresh", value: "\(stats.screenRefreshRate) Hz")
             HUDRow(label: "ProMotion", value: stats.isProMotion ? "On" : "Off")
-            HUDRow(label: "Render Target", value: "\(stats.targetOutputFPS) FPS")
         }
     }
 
@@ -140,6 +142,8 @@ struct HUDView: View {
     }
 
     private func fpsColor(_ fps: Float, target: Float) -> Color {
+        // Nothing has been captured yet, so nothing is expected.
+        if target <= 0 { return .white }
         if fps >= target * 0.95 { return .green }
         if fps >= target * 0.75 { return .yellow }
         if fps >= target * 0.5 { return .orange }

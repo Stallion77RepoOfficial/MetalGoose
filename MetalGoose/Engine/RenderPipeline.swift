@@ -92,7 +92,7 @@ final class RenderPipeline: @unchecked Sendable {
         let now = CACurrentMediaTime()
         let plan = FramePlanner.plan(frames, PlanningInput(
             mode: config.frameGeneration,
-            multiplier: config.multiplier,
+            multiplier: multiplier(for: config),
             sampleTime: now,
             captureInterval: shared.captureInterval.withLock { $0.value },
             generationLatency: shared.generationLatency.value,
@@ -149,6 +149,12 @@ final class RenderPipeline: @unchecked Sendable {
         commandBuffer.commit()
     }
 
+    /// How many images each capture interval is planned to carry: what extrapolation was asked for, and
+    /// what interpolation is delivering, which is not always what it was asked for.
+    private func multiplier(for config: EngineConfig) -> Int {
+        config.frameGeneration == .interpolation ? shared.interpolationSteps.withLock { $0 } : config.multiplier
+    }
+
     // MARK: - Realising a plan
 
     /// Turns the plan into a texture. A generated image that does not exist yet falls back to a capture
@@ -169,18 +175,22 @@ final class RenderPipeline: @unchecked Sendable {
         case .captured(let index):
             return captured(index)
 
-        case .interpolated(let previous, let next):
+        case .interpolated(let previous, let next, let step, let steps):
             // Not made yet — the motion for the pair is still being measured, or the engine is still on
-            // it — so the screen stays where it is. Showing `next` early would put time forward, and the
-            // midpoint, when it did arrive, would take it back.
-            guard let texture = shared.interpolated(previous: frames[previous].timestamp, next: frames[next].timestamp) else {
-                return captured(previous)
+            // it — so the screen stays where it is: on the last image of the pair that exists, or on the
+            // capture before it. Showing a later one early would put time forward, and the image, when it
+            // did arrive, would take it back.
+            let (earlier, later) = (frames[previous].timestamp, frames[next].timestamp)
+            for candidate in stride(from: step, through: 1, by: -1) {
+                let phase = Double(candidate) / Double(steps)
+                guard let texture = shared.interpolated(previous: earlier, next: later, phase: phase) else { continue }
+                // The image stands for a time between the pair, but it could only be made once `next` had
+                // arrived, so that is the honest age to report — and it makes the two generation modes
+                // directly comparable.
+                return Content(image: .interpolated(previous: earlier, next: later, phase: phase),
+                               texture: texture, sourceTimestamp: later, isGenerated: true)
             }
-            // The midpoint stands for the time between the pair, but it could only be made once `next` had
-            // arrived, so that is the honest age to report — and it makes the two generation modes directly
-            // comparable.
-            return Content(image: .interpolated(previous: frames[previous].timestamp, next: frames[next].timestamp),
-                           texture: texture, sourceTimestamp: frames[next].timestamp, isGenerated: true)
+            return captured(previous)
 
         case .extrapolated(let source, let step, let steps):
             guard let field,
@@ -273,9 +283,14 @@ final class RenderPipeline: @unchecked Sendable {
         let busy = gpu.busyTime
         let load = Float((busy - windowBusyStart) / elapsed * 100)
         windowBusyStart = busy
+        let config = shared.config.withLock { $0 }
+        let imagesPerCapture = config.generatesFrames ? max(1, multiplier(for: config)) : 1
         shared.stats.withLock {
             $0.outputFPS = presents
             $0.generatedFPS = generated
+            // What the screen should be given: every capture, and the images generated between them. The
+            // panel's refresh rate is not it — it repeats whatever it last showed.
+            $0.targetOutputFPS = Int(($0.captureFPS * Float(imagesPerCapture)).rounded())
             $0.gpuLoad = load
             if let summary {
                 $0.avgFrameTime = Float(summary.averageInterval * 1000)

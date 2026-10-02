@@ -7,14 +7,14 @@ struct EngineConfig: Equatable, Sendable {
     var upscaling = false
     var antiAliasing: AAMode = .off
     var frameGeneration: FrameGenMode = .off
-    /// Presented images per captured frame the pipeline aims for. Interpolation is pinned to
-    /// 2 by what the generators produce; extrapolation uses it to decide how many warp phases
-    /// to sample in each gap.
+    /// Presented images per captured frame the pipeline aims for. Extrapolation uses it to decide how
+    /// many warp phases to sample in each gap. Interpolation is 2 or 4 by what the generators make, and
+    /// 4 is only what is asked for: the Neural Engine delivers it while it can keep up, and MetalFX, which
+    /// makes the midpoint alone, never does.
     var multiplier = 1
     var vsync = true
     var profile = Sharpening.balanced.profile
     var bufferDepth = GooseEngine.maxInFlight
-    var interpolationEngine: InterpolationEngine = .neuralEngine
 
     var generatesFrames: Bool { frameGeneration != .off }
 

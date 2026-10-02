@@ -25,14 +25,19 @@ final class EngineShared: @unchecked Sendable {
     /// holds the newest frame and does no work on it.
     let isPresenting = OSAllocatedUnfairLock(initialState: true)
 
-    /// What is producing the midpoint frames right now. The capture path decides, per frame, from the
-    /// setting and from whether the Neural Engine can take this size; the render thread reads it to know
-    /// where to look for the result.
+    /// What is producing the in-between images right now. The capture path decides, per frame, from whether
+    /// the Neural Engine can take this size and has not failed; the render thread reads it to know where to
+    /// look for the result.
     let interpolationBackend = OSAllocatedUnfairLock(initialState: InterpolationEngine.metalFX)
     let neural: NeuralInterpolator
     let metalFX: MetalFXInterpolator
 
-    /// How long after a capture arrives the midpoint of its pair is ready, whichever engine makes it. The
+    /// The steps each pair is cut into right now, 2 or 4. The capture path decides with the backend: MetalFX
+    /// makes the midpoint alone, and the Neural Engine makes quarters only while it can keep up. The render
+    /// thread plans with it.
+    let interpolationSteps = OSAllocatedUnfairLock(initialState: InterpolationSteps.halves)
+
+    /// How long after a capture arrives the first image of its pair is ready, whichever engine makes it. The
     /// interpolation schedule sits that far behind the newest capture.
     let generationLatency = GenerationLatency()
 
@@ -48,12 +53,12 @@ final class EngineShared: @unchecked Sendable {
         metalFX = MetalFXInterpolator(gpu: gpu, errors: errors, latency: generationLatency)
     }
 
-    /// The midpoint of a pair, from whichever engine is making them, once it exists. Called from the render
-    /// thread.
-    func interpolated(previous: CFTimeInterval, next: CFTimeInterval) -> MTLTexture? {
+    /// The image `phase` of the way from `previous` to `next`, from whichever engine is making them, once it
+    /// exists. Called from the render thread.
+    func interpolated(previous: CFTimeInterval, next: CFTimeInterval, phase: Double) -> MTLTexture? {
         switch interpolationBackend.withLock({ $0 }) {
-        case .neuralEngine: neural.texture(previous: previous, next: next)
-        case .metalFX: metalFX.texture(previous: previous, next: next)
+        case .neuralEngine: neural.texture(previous: previous, next: next, phase: phase)
+        case .metalFX: phase == 0.5 ? metalFX.texture(previous: previous, next: next) : nil
         }
     }
 }

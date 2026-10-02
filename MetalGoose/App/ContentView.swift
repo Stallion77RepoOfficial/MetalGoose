@@ -136,16 +136,11 @@ struct ContentView: View {
             ConfigPanel(title: "Frame Generation") {
                 PickerRow(label: "Mode", selection: $settings.frameGenMode)
 
-                if settings.frameGenMode == .interpolation {
-                    PickerRow(label: "Engine", selection: $settings.interpolationEngine)
-                }
-
-                // Only extrapolation has a multiplier to choose: interpolation is 2x by construction,
-                // and a row that reports a figure nothing can change reads as a control that stopped
-                // responding.
-                if settings.frameGenMode == .extrapolation {
+                // A mode with one multiplier has nothing to choose, and a row that reports a figure
+                // nothing can change reads as a control that stopped responding.
+                if settings.frameGenMode != .off {
                     SliderRow(label: "Multiplier", value: $settings.frameGenMultiplier,
-                              range: FrameGenMode.extrapolation.multiplierRange)
+                              values: settings.frameGenMode.multipliers)
                 }
             }
 

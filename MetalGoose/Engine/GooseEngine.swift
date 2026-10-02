@@ -44,9 +44,13 @@ final class GooseEngine: @unchecked Sendable {
 
     var stats: PipelineStats { shared.stats.withLock { $0 } }
 
-    /// What is producing midpoint frames right now. The setting is a preference — a window too large for
-    /// the Neural Engine, or a processor that failed, is interpolated by MetalFX whatever it says.
+    /// What is producing the in-between images right now: the Neural Engine, unless the window is too large
+    /// for it or its processor failed, which MetalFX takes over from.
     var activeInterpolationEngine: InterpolationEngine { shared.interpolationBackend.withLock { $0 } }
+
+    /// The steps each pair is cut into right now, which is what interpolation delivers: the multiplier it was
+    /// asked for, unless the engine cannot make that many images in time.
+    var interpolationSteps: Int { shared.interpolationSteps.withLock { $0 } }
 
     /// The next error raised off the main thread, if any.
     func takeError() -> MGError? { shared.errors.take() }
@@ -79,8 +83,7 @@ final class GooseEngine: @unchecked Sendable {
         // mixes two schedules into one set of totals, and the generated/passthrough split stops
         // meaning anything. A multiplier change reshapes the same split, so it invalidates the
         // totals exactly the way a mode change does.
-        if config.frameGeneration != previous.frameGeneration || config.multiplier != previous.multiplier
-            || config.interpolationEngine != previous.interpolationEngine {
+        if config.frameGeneration != previous.frameGeneration || config.multiplier != previous.multiplier {
             shared.stats.withLock {
                 $0.resetCumulativeCounters()
                 $0.frameCount = 0

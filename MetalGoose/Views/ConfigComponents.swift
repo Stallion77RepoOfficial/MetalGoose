@@ -42,32 +42,34 @@ struct PickerRow<Option: SettingOption>: View {
     }
 }
 
+/// A slider over a few chosen values rather than a range, so a setting that can only be 2 or 4 has two
+/// stops and not three.
 struct SliderRow: View {
     let label: LocalizedStringKey
     @Binding var value: Int
-    let range: ClosedRange<Int>
+    let values: [Int]
 
-    /// The displayed value is the binding clamped to the range, so a stored value the current range
-    /// cannot reach never shows a figure the pipeline is not running at.
-    private var clamped: Int {
-        min(range.upperBound, max(range.lowerBound, value))
+    /// The stop the binding stands for: the highest one it reaches, or the first. A stored value the
+    /// current choices cannot reach never shows a figure the pipeline is not running at.
+    private var index: Int {
+        values.lastIndex { $0 <= value } ?? 0
     }
 
     var body: some View {
         HStack {
             Text(label).foregroundColor(.gray)
             Spacer()
-            // A range with a single value would make the slider divide by its own zero width.
-            if range.lowerBound < range.upperBound {
+            // One value would make the slider divide by its own zero width.
+            if values.count > 1 {
                 Slider(
                     value: Binding(
-                        get: { Double(clamped) },
-                        set: { value = min(range.upperBound, max(range.lowerBound, Int($0.rounded()))) }),
-                    in: Double(range.lowerBound)...Double(range.upperBound),
+                        get: { Double(index) },
+                        set: { value = values[min(values.count - 1, max(0, Int($0.rounded())))] }),
+                    in: 0...Double(values.count - 1),
                     step: 1)
                 .frame(minWidth: 110, maxWidth: 160)
             }
-            Text(verbatim: "\(clamped)x")
+            Text(verbatim: "\(values[index])x")
                 .font(.system(.caption, design: .monospaced))
                 .frame(width: 28, alignment: .trailing)
         }

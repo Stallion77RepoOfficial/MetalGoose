@@ -32,22 +32,24 @@ only games — anything that renders faster than it is being watched.
   anti-aliasing sensitivity.
 
 ### MGFG-1 Frame Generation
-- **MGFG-1-Interpolation** — synthesises the midpoint between two captured frames. Highest
-  quality; the newest frame is held back by three quarters of a capture interval plus the time
-  the midpoint takes to make (measured live). One image per pair, so the mode is 2x. Two engines:
-  - **Neural Engine** (default) — VideoToolbox low-latency frame interpolation. The GPU only
-    converts pixel formats. Limited to the sizes the processor supports; larger windows, or a
-    processor failure, fall back to MetalFX automatically.
-  - **GPU (MetalFX)** — MetalFX Frame Interpolation with the media engine's motion field. Not
-    limited in size, but it uses GPU time.
+- **MGFG-1-Interpolation** — synthesises the images between two captured frames. Highest
+  quality; the newest frame is held back by most of a capture interval plus the time the first
+  generated image takes to make (measured live). It runs on the **Neural Engine** (VideoToolbox
+  low-latency frame interpolation), which leaves the GPU to the captured app; the GPU only
+  converts pixel formats. A window larger than the processor takes (1920 px, 2.07 MP), or a
+  processor failure, falls back to **MetalFX** frame interpolation with the media engine's motion
+  field, automatically; it makes the midpoint only and uses GPU time.
 - **MGFG-1-Extrapolation** — warps the newest frame forward along measured motion. Nothing is
   held back, so latency is unchanged. The gap can be sampled at 2, 3, or 4 points; quality
   degrades around disocclusions and at each additional point. Motion comes from the media engine
   (VideoToolbox, multi-pass search), is despeckled before use, and is searched as finely as the
   capture rate allows: 4×4 blocks on a half-size frame, coarser blocks as the frame grows or the
   rate climbs.
-- **Multiplier** — images presented per captured frame. Extrapolation: 2x–4x. Interpolation is
-  fixed at 2x.
+- **Multiplier** — images presented per captured frame. Extrapolation: 2x–4x. Interpolation: 2x,
+  the midpoint of each pair, or 4x, its quarters. Four steps are three images per pair, and the
+  Neural Engine takes about three times as long for them as for one, so 4x is delivered only while
+  that fits the time between captures and the panel can show four images in it — about 30 fps at
+  1280×720, below 17 fps at 1280×1016 — and the HUD reports what is delivered. MetalFX is always 2x.
 - Scene-cut detection avoids generating across hard cuts.
 
 An image is never presented twice, so **Generated + Passthrough = Presented** in the HUD.
@@ -60,7 +62,8 @@ for depth buffers or motion vectors:
 
 ### Performance Monitoring
 A HUD overlay reports, live:
-- **Capture / Output / Generated** frame rates, and the panel's refresh rate and target
+- **Capture / Output / Generated** frame rates, the **Target** output (capture rate × the multiplier
+  in use, which Output is coloured against), and the panel's refresh rate
 - Capture time, GPU time, **GPU load** (the pipeline's own share of the GPU), latency, present
   latency, end-to-end latency, and a frame-pacing score
 - VRAM, process memory, and CPU

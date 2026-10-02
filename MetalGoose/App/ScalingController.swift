@@ -365,8 +365,8 @@ final class ScalingController: ObservableObject {
         switch settings.frameGenMode {
         case .off:           generation = "Off"
         case .interpolation:
-            // The setting is a preference; the engine reports what is actually in use.
-            generation = "Interp (\(settings.effectiveMultiplier)x) · \(String(localized: engine.activeInterpolationEngine.title))"
+            // What was asked for is a preference; the engine reports what is actually in use.
+            generation = "Interp (\(engine.interpolationSteps)x) · \(String(localized: engine.activeInterpolationEngine.title))"
         case .extrapolation: generation = "Extrap (\(settings.effectiveMultiplier)x)"
         }
         return HUDInfo(deviceName: engine.deviceName,

@@ -92,9 +92,6 @@
     "Downloading Update…" : {
       "comment" : "Update sheet title"
     },
-    "Engine" : {
-
-    },
     "Frame Generation" : {
       "localizations" : {
         "hu" : {
@@ -145,9 +142,6 @@
     },
     "Maintenance" : {
       "comment" : "Panel title: Maintenance"
-    },
-    "Media Engine" : {
-
     },
     "Metal cache cleared (%lld location(s)). Restart MetalGoose so shaders rebuild cleanly." : {
       "comment" : "Alert: cache cleared"
@@ -205,9 +199,6 @@
         }
       }
     },
-    "Motion" : {
-
-    },
     "Multiplier" : {
       "localizations" : {
         "hu" : {
@@ -241,9 +232,6 @@
       }
     },
     "Open Settings" : {
-
-    },
-    "Optical Flow" : {
 
     },
     "Permissions Required" : {
