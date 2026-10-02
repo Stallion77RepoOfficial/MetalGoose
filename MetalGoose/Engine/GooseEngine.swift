@@ -65,9 +65,7 @@ final class GooseEngine: @unchecked Sendable {
 
         // The stages that change which textures the capture path writes need the pool rebuilt.
         if config.upscaling != previous.upscaling || config.antiAliasing != previous.antiAliasing {
-            capture.reset(clearFrames: true)
-        } else if config.motionSource != previous.motionSource {
-            capture.reset(clearFrames: false)
+            capture.reset()
         }
 
         if config.bufferDepth != previous.bufferDepth {
@@ -97,7 +95,7 @@ final class GooseEngine: @unchecked Sendable {
     func beginSession() {
         // A session that ended with the overlay hidden must not begin with it still hidden.
         shared.isPresenting.withLock { $0 = true }
-        capture.reset(clearFrames: true)
+        capture.reset()
         shared.errors.reset()
         shared.captureInterval.withLock { $0.reset() }
         shared.stats.withLock { stats in
@@ -116,7 +114,7 @@ final class GooseEngine: @unchecked Sendable {
     /// Drops what the session held. The ring keeps one texture from the pool for every entry, so
     /// leaving them there would keep the whole pool alive until the next capture overwrote it.
     func endSession() {
-        capture.reset(clearFrames: true)
+        capture.reset()
         capture.resetTiming()
     }
 

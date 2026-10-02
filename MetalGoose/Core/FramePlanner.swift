@@ -59,6 +59,8 @@ struct PlanningInput {
 
 enum FramePlanner {
 
+    private static let motionFreshness: CFTimeInterval = 1.0 / 30.0
+
     static func plan<F: TimedFrame>(_ frames: [F], _ input: PlanningInput) -> PresentationPlan {
         guard let newestIndex = frames.indices.last else { return .nothing }
 
@@ -107,13 +109,18 @@ enum FramePlanner {
             : 0
         let step = min(steps - 1, Int(elapsed * Double(steps)))
 
-        // A field older than the capture it is being applied to describes a velocity
+        // A field much older than the capture it is being applied to describes a velocity
         // the scene has already left. Warping on it is what turned a flick of the
-        // mouse into a violent throw and back. The tolerance is one interval of the
-        // rate actually being measured, not a number.
+        // mouse into a violent throw and back. The newest capture's own field is not ready
+        // in the first slots after it arrives, and those slots use the one before: two
+        // intervals of the rate actually being measured are tolerated, because refusing it
+        // — as one interval's tolerance did, by a hair, whenever arrivals jittered —
+        // switched the warp off and on within a single interval. How long a field takes
+        // does not shrink with the capture rate, so at a high one it is several intervals
+        // old by the time it exists; a thirtieth of a second is tolerated whatever the rate.
         guard step > 0, !newest.isSceneCut, newestIndex >= 1,
               let motionTimestamp = input.motionTimestamp,
-              interval <= 0 || newest.timestamp - motionTimestamp <= interval else {
+              interval <= 0 || newest.timestamp - motionTimestamp <= max(2 * interval, motionFreshness) else {
             return .captured(newestIndex)
         }
         return .extrapolated(source: newestIndex, step: step, steps: steps)

@@ -146,7 +146,6 @@ struct ContentView: View {
                 if settings.frameGenMode == .extrapolation {
                     SliderRow(label: "Multiplier", value: $settings.frameGenMultiplier,
                               range: FrameGenMode.extrapolation.multiplierRange)
-                    PickerRow(label: "Motion", selection: $settings.motionSource)
                 }
             }
 

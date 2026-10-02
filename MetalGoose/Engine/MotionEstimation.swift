@@ -2,7 +2,6 @@ import Foundation
 @preconcurrency import Metal
 @preconcurrency import CoreVideo
 @preconcurrency import VideoToolbox
-@preconcurrency import Vision
 @preconcurrency import IOSurface
 import QuartzCore
 import os
@@ -32,10 +31,33 @@ struct MotionField {
 /// Wraps VTMotionEstimationSession, which runs on the media engine rather than the GPU. It takes
 /// single-component luma, so each frame is converted first, and it returns backward vectors in
 /// pixels at one vector per block.
+///
+/// How the frame is searched trades accuracy against time. Measured on real video, against the
+/// capture the field has to explain:
+///
+/// - One search pass, the default, finds vectors that explain a large frame *worse* than assuming nothing
+///   moved (31 dB against 35 on 1440p video), and the warp turns the wrong ones into the swimming,
+///   dough-like picture. Several passes ("true motion") cost a fraction of a millisecond more and gave 38 dB.
+/// - 4x4 blocks are more accurate again (43 dB) but much slower, and the media engine will not build them at
+///   4K at all. `MotionAnalysis` decides how finely a frame can afford to be searched, and in what blocks;
+///   this follows it.
 private final class MediaEngineEstimator {
+
     private let device: MTLDevice
     private var session: __VTMotionEstimationSession?
     private var size: (width: Int, height: Int) = (0, 0)
+    private var analysis = MotionAnalysis(rung: MotionAnalysis.coarsest, frameWidth: 0, frameHeight: 0)
+    private var rung: Int?
+
+    /// Rungs the media engine would not build for the frame size it was last asked for — it refuses 4x4
+    /// blocks at 3840x2160 and above. A rung that gave way to the next is not tried again every frame.
+    private var refused: Set<Int> = []
+    private var refusedSize: (width: Int, height: Int) = (0, 0)
+
+    /// How much longer than the measurements say a pair's vectors take to come back, as the median of what
+    /// they have taken — a slower chip, a GPU shared with a game, a video decoder in the captured window
+    /// sharing the media engine. Written on VideoToolbox's callback thread, read on the processing queue.
+    private let slowdown = OSAllocatedUnfairLock(initialState: IntervalFilter())
     private var lumaBuffers: [CVPixelBuffer] = []
     private var lumaTextures: [MTLTexture] = []
     private var slot = 0
@@ -45,13 +67,27 @@ private final class MediaEngineEstimator {
     /// submitted against the new one's buffers.
     private var generation = 0
 
-    /// Three, not two. The media engine reads the pair outside Metal's ordering, so a two-slot
-    /// ring hands the next capture the very buffer the pending estimate is still using as its
-    /// reference: the luma pass for frame N+1 can be committed before frame N's estimate has
-    /// been submitted, and VideoToolbox then measures against a half-overwritten reference. A
-    /// third slot puts a whole capture between the write and the buffer's reuse, which is more
-    /// than the pipeline ever has in flight, for one extra single-component frame of memory.
-    private static let lumaSlotCount = 3
+    /// Four. The media engine reads a pair outside Metal's ordering, so a buffer is not written while a
+    /// pair that reads it is out: a ring that wrote it anyway would have VideoToolbox measure against a
+    /// half-overwritten reference. A pair is out from the moment its frame arrives to the moment the vectors
+    /// come back, and a GPU shared with a game stretches that past a capture interval — a ring of three had
+    /// no free buffer for the frames that arrived meanwhile, and a frame that is not converted is a pair that
+    /// is not measured. Four hold three pairs at once.
+    private static let lumaSlotCount = 4
+
+    /// A pair the media engine has been given and has not answered, so that nothing writes one of its two
+    /// buffers meanwhile.
+    private struct Measurement {
+        let id: Int
+        let reference: Int
+        let current: Int
+        let since: CFTimeInterval
+    }
+    private let measuring = OSAllocatedUnfairLock<[Measurement]>(initialState: [])
+    private var measurementCount = 0
+
+    /// A measurement VideoToolbox never answers is given up on after this long.
+    private static let measurementTimeout: CFTimeInterval = 0.5
 
     /// VideoToolbox recycles its output buffers from a pool, so the same few IOSurfaces come
     /// back frame after frame. Building a descriptor and a driver texture for each one at up
@@ -61,9 +97,17 @@ private final class MediaEngineEstimator {
     /// The pair `estimate` should hand to the media engine, resolved when the luma destination
     /// is handed out rather than when the GPU finishes.
     struct PendingPair {
+        let id: Int
         let current: CVPixelBuffer
         let reference: CVPixelBuffer
         let generation: Int
+        /// How the pair was analysed, which says what its field means.
+        let analysis: MotionAnalysis
+        /// When it was started, and how long it should take by the measurements: what is learnt from the
+        /// difference. The capture interval is what the sample stands for.
+        let since: CFTimeInterval
+        let expected: CFTimeInterval
+        let interval: CFTimeInterval
     }
 
     init(device: MTLDevice) { self.device = device }
@@ -72,26 +116,42 @@ private final class MediaEngineEstimator {
         if let session { __VTMotionEstimationSessionInvalidate(session) }
         session = nil
         size = (0, 0)
+        rung = nil
         lumaBuffers.removeAll()
         lumaTextures.removeAll()
         vectorTextures.removeAll()
         slot = 0
         hasReference = false
+        measuring.withLock { $0.removeAll() }
         generation &+= 1
     }
 
-    /// Default block size and a single search pass: a 4x4 grid measures 12x slower, which no
-    /// real-time budget can absorb.
-    private func ensureSession(width: Int, height: Int) -> Bool {
-        if session != nil, size == (width, height) { return true }
+    private func ensureSession(width: Int, height: Int, interval: CFTimeInterval) -> Bool {
+        if refusedSize != (width, height) { refused = []; refusedSize = (width, height) }
+        let wanted = MotionAnalysis.choose(current: rung, frameWidth: width, frameHeight: height, interval: interval,
+                                           slowdown: slowdown.withLock { $0.value }, refused: refused)
+        if session != nil, size == (width, height), rung == wanted { return true }
         reset()
 
+        for index in wanted...MotionAnalysis.coarsest {
+            if build(rung: index, width: width, height: height) {
+                rung = index
+                return true
+            }
+            refused.insert(index)
+        }
+        return false
+    }
+
+    private func build(rung index: Int, width: Int, height: Int) -> Bool {
+        let plan = MotionAnalysis(rung: index, frameWidth: width, frameHeight: height)
         let options: [String: Any] = [
-            kVTMotionEstimationSessionCreationOption_UseMultiPassSearch as String: false as CFBoolean
+            kVTMotionEstimationSessionCreationOption_UseMultiPassSearch as String: true as CFBoolean,
+            kVTMotionEstimationSessionCreationOption_MotionVectorSize as String: plan.blockSize as CFNumber
         ]
         var created: __VTMotionEstimationSession?
         guard __VTMotionEstimationSessionCreate(kCFAllocatorDefault, options as CFDictionary,
-                                                UInt32(width), UInt32(height), &created) == noErr,
+                                                UInt32(plan.width), UInt32(plan.height), &created) == noErr,
               let created else { return false }
 
         var attributes: CFDictionary?
@@ -99,31 +159,38 @@ private final class MediaEngineEstimator {
         var descriptor = (attributes as? [String: Any]) ?? [:]
         descriptor[kCVPixelBufferIOSurfacePropertiesKey as String] = [:] as CFDictionary
 
+        var buffers: [CVPixelBuffer] = []
+        var textures: [MTLTexture] = []
         for _ in 0..<Self.lumaSlotCount {
             var buffer: CVPixelBuffer?
-            guard CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+            let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r8Unorm, width: plan.width, height: plan.height, mipmapped: false)
+            textureDescriptor.usage = [.shaderRead, .shaderWrite]
+            guard CVPixelBufferCreate(kCFAllocatorDefault, plan.width, plan.height,
                                       kCVPixelFormatType_OneComponent8,
                                       descriptor as CFDictionary, &buffer) == kCVReturnSuccess,
                   let buffer,
-                  let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return false }
-
-            let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .r8Unorm, width: width, height: height, mipmapped: false)
-            textureDescriptor.usage = [.shaderRead, .shaderWrite]
-            guard let texture = device.makeTexture(descriptor: textureDescriptor, iosurface: surface, plane: 0) else {
+                  let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue(),
+                  let texture = device.makeTexture(descriptor: textureDescriptor, iosurface: surface, plane: 0) else {
+                __VTMotionEstimationSessionInvalidate(created)
                 return false
             }
-            lumaBuffers.append(buffer)
-            lumaTextures.append(texture)
+            buffers.append(buffer)
+            textures.append(texture)
         }
 
         session = created
         size = (width, height)
+        analysis = plan
+        lumaBuffers = buffers
+        lumaTextures = textures
         return true
     }
 
-    /// Destination for this frame's luma conversion, together with the pair that destination
-    /// completes.
+    /// Destination for this frame's luma conversion, how the frame is analysed, and the pair that
+    /// destination completes — none when there is nothing to measure yet.
+    ///
+    /// Nothing is measured until the capture interval is known, because the analysis follows it.
     ///
     /// The slot advances here, where the destination is handed out. Advancing it inside
     /// `estimate` tied it to a GPU completion handler instead: under load that completion
@@ -131,19 +198,50 @@ private final class MediaEngineEstimator {
     /// converted into the same buffer, and the estimate then compared a frame against a stale
     /// partner. The resulting vectors describe a pair that never existed — which is exactly the
     /// smearing the warp showed when the GPU was busiest.
-    func prepare(width: Int, height: Int) -> (texture: MTLTexture, pending: PendingPair?)? {
+    ///
+    /// Requests queue inside the media engine, so one that takes longer than a capture interval would fall
+    /// further behind with every frame — measured, 200 ms late at 1440p. What bounds the queue is the
+    /// buffers: a frame that finds its buffer still being read is not converted, and the next one starts a
+    /// new pair, so every pair is still two consecutive captures and its field still spans one interval. The
+    /// analysis is chosen so that the engine keeps up, and this is what holds when it does not.
+    func prepare(width: Int, height: Int, interval: CFTimeInterval)
+        -> (texture: MTLTexture, analysis: MotionAnalysis, pending: PendingPair?)? {
         let count = Self.lumaSlotCount
-        guard ensureSession(width: width, height: height), lumaBuffers.count == count else { return nil }
-        let texture = lumaTextures[slot]
-        let current = lumaBuffers[slot]
-        let reference = lumaBuffers[(slot + count - 1) % count]
+        guard interval > 0 else {
+            hasReference = false
+            return nil
+        }
+        guard ensureSession(width: width, height: height, interval: interval), let rung,
+              lumaBuffers.count == count else { return nil }
+
+        let now = CACurrentMediaTime()
+        let destination = slot
+        let reference = (destination + count - 1) % count
+        // The destination is one of the buffers being measured: writing it would corrupt the measurement,
+        // so this frame is skipped and the next one starts a new pair.
+        let isFree = measuring.withLock { pairs -> Bool in
+            pairs.removeAll { now - $0.since > Self.measurementTimeout }
+            return !pairs.contains { $0.reference == destination || $0.current == destination }
+        }
+        guard isFree else {
+            hasReference = false
+            return nil
+        }
         slot = (slot + 1) % count
 
+        let texture = lumaTextures[destination]
         guard hasReference else {
             hasReference = true
-            return (texture, nil)
+            return (texture, analysis, nil)
         }
-        return (texture, PendingPair(current: current, reference: reference, generation: generation))
+
+        measurementCount += 1
+        let id = measurementCount
+        measuring.withLock { $0.append(Measurement(id: id, reference: reference, current: destination, since: now)) }
+        let expected = MotionAnalysis.cost(rung: rung, frameWidth: width, frameHeight: height)
+        return (texture, analysis, PendingPair(id: id, current: lumaBuffers[destination],
+                                               reference: lumaBuffers[reference], generation: generation,
+                                               analysis: analysis, since: now, expected: expected, interval: interval))
     }
 
     /// Submits the pair and returns. The vectors arrive on VideoToolbox's own callback thread and
@@ -152,13 +250,22 @@ private final class MediaEngineEstimator {
     ///
     /// Must be called only once the luma write has actually landed.
     func estimate(_ pending: PendingPair, completion: @escaping @Sendable (CVPixelBuffer) -> Void) {
-        guard let session, pending.generation == generation else { return }
-        _ = __VTMotionEstimationSessionEstimateMotionVectors(
+        let (id, since, expected, interval) = (pending.id, pending.since, pending.expected, pending.interval)
+        guard let session, pending.generation == generation else {
+            measuring.withLock { $0.removeAll { $0.id == id } }
+            return
+        }
+        let status = __VTMotionEstimationSessionEstimateMotionVectors(
             session, pending.reference, pending.current, [], nil
-        ) { status, _, _, vectors in
+        ) { [measuring, slowdown] status, _, _, vectors in
+            measuring.withLock { $0.removeAll { $0.id == id } }
             guard status == noErr, let vectors else { return }
+            slowdown.withLock {
+                $0.add((CACurrentMediaTime() - since) / expected, window: EngineShared.measurementWindow, elapsed: interval)
+            }
             completion(vectors)
         }
+        if status != noErr { measuring.withLock { $0.removeAll { $0.id == id } } }
     }
 
     func texture(for vectors: CVPixelBuffer) -> MTLTexture? {
@@ -183,157 +290,6 @@ private final class MediaEngineEstimator {
     }
 }
 
-// MARK: - Optical flow
-
-/// Optical flow from Vision, as an alternative to the media engine's block matcher.
-///
-/// The block matcher is built for video compression, where any match that shrinks the residual is
-/// a good match. On a repeating texture — a tiled floor, a brick wall — it locks onto the wrong
-/// repeat and every block agrees on the same wrong answer, which no neighbour-agreement test can
-/// detect and which the warp turns into liquid. This returns the exact displacement on textured
-/// content and falls to near zero where the motion is genuinely ambiguous, and a zero vector
-/// simply holds the source pixel.
-///
-/// It costs about six times the block matcher, so it only fits while captures arrive slowly.
-private final class OpticalFlowEstimator: @unchecked Sendable {
-    private let device: MTLDevice
-    /// Its own queue: `perform` blocks for the whole computation, and the processing queue is
-    /// where every captured frame is handled.
-    private let queue = DispatchQueue(label: "com.metalgoose.opticalflow", qos: .userInitiated)
-    private struct State {
-        var previous: CVPixelBuffer?
-        var inFlight = false
-        var pool: CVPixelBufferPool?
-        var poolSize: (width: Int, height: Int) = (0, 0)
-    }
-    private let state = OSAllocatedUnfairLock(uncheckedState: State())
-
-    init(device: MTLDevice) { self.device = device }
-
-    func reset() {
-        state.withLockUnchecked { $0 = State() }
-    }
-
-    /// Frames are copied out of ScreenCaptureKit's buffers rather than retained. Its pool is
-    /// `queueDepth` deep — two or three — and the pipeline already holds one per in-flight command
-    /// buffer; holding the previous frame and the one being measured on top of that starves the
-    /// pool and the capture rate falls. A pair of buffers we own costs one copy per frame and takes
-    /// the pool out of the question entirely.
-    private static func copy(_ source: CVPixelBuffer, using state: inout State) -> CVPixelBuffer? {
-        let width = CVPixelBufferGetWidth(source)
-        let height = CVPixelBufferGetHeight(source)
-        if state.pool == nil || state.poolSize != (width, height) {
-            var created: CVPixelBufferPool?
-            let attributes: [String: Any] = [
-                kCVPixelBufferWidthKey as String: width,
-                kCVPixelBufferHeightKey as String: height,
-                kCVPixelBufferPixelFormatTypeKey as String: CVPixelBufferGetPixelFormatType(source),
-                kCVPixelBufferIOSurfacePropertiesKey as String: [:] as CFDictionary
-            ]
-            // Three: the reference, the frame being measured against it, and the one arriving
-            // while that runs.
-            guard CVPixelBufferPoolCreate(kCFAllocatorDefault,
-                                          [kCVPixelBufferPoolMinimumBufferCountKey as String: 3] as CFDictionary,
-                                          attributes as CFDictionary, &created) == kCVReturnSuccess,
-                  let created else { return nil }
-            state.pool = created
-            state.poolSize = (width, height)
-        }
-        guard let pool = state.pool else { return nil }
-        var destination: CVPixelBuffer?
-        guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess,
-              let destination else { return nil }
-
-        CVPixelBufferLockBaseAddress(source, .readOnly)
-        CVPixelBufferLockBaseAddress(destination, [])
-        defer {
-            CVPixelBufferUnlockBaseAddress(destination, [])
-            CVPixelBufferUnlockBaseAddress(source, .readOnly)
-        }
-        guard let src = CVPixelBufferGetBaseAddress(source),
-              let dst = CVPixelBufferGetBaseAddress(destination) else { return nil }
-        let srcStride = CVPixelBufferGetBytesPerRow(source)
-        let dstStride = CVPixelBufferGetBytesPerRow(destination)
-        if srcStride == dstStride {
-            memcpy(dst, src, srcStride * height)
-        } else {
-            let row = min(srcStride, dstStride)
-            for y in 0..<height {
-                memcpy(dst + y * dstStride, src + y * srcStride, row)
-            }
-        }
-        return destination
-    }
-
-    /// Hands in the newest captured buffer and, if a request is not already running, starts one
-    /// against the buffer before it.
-    ///
-    /// Only one request is ever in flight. Vision has no way to cancel, and a queue of them would
-    /// each be measuring a pair the pipeline had already moved past — so a capture that arrives
-    /// mid-flight simply becomes the next reference.
-    func submit(_ pixelBuffer: CVPixelBuffer, completion: @escaping @Sendable (MTLTexture) -> Void) {
-        let job = state.withLockUnchecked { state -> (from: CVPixelBuffer, to: CVPixelBuffer)? in
-            let reference = state.previous
-            // Copied even when a request is already running: this frame is the next reference
-            // either way, and the source buffer goes back to ScreenCaptureKit the moment we return.
-            state.previous = Self.copy(pixelBuffer, using: &state) ?? state.previous
-            guard !state.inFlight, let reference, let current = state.previous else { return nil }
-            state.inFlight = true
-            return (reference, current)
-        }
-        guard let job else { return }
-
-        nonisolated(unsafe) let from = job.from
-        nonisolated(unsafe) let to = job.to
-        queue.async { [self] in
-            let texture = flow(from: from, to: to)
-            state.withLockUnchecked { $0.inFlight = false }
-            if let texture { completion(texture) }
-        }
-    }
-
-    /// Revision 1 rather than 2: the ML path measured both slower and badly short on displacement.
-    /// The accuracy level looked irrelevant against a single rigid shift — every level returned the
-    /// same exact displacement and the higher ones only cost time — but that measurement had no
-    /// thin structures and no motion boundaries in it, which is the only place the level can
-    /// matter: a coarser pyramid smooths further, and smoothing is what drags a static overlay
-    /// along with the scene moving behind it.
-    private func flow(from: CVPixelBuffer, to: CVPixelBuffer) -> MTLTexture? {
-        let request = VNGenerateOpticalFlowRequest(targetedCVPixelBuffer: to, options: [:])
-        request.computationAccuracy = .high
-        request.outputPixelFormat = kCVPixelFormatType_TwoComponent16Half
-        if VNGenerateOpticalFlowRequest.supportedRevisions.contains(1) {
-            request.revision = 1
-        }
-        do { try VNImageRequestHandler(cvPixelBuffer: from, options: [:]).perform([request]) } catch { return nil }
-        guard let buffer = request.results?.first?.pixelBuffer else { return nil }
-        return texture(for: buffer)
-    }
-
-    /// Vision's buffer is not guaranteed to be IOSurface-backed, so there are two ways in: wrap it
-    /// where it is, and copy it where that is not possible. The wrap is the common path.
-    private func texture(for buffer: CVPixelBuffer) -> MTLTexture? {
-        let width = CVPixelBufferGetWidth(buffer)
-        let height = CVPixelBufferGetHeight(buffer)
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rg16Float, width: width, height: height, mipmapped: false)
-        descriptor.usage = [.shaderRead]
-
-        if let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() {
-            return device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0)
-        }
-
-        descriptor.storageMode = .shared
-        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
-        texture.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0,
-                        withBytes: base, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer))
-        return texture
-    }
-}
-
 // MARK: - Pipeline
 
 /// Produces the motion field extrapolation warps along: measures it with the chosen estimator,
@@ -354,14 +310,13 @@ final class MotionPipeline: @unchecked Sendable {
     /// in-flight render command buffers need to stay distinct.
     private static let slotCount = 4
 
-    /// VideoToolbox's default block. A dense field has one vector per pixel, so neighbours are
-    /// compared this far apart in frame pixels whatever produced it.
+    /// Neighbouring vectors are compared this far apart in frame pixels, whatever block the field was
+    /// measured in: VideoToolbox's default block, and what the warp's trust in a vector was tuned on.
     private static let blockSpan = 16
 
     private let gpu: GPUContext
     private let queue: DispatchQueue
     private let mediaEngine: MediaEngineEstimator
-    private let opticalFlow: OpticalFlowEstimator
     private var slots = [Slot](repeating: Slot(), count: MotionPipeline.slotCount)
     private var slotIndex = 0
     private let latestField = OSAllocatedUnfairLock<MotionField?>(uncheckedState: nil)
@@ -374,7 +329,6 @@ final class MotionPipeline: @unchecked Sendable {
         self.gpu = gpu
         self.queue = queue
         self.mediaEngine = MediaEngineEstimator(device: gpu.device)
-        self.opticalFlow = OpticalFlowEstimator(device: gpu.device)
     }
 
     /// The most recent field, from whichever thread asks.
@@ -385,34 +339,28 @@ final class MotionPipeline: @unchecked Sendable {
         slotIndex = 0
         latestField.withLockUnchecked { $0 = nil }
         mediaEngine.reset()
-        opticalFlow.reset()
     }
 
     /// Starts measuring the motion that brought the capture to where it is. The field lands later,
-    /// from the estimator's own thread, and is picked up through `latest`.
-    func submit(frame: MTLTexture, capture: CVPixelBuffer, source: MotionSource, timestamp: CFTimeInterval) {
-        switch source {
-        case .mediaEngine:
-            submitToMediaEngine(frame, timestamp: timestamp)
-        case .opticalFlow:
-            submitToOpticalFlow(capture, frameWidth: frame.width, timestamp: timestamp)
-        }
-    }
-
-    // MARK: Media engine
-
+    /// from the media engine's own thread, and is picked up through `latest`.
+    ///
     /// Converts the frame to luma, hands it to the media engine, and copies the resulting vectors
     /// into a slot we own — VideoToolbox recycles its own buffers, and a field is read long after
     /// its frame left the estimator.
-    private func submitToMediaEngine(_ frame: MTLTexture, timestamp: CFTimeInterval) {
-        guard let prepared = mediaEngine.prepare(width: frame.width, height: frame.height),
+    ///
+    /// - Parameter interval: the time between captures, which decides how finely the media engine can
+    ///   afford to search the frame. 0 while it is not known yet.
+    func submit(frame: MTLTexture, timestamp: CFTimeInterval, interval: CFTimeInterval) {
+        guard let prepared = mediaEngine.prepare(width: frame.width, height: frame.height, interval: interval),
               let commandBuffer = gpu.makeCommandBuffer("MetalGoose motion luma"),
               let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
 
+        var divisor = UInt32(prepared.analysis.divisor)
         encoder.setComputePipelineState(gpu.pipelines.luma)
         encoder.setTexture(frame, index: 0)
         encoder.setTexture(prepared.texture, index: 1)
-        gpu.dispatch(gpu.pipelines.luma, on: encoder, width: frame.width, height: frame.height)
+        encoder.setBytes(&divisor, length: MemoryLayout<UInt32>.size, index: 0)
+        gpu.dispatch(gpu.pipelines.luma, on: encoder, width: prepared.texture.width, height: prepared.texture.height)
         encoder.endEncoding()
 
         // VideoToolbox reads the IOSurface outside Metal's ordering, so the estimate has to follow
@@ -433,30 +381,14 @@ final class MotionPipeline: @unchecked Sendable {
     /// on a Metal thread, and the vectors arrive on VideoToolbox's.
     private func estimate(_ pending: MediaEngineEstimator.PendingPair, frameWidth: Int, timestamp: CFTimeInterval) {
         nonisolated(unsafe) let pending = pending
+        let analysis = pending.analysis
         queue.async { [self] in
             mediaEngine.estimate(pending) { vectors in
                 nonisolated(unsafe) let vectors = vectors
                 self.queue.async {
                     guard let field = self.mediaEngine.texture(for: vectors) else { return }
-                    self.store(field, scale: 1, frameWidth: frameWidth, timestamp: timestamp)
+                    self.store(field, analysis: analysis, frameWidth: frameWidth, timestamp: timestamp)
                 }
-            }
-        }
-    }
-
-    // MARK: Optical flow
-
-    /// Vision reads the captured image directly, so no luma pass and no GPU round trip — but the
-    /// field it returns is in captured pixels, while the warp runs on the history frame, which
-    /// render scale may have restored to a larger size. The ratio rides in with the sign, which is
-    /// the other correction: Vision reports where content went, the warp reads where it came from.
-    private func submitToOpticalFlow(_ capture: CVPixelBuffer, frameWidth: Int, timestamp: CFTimeInterval) {
-        let ratio = Float(frameWidth) / Float(max(1, CVPixelBufferGetWidth(capture)))
-        nonisolated(unsafe) let capture = capture
-        opticalFlow.submit(capture) { [self] field in
-            nonisolated(unsafe) let field = field
-            queue.async {
-                self.store(field, scale: -ratio, frameWidth: frameWidth, timestamp: timestamp)
             }
         }
     }
@@ -473,17 +405,19 @@ final class MotionPipeline: @unchecked Sendable {
     /// Copies the estimator's output into a slot we own — VideoToolbox recycles its buffers while
     /// the warp still reads the field — and derives the maps the warp needs alongside it.
     ///
-    /// `scale` carries both corrections the incoming field needs: the sign that reconciles the
-    /// source's convention with the warp's, and the ratio that carries vectors measured on the
-    /// captured image into the units of the frame the warp runs on.
-    private func store(_ field: MTLTexture, scale: Float, frameWidth: Int, timestamp: CFTimeInterval) {
+    /// The vectors are measured on the averaged-down image the media engine searched, so they are carried
+    /// into the units of the frame the warp runs on; and the field is cut to the vectors that cover the
+    /// frame, because what the media engine pads it with is not the image.
+    private func store(_ field: MTLTexture, analysis: MotionAnalysis, frameWidth: Int,
+                       timestamp: CFTimeInterval) {
+        let width = min(field.width, analysis.vectorWidth)
+        let height = min(field.height, analysis.vectorHeight)
         let index = slotIndex % slots.count
         slotIndex += 1
-        guard let raw = gpu.ensureTexture(&slots[index].raw, width: field.width, height: field.height,
-                                          pixelFormat: .rg16Float),
-              let vectors = gpu.ensureTexture(&slots[index].vectors, width: field.width, height: field.height,
+        guard let raw = gpu.ensureTexture(&slots[index].raw, width: width, height: height, pixelFormat: .rg16Float),
+              let vectors = gpu.ensureTexture(&slots[index].vectors, width: width, height: height,
                                               pixelFormat: .rg16Float),
-              let disagreement = gpu.ensureTexture(&slots[index].disagreement, width: field.width, height: field.height,
+              let disagreement = gpu.ensureTexture(&slots[index].disagreement, width: width, height: height,
                                                    pixelFormat: .r16Float),
               let global = ensureGlobalBuffer(&slots[index].global),
               let commandBuffer = gpu.makeCommandBuffer("MetalGoose motion field"),
@@ -491,12 +425,14 @@ final class MotionPipeline: @unchecked Sendable {
 
         // A compute copy rather than a blit, because the field has to be scaled on the way in and a
         // blit cannot touch the values it moves.
-        var scaleValue = scale
+        var scale = Float(analysis.divisor)
+        var coverage = SIMD2<Float>(Float(width) / Float(field.width), Float(height) / Float(field.height))
         encoder.setComputePipelineState(gpu.pipelines.copyMotion)
         encoder.setTexture(field, index: 0)
         encoder.setTexture(raw, index: 1)
-        encoder.setBytes(&scaleValue, length: MemoryLayout<Float>.size, index: 0)
-        gpu.dispatch(gpu.pipelines.copyMotion, on: encoder, width: field.width, height: field.height)
+        encoder.setBytes(&scale, length: MemoryLayout<Float>.size, index: 0)
+        encoder.setBytes(&coverage, length: MemoryLayout<SIMD2<Float>>.size, index: 1)
+        gpu.dispatch(gpu.pipelines.copyMotion, on: encoder, width: width, height: height)
 
         // What the frame as a whole is doing is measured on the raw field — it is a trimmed mean, so a
         // few wild blocks do not move it — and is what the wild blocks are judged against.
@@ -507,23 +443,22 @@ final class MotionPipeline: @unchecked Sendable {
                                      threadsPerThreadgroup: MTLSize(width: Int(MG_MOTION_GRID * MG_MOTION_GRID),
                                                                     height: 1, depth: 1))
 
-        var width = Float(frameWidth)
+        var frame = Float(frameWidth)
         encoder.setComputePipelineState(gpu.pipelines.despeckle)
         encoder.setTexture(raw, index: 0)
         encoder.setTexture(vectors, index: 1)
         encoder.setBuffer(global, offset: 0, index: 0)
-        encoder.setBytes(&width, length: MemoryLayout<Float>.size, index: 1)
-        gpu.dispatch(gpu.pipelines.despeckle, on: encoder, width: field.width, height: field.height)
+        encoder.setBytes(&frame, length: MemoryLayout<Float>.size, index: 1)
+        gpu.dispatch(gpu.pipelines.despeckle, on: encoder, width: width, height: height)
 
-        // The media engine's field is one vector per 16x16 block, so one texel of it already spans a
-        // block. A dense field needs to step that same distance in frame pixels to be measuring the
-        // same quantity.
-        var stride = Int32(max(1, (field.width * Self.blockSpan) / max(1, frameWidth)))
+        // One texel of the field spans a block, and neighbours are compared a fixed distance apart in
+        // the frame, so that is the same number of texels whatever block the field was measured in.
+        var stride = Int32(max(1, Self.blockSpan / analysis.span))
         encoder.setComputePipelineState(gpu.pipelines.disagreement)
         encoder.setTexture(vectors, index: 0)
         encoder.setTexture(disagreement, index: 1)
         encoder.setBytes(&stride, length: MemoryLayout<Int32>.size, index: 0)
-        gpu.dispatch(gpu.pipelines.disagreement, on: encoder, width: field.width, height: field.height)
+        gpu.dispatch(gpu.pipelines.disagreement, on: encoder, width: width, height: height)
         encoder.endEncoding()
         commandBuffer.commit()
 

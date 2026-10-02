@@ -171,24 +171,6 @@ struct QualityProfile: Equatable, Sendable {
     let smaaSearchSteps: Int
 }
 
-/// Where the motion field extrapolation warps along comes from.
-enum MotionSource: String, SettingOption {
-    /// VideoToolbox's block matcher on the media engine: cheap, and confidently wrong
-    /// on repeating textures, where every block agrees on the same wrong repeat.
-    case mediaEngine
-    /// Vision's optical flow: about six times the cost, exact on textured content, and
-    /// near zero where motion cannot be determined — which the warp reads as "hold
-    /// this pixel". Only affordable while captures arrive slowly.
-    case opticalFlow
-
-    var title: LocalizedStringResource {
-        switch self {
-        case .mediaEngine: return "Media Engine"
-        case .opticalFlow: return "Optical Flow"
-        }
-    }
-}
-
 /// What synthesises the midpoint frame in interpolation mode.
 enum InterpolationEngine: String, SettingOption {
     /// The Neural Engine, through VideoToolbox's low-latency frame interpolation. The

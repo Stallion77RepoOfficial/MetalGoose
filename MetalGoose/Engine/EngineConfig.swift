@@ -14,7 +14,6 @@ struct EngineConfig: Equatable, Sendable {
     var vsync = true
     var profile = Sharpening.balanced.profile
     var bufferDepth = GooseEngine.maxInFlight
-    var motionSource: MotionSource = .mediaEngine
     var interpolationEngine: InterpolationEngine = .neuralEngine
 
     var generatesFrames: Bool { frameGeneration != .off }

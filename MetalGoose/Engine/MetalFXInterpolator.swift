@@ -178,15 +178,17 @@ final class MetalFXInterpolator: @unchecked Sendable {
     }
 
     /// MetalFX wants one vector per pixel, pointing to where that pixel was in the previous frame —
-    /// exactly the media engine's convention — but the field is one vector per 16x16 block. The same
+    /// exactly the media engine's convention — but the field is one vector per block. The same
     /// kernel that copies a field into the pipeline's own slot resamples it bilinearly to any size.
     private func encodeExpansion(of field: MotionField, into dense: MTLTexture, commandBuffer: MTLCommandBuffer) -> Bool {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
         var scale: Float = 1
+        var coverage = SIMD2<Float>(1, 1)
         encoder.setComputePipelineState(gpu.pipelines.copyMotion)
         encoder.setTexture(field.vectors, index: 0)
         encoder.setTexture(dense, index: 1)
         encoder.setBytes(&scale, length: MemoryLayout<Float>.size, index: 0)
+        encoder.setBytes(&coverage, length: MemoryLayout<SIMD2<Float>>.size, index: 1)
         gpu.dispatch(gpu.pipelines.copyMotion, on: encoder, width: dense.width, height: dense.height)
         encoder.endEncoding()
         return true

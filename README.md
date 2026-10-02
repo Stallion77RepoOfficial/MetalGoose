@@ -43,7 +43,9 @@ only games — anything that renders faster than it is being watched.
 - **MGFG-1-Extrapolation** — warps the newest frame forward along measured motion. Nothing is
   held back, so latency is unchanged. The gap can be sampled at 2, 3, or 4 points; quality
   degrades around disocclusions and at each additional point. Motion comes from the media engine
-  (VideoToolbox) or Vision optical flow, and is despeckled before use.
+  (VideoToolbox, multi-pass search), is despeckled before use, and is searched as finely as the
+  capture rate allows: 4×4 blocks on a half-size frame, coarser blocks as the frame grows or the
+  rate climbs.
 - **Multiplier** — images presented per captured frame. Extrapolation: 2x–4x. Interpolation is
   fixed at 2x.
 - Scene-cut detection avoids generating across hard cuts.
@@ -160,8 +162,7 @@ Apple documentation this project was built against:
 - [CAMetalDisplayLink](https://developer.apple.com/documentation/quartzcore/cametaldisplaylink)
   — the frame clock the render thread runs on
 - [VideoToolbox](https://developer.apple.com/documentation/videotoolbox) — motion estimation on
-  the media engine and low-latency frame interpolation on the Neural Engine, and
-  [Vision](https://developer.apple.com/documentation/vision) for optical flow
+  the media engine and low-latency frame interpolation on the Neural Engine
 - [AppKit](https://developer.apple.com/documentation/appkit) — the overlay window
 
 <div align="center">

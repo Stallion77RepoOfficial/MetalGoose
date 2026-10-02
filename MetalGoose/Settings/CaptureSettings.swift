@@ -16,7 +16,6 @@ final class CaptureSettings: ObservableObject {
     /// clamped on read, so switching to interpolation and back does not destroy an
     /// extrapolation setting the user chose.
     @Published var frameGenMultiplier: Int = 2                  { didSet { save(frameGenMultiplier, .frameGenMultiplier) } }
-    @Published var motionSource: MotionSource = .mediaEngine    { didSet { save(motionSource.rawValue, .motionSource) } }
     @Published var interpolationEngine: InterpolationEngine = .neuralEngine { didSet { save(interpolationEngine.rawValue, .interpolationEngine) } }
     @Published var aaMode: AAMode = .off                        { didSet { save(aaMode.rawValue, .aaMode) } }
     @Published var captureCursor: Bool = true                   { didSet { save(captureCursor, .captureCursor) } }
@@ -48,7 +47,6 @@ final class CaptureSettings: ObservableObject {
                      vsync: vsync,
                      profile: sharpening.profile,
                      bufferDepth: bufferCount,
-                     motionSource: motionSource,
                      interpolationEngine: interpolationEngine)
     }
 
@@ -56,7 +54,7 @@ final class CaptureSettings: ObservableObject {
 
     private enum Key: String {
         case scalingMethod = "scalingType"   // the key predates the rename and is kept for stored values
-        case scaleFactor, renderScale, frameGenMode, frameGenMultiplier, motionSource, interpolationEngine
+        case scaleFactor, renderScale, frameGenMode, frameGenMultiplier, interpolationEngine
         case sharpening = "qualityMode"      // ditto
         case aaMode, captureCursor, showMGHUD, vsync, tripleBuffering
 
@@ -75,7 +73,6 @@ final class CaptureSettings: ObservableObject {
         sharpening          = restore(.sharpening, sharpening)
         frameGenMode        = restore(.frameGenMode, frameGenMode)
         frameGenMultiplier  = restore(.frameGenMultiplier, frameGenMultiplier)
-        motionSource        = restore(.motionSource, motionSource)
         interpolationEngine = restore(.interpolationEngine, interpolationEngine)
         aaMode              = restore(.aaMode, aaMode)
         captureCursor       = restore(.captureCursor, captureCursor)

@@ -3,33 +3,43 @@
 
 #include "ShaderCommon.h"
 
-/// Feeds VTMotionEstimation, which takes single-component luma rather than BGRA.
+/// Feeds VTMotionEstimation, which takes single-component luma rather than BGRA. Motion is analysed at a
+/// bounded size, so the output may be smaller than the input by a whole divisor: each texel is the mean of
+/// the block of pixels it covers.
 kernel void bgraToLuma(
     texture2d<half, access::read> input [[texture(0)]],
     texture2d<half, access::write> output [[texture(1)]],
+    constant uint& divisor [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     uint width = output.get_width();
     uint height = output.get_height();
     if (gid.x >= width || gid.y >= height) return;
 
-    uint2 src = clampCoord(int2(gid), input.get_width(), input.get_height());
-    output.write(half4(rgb2luma(input.read(src).rgb), 0.0h, 0.0h, 1.0h), gid);
+    float sum = 0.0f;
+    for (uint dy = 0; dy < divisor; dy++) {
+        for (uint dx = 0; dx < divisor; dx++) {
+            uint2 src = clampCoord(int2(gid * divisor + uint2(dx, dy)), input.get_width(), input.get_height());
+            sum += float(rgb2luma(input.read(src).rgb));
+        }
+    }
+    output.write(half4(half(sum / float(divisor * divisor)), 0.0h, 0.0h, 1.0h), gid);
 }
 
-/// Copies a motion field into a slot the pipeline owns, applying the scale that
-/// reconciles the source it came from with the frame the warp runs on.
+/// Copies a motion field into a slot the pipeline owns, resampled to the slot's size, and applies the
+/// scale that carries its vectors into the units of the frame the warp runs on: a field measured on an
+/// image averaged down by a whole factor is in that image's pixels, and with render scale active the warp
+/// runs on a larger restored frame.
 ///
-/// Two corrections ride on that one factor. Sign: the media engine reports where
-/// a pixel's content *was*, Vision reports where it *went*, so one of the two
-/// has to be negated for the warp to read them the same way. Magnitude: a field
-/// measured on the captured image is in captured pixels, and with render scale
-/// active the warp runs on a larger restored frame, so the vectors have to be
-/// carried into that frame's units.
+/// `coverage` is the share of the input the output spans. The media engine pads its fields past the
+/// frame, to a multiple of four vectors, and the padding is not the image: spanning it would stretch the
+/// field over the frame and misplace every vector by up to a dozen pixels at the far edge. 1 resamples all
+/// of the input.
 kernel void copyMotionField(
     texture2d<half, access::sample> input [[texture(0)]],
     texture2d<half, access::write> output [[texture(1)]],
     constant float& scale [[buffer(0)]],
+    constant float2& coverage [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     uint width = output.get_width();
@@ -37,7 +47,7 @@ kernel void copyMotionField(
     if (gid.x >= width || gid.y >= height) return;
 
     constexpr sampler linearSampler(filter::linear, address::clamp_to_edge, coord::normalized);
-    float2 uv = (float2(gid) + 0.5f) / float2(width, height);
+    float2 uv = (float2(gid) + 0.5f) / float2(width, height) * coverage;
     float2 mv = float2(input.sample(linearSampler, uv).xy) * scale;
     output.write(half4(half(mv.x), half(mv.y), 0.0h, 1.0h), gid);
 }
@@ -171,7 +181,7 @@ kernel void despeckleMotion(
 
 /// Collapses the motion field to the one vector that describes the frame.
 ///
-/// A plain mean is the wrong answer: optical flow reports zero where it has no
+/// A plain mean is the wrong answer: the block matcher reports zero where it has no
 /// evidence, and large still regions would drag the estimate toward nothing
 /// while the scene sweeps past. So the field is first reduced to a coarse grid of
 /// tile means (one thread per tile), then the mean of the tiles is taken, and then
@@ -280,6 +290,38 @@ kernel void staticMask(
     mask.write(half4(any == 0 ? 1.0h : 0.0h), gid);
 }
 
+/// Catmull-Rom resampling in five bilinear fetches: the two taps of each of the four rows and columns around
+/// the sample point are folded into one fetch apiece by placing it where the bilinear weights give the
+/// cubic's, and the four corners, whose weights are tiny, are dropped. A warp lands between pixels almost
+/// everywhere, and bilinear filtering softens whatever it lands on, so a warped image alternated with a
+/// captured one — which is sharp — pulses in sharpness at the capture rate. This keeps the detail. Exactly on
+/// a pixel centre the weights collapse to that pixel, so static content is untouched.
+inline half4 sampleCatmullRom(texture2d<half, access::sample> tex, sampler s, float2 uv, float2 size) {
+    const float2 position = uv * size;
+    const float2 center = floor(position - 0.5f) + 0.5f;
+    const float2 f = position - center;
+    const float2 f2 = f * f;
+    const float2 f3 = f2 * f;
+
+    const float2 w0 = f2 - 0.5f * (f3 + f);
+    const float2 w1 = 1.5f * f3 - 2.5f * f2 + 1.0f;
+    const float2 w3 = 0.5f * (f3 - f2);
+    const float2 w2 = 1.0f - w0 - w1 - w3;
+    const float2 w12 = w1 + w2;
+
+    const float2 near = (center - 1.0f) / size;
+    const float2 far = (center + 2.0f) / size;
+    const float2 middle = (center + w2 / w12) / size;
+
+    float4 sum = float4(tex.sample(s, float2(middle.x, near.y))) * (w12.x * w0.y)
+               + float4(tex.sample(s, float2(near.x, middle.y))) * (w0.x * w12.y)
+               + float4(tex.sample(s, float2(middle.x, middle.y))) * (w12.x * w12.y)
+               + float4(tex.sample(s, float2(far.x, middle.y))) * (w3.x * w12.y)
+               + float4(tex.sample(s, float2(middle.x, far.y))) * (w12.x * w3.y);
+    const float total = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    return half4(clamp(sum / total, 0.0f, 1.0f));
+}
+
 /// Frame extrapolation. VTMotionEstimation returns backward vectors in pixels:
 /// `mv` at p says where p's content sat in the previous frame, so the content
 /// velocity is -mv per capture interval. Sampling the source at `p + mv * phase`
@@ -350,5 +392,5 @@ kernel void extrapolateFrame(
     const float2 delta = blended * phase * (1.0f - staticHere);
 
     const float2 sourceUV = (float2(gid) + 0.5f + delta) / size;
-    output.write(source.sample(linearSampler, clamp(sourceUV, 0.0f, 1.0f)), gid);
+    output.write(sampleCatmullRom(source, linearSampler, clamp(sourceUV, 0.0f, 1.0f), size), gid);
 }

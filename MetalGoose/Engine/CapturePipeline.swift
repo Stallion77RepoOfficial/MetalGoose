@@ -130,10 +130,10 @@ final class CapturePipeline: @unchecked Sendable {
         }
     }
 
-    /// Drops every texture and estimator the pipeline holds, and optionally the frames and
-    /// counters that describe what was captured with them.
-    func reset(clearFrames: Bool) {
-        queue.async { [self] in resetState(clearFrames: clearFrames) }
+    /// Drops every texture and estimator the pipeline holds, and the frames and counters that
+    /// describe what was captured with them.
+    func reset() {
+        queue.async { [self] in resetState() }
     }
 
     /// The timing scalars belong to the queue, so their reset is handed over like everything else.
@@ -147,7 +147,7 @@ final class CapturePipeline: @unchecked Sendable {
         }
     }
 
-    private func resetState(clearFrames: Bool) {
+    private func resetState() {
         restoreTexture = nil
         restoreScaler = nil
         sharpenTexture = nil
@@ -163,11 +163,8 @@ final class CapturePipeline: @unchecked Sendable {
         shared.metalFX.reset()
         shared.generationLatency.reset()
         shared.renderResetRequested.withLock { $0 = true }
-
-        if clearFrames {
-            shared.ring.clear()
-            shared.stats.withLock { $0.resetCumulativeCounters() }
-        }
+        shared.ring.clear()
+        shared.stats.withLock { $0.resetCumulativeCounters() }
     }
 
     // MARK: - One frame
@@ -217,7 +214,7 @@ final class CapturePipeline: @unchecked Sendable {
 
         let size = CGSize(width: width, height: height)
         if size != processedSize {
-            resetState(clearFrames: true)
+            resetState()
             processedSize = size
         }
 
@@ -315,11 +312,10 @@ final class CapturePipeline: @unchecked Sendable {
         commandBuffer.commit()
 
         // MetalFX takes the motion between the pair as an input, and extrapolation warps along it; the
-        // Neural Engine needs none. Only extrapolation lets the user pick how it is measured.
+        // Neural Engine needs none.
         if config.frameGeneration == .extrapolation
             || (config.frameGeneration == .interpolation && backend == .metalFX) {
-            let source = config.frameGeneration == .extrapolation ? config.motionSource : .mediaEngine
-            motion.submit(frame: history, capture: frame.pixelBuffer, source: source, timestamp: now)
+            motion.submit(frame: history, timestamp: now, interval: shared.captureInterval.withLock { $0.value })
         }
 
         shared.ring.push(FrameHistory(texture: history, timestamp: now, isSceneCut: frame.isSceneCut, staticMask: mask))
