@@ -413,10 +413,9 @@ if let files = try? FileManager.default.contentsOfDirectory(at: kodak, including
 }
 for seed in 0..<4 { images.append(("interface", interfaceImage(width: 1280, height: 720, seed: seed))) }
 #if VT_SR
-let least = VTLowLatencySuperResolutionScalerConfiguration.minimumDimensions
-let most = VTLowLatencySuperResolutionScalerConfiguration.maximumDimensions
-print("UPSCALE VT: supported \(VTLowLatencySuperResolutionScalerConfiguration.isSupported), "
-      + "dimensions \(least.width)x\(least.height) to \(most.width)x\(most.height)")
+print("UPSCALE VT: supported \(VTLowLatencySuperResolutionScalerConfiguration.isSupported), dimensions "
+      + String(describing: VTLowLatencySuperResolutionScalerConfiguration.minimumDimensions) + " to "
+      + String(describing: VTLowLatencySuperResolutionScalerConfiguration.maximumDimensions))
 #endif
 print("UPSCALE images: \(images.filter { $0.0 == "photo" }.count) photos, \(images.filter { $0.0 == "interface" }.count) interfaces")
 
