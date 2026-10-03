@@ -262,6 +262,12 @@ final class CapturePipeline: @unchecked Sendable {
         // back to the window's size first was measured to add nothing for MetalFX, and costs a MetalFX
         // pass per capture and every later stage at four times the pixels. Only the Neural Engine takes
         // the window's own size, when that fits it (`CaptureRestore`).
+        //
+        // Sharpening the capture before MetalFX, rather than MetalFX's output, was measured (luma PSNR
+        // against the original, 24 photos and 4 drawn interfaces reduced by area and by point and brought
+        // back by MetalFX, at each Sharpening strength): 0.07 to 0.21 dB closer on interface and text, and
+        // up to 0.21 dB further on photos. It is also one pass at the capture's size a capture, where after
+        // MetalFX it would be one at the screen's size for every image presented.
         let native = frame.nativePixelSize
         let isReduced = native.width >= CGFloat(input.width) + 1 && native.height >= CGFloat(input.height) + 1
         // What the Neural Engine is given whole is even in both dimensions, because its chroma planes are half-size. A

@@ -1,10 +1,18 @@
-// Upscaling quality, measured on the runner's GPU with the real MetalFX and the app's own sharpening kernel: each test image
-// is reduced (by area, as a render that is anti-aliased, and by point, as one that is not), brought back to its size by each
-// method, and scored against the original — PSNR and SSIM of luma. Timing on a virtual GPU means nothing; quality does.
+// Upscaling quality, measured with the real MetalFX and the app's own sharpening kernel: each test image is reduced (by
+// area, as a filtered reduction does, and by point, as an aliased render does), brought back to its size by
+// each method, and scored against the original — PSNR and SSIM of luma. Only quality: a virtual GPU's times mean nothing.
 //
-// Methods: bilinear; MetalFX spatial alone, perceptual (as the app) and linear; VideoToolbox's low-latency super resolution
-// (with -D VT_SR); the app's order, contrast-adaptive sharpening on the capture and MetalFX after
-// it; and the other order, MetalFX and then the sharpening on its output — at the three strengths of the Sharpening picker.
+// Methods: bilinear; MetalFX spatial alone, perceptual (as the app) and linear; the app's order, contrast-adaptive
+// sharpening on the capture and MetalFX after it; and the other order, MetalFX and then the sharpening on its output — at
+// the three strengths of the Sharpening picker. With -D VT_SR, VideoToolbox's low-latency super resolution as well, which
+// needs the Neural Engine: on a hosted runner its session starts but every call fails (-19730). It takes 96x96 to 960x960
+// and a factor of 2 (1.5 has no configuration), in 4:2:0.
+//
+// From the repository's root, with the Kodak set in ./kodak (the workflow fetches it) or without it (the drawn
+// interfaces alone):
+//
+//     swiftc -O .github/probe/UpscaleQuality.swift -o upscale && ./upscale
+//     swiftc -O -D VT_SR .github/probe/UpscaleQuality.swift -o upscale-vt && ./upscale-vt
 import AppKit
 import CoreGraphics
 import ImageIO
