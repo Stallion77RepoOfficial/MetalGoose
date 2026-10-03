@@ -71,7 +71,8 @@ func interfaceImage(width: Int, height: Int, seed: Int) -> Image {
         }
         for row in 0..<8 {
             for column in 0..<14 {
-                let rect = CGRect(x: 60 + column * 60, y: 40 + row * 34, width: 26 + Int(next() * 20), height: 14 + Int(next() * 10))
+                let w: Int = 26 + Int(next() * 20), h: Int = 14 + Int(next() * 10)
+                let rect = CGRect(x: 60 + column * 60, y: 40 + row * 34, width: w, height: h)
                 context.setFillColor(CGColor(red: next(), green: next(), blue: next(), alpha: 1))
                 if (row + column).isMultiple(of: 2) { context.fillEllipse(in: rect) } else { context.fill(rect) }
             }
@@ -118,9 +119,14 @@ func reduce(_ image: Image, to width: Int, _ height: Int, byArea: Bool) -> Image
 // MARK: - Scores
 
 func luma(_ image: Image) -> [Double] {
-    (0..<(image.width * image.height)).map {
-        0.2126 * Double(image.rgba[$0 * 4]) + 0.7152 * Double(image.rgba[$0 * 4 + 1]) + 0.0722 * Double(image.rgba[$0 * 4 + 2])
+    var out = [Double](repeating: 0, count: image.width * image.height)
+    for i in out.indices {
+        let r: Double = 0.2126 * Double(image.rgba[i * 4])
+        let g: Double = 0.7152 * Double(image.rgba[i * 4 + 1])
+        let b: Double = 0.0722 * Double(image.rgba[i * 4 + 2])
+        out[i] = r + g + b
     }
+    return out
 }
 
 func psnr(_ a: [Double], _ b: [Double]) -> Double {
@@ -130,7 +136,8 @@ func psnr(_ a: [Double], _ b: [Double]) -> Double {
 
 /// SSIM over 8x8 windows, stepped by 4.
 func ssim(_ a: [Double], _ b: [Double], width: Int, height: Int) -> Double {
-    let c1 = pow(0.01 * 255, 2), c2 = pow(0.03 * 255, 2)
+    let k1: Double = 0.01 * 255, k2: Double = 0.03 * 255
+    let c1 = k1 * k1, c2 = k2 * k2
     var total = 0.0, count = 0.0
     for y in stride(from: 0, to: height - 8, by: 4) {
         for x in stride(from: 0, to: width - 8, by: 4) {
@@ -145,7 +152,9 @@ func ssim(_ a: [Double], _ b: [Double], width: Int, height: Int) -> Double {
                 }
             }
             va /= 63; vb /= 63; cov /= 63
-            total += ((2 * ma * mb + c1) * (2 * cov + c2)) / ((ma * ma + mb * mb + c1) * (va + vb + c2))
+            let numerator: Double = (2 * ma * mb + c1) * (2 * cov + c2)
+            let denominator: Double = (ma * ma + mb * mb + c1) * (va + vb + c2)
+            total += numerator / denominator
             count += 1
         }
     }
@@ -257,7 +266,9 @@ func bilinear(_ image: Image, to width: Int, _ height: Int) -> Image {
             let ax = min(1, max(0, fx - Double(x0))), ay = min(1, max(0, fy - Double(y0)))
             for c in 0..<3 {
                 func p(_ xx: Int, _ yy: Int) -> Double { Double(image.rgba[(yy * image.width + xx) * 4 + c]) }
-                let v = (p(x0, y0) * (1 - ax) + p(x1, y0) * ax) * (1 - ay) + (p(x0, y1) * (1 - ax) + p(x1, y1) * ax) * ay
+                let top: Double = p(x0, y0) * (1 - ax) + p(x1, y0) * ax
+                let bottom: Double = p(x0, y1) * (1 - ax) + p(x1, y1) * ax
+                let v: Double = top * (1 - ay) + bottom * ay
                 out[(y * width + x) * 4 + c] = UInt8(min(255, max(0, v.rounded())))
             }
         }
@@ -370,17 +381,18 @@ func superResolution(_ small: Image, to width: Int, _ height: Int) -> Image? {
     let made: VTLowLatencySuperResolutionScalerParameters? =
         VTLowLatencySuperResolutionScalerParameters(sourceFrame: sourceFrame, destinationFrame: destinationFrame)
     guard let parameters = made else { return nil }
+    final class Outcome: @unchecked Sendable { var error: Error? }
     let done = DispatchSemaphore(value: 0)
-    var failure: Error?
+    let outcome = Outcome()
     session.process(parameters: parameters) { _, error in
-        failure = error
+        outcome.error = error
         done.signal()
     }
     guard done.wait(timeout: .now() + 10) == .success else {
         if reported.insert(key).inserted { print("UPSCALE VT: \(key) did not come back") }
         return nil
     }
-    if let failure {
+    if let failure = outcome.error {
         if reported.insert(key).inserted { print("UPSCALE VT: \(key) failed: \(failure)") }
         return nil
     }
@@ -400,6 +412,12 @@ if let files = try? FileManager.default.contentsOfDirectory(at: kodak, including
     }
 }
 for seed in 0..<4 { images.append(("interface", interfaceImage(width: 1280, height: 720, seed: seed))) }
+#if VT_SR
+let least = VTLowLatencySuperResolutionScalerConfiguration.minimumDimensions
+let most = VTLowLatencySuperResolutionScalerConfiguration.maximumDimensions
+print("UPSCALE VT: supported \(VTLowLatencySuperResolutionScalerConfiguration.isSupported), "
+      + "dimensions \(least.width)x\(least.height) to \(most.width)x\(most.height)")
+#endif
 print("UPSCALE images: \(images.filter { $0.0 == "photo" }.count) photos, \(images.filter { $0.0 == "interface" }.count) interfaces")
 
 struct Score { var psnr = 0.0; var ssim = 0.0; var count = 0.0 }
@@ -417,8 +435,13 @@ let strengths: [(String, Float)] = [("light 0.8", 0.8), ("balanced 1.0", 1.0), (
 for (kind, original) in images {
     // Sizes that both factors divide, so that the reductions are exact.
     let width = original.width - original.width % 12, height = original.height - original.height % 12
-    let truthImage = Image(width: width, height: height, rgba: (0..<height).flatMap { y in
-        Array(original.rgba[(y * original.width * 4)..<(y * original.width * 4 + width * 4)]) })
+    var cropped: [UInt8] = []
+    cropped.reserveCapacity(width * height * 4)
+    for y in 0..<height {
+        let start = y * original.width * 4
+        cropped += original.rgba[start..<(start + width * 4)]
+    }
+    let truthImage = Image(width: width, height: height, rgba: cropped)
     let truth = luma(truthImage)
     for (scaleName, factor) in [("2x", 2.0), ("1.5x", 1.5)] {
         let smallW = Int((Double(width) / factor).rounded()), smallH = Int((Double(height) / factor).rounded())
@@ -467,5 +490,6 @@ for (kind, original) in images {
 
 for key in scores.keys.sorted() {
     let s = scores[key]!
-    print(String(format: "UPSCALE %-62@ PSNR %6.2f dB  SSIM %.4f", key as NSString, s.psnr / s.count, s.ssim / s.count))
+    let name = key.padding(toLength: 62, withPad: " ", startingAt: 0)
+    print("UPSCALE \(name)" + String(format: " PSNR %6.2f dB  SSIM %.4f", s.psnr / s.count, s.ssim / s.count))
 }
