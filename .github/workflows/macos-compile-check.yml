@@ -41,13 +41,21 @@ jobs:
         if: always()
         run: |
           MTL_DEBUG_LAYER=1 swift .github/probe/MetalProbe.swift 2>&1 | grep PROBE || true
-      - name: VideoToolbox headers and test images
+      - name: VideoToolbox headers
         if: always()
         run: |
           headers="$(xcrun --show-sdk-path)/System/Library/Frameworks/VideoToolbox.framework/Headers"
-          ls "$headers" | grep -i -E "lowlatency|superres|frameprocessor" || true
-          for h in VTLowLatencySuperResolutionScalerConfiguration.h VTLowLatencySuperResolutionScalerParameters.h \
-                   VTLowLatencyFrameInterpolationConfiguration.h VTLowLatencyFrameInterpolationParameters.h VTFrameProcessor.h; do
-            echo "=== $h"; grep -v -E "^\s*$|^//|^\s*\*|^/\*" "$headers/$h" | head -120 || true
+          for h in VTFrameProcessor_LowLatencySuperResolutionScaler.h VTFrameProcessorFrame.h; do
+            echo "=== $h"; grep -v -E "^\s*$|^//|^\s*\*|^/\*" "$headers/$h" | head -150 || true
           done
-          ls "/System/Library/Desktop Pictures" "/Library/Desktop Pictures" 2>/dev/null | head -60 || true
+      - name: Upscale quality
+        if: always()
+        run: |
+          mkdir -p kodak
+          for i in $(seq -w 1 24); do
+            curl -sfL --retry 3 -o "kodak/kodim$i.png" "https://r0k.us/graphics/kodak/kodak/kodim$i.png" || rm -f "kodak/kodim$i.png"
+          done
+          swiftc -O .github/probe/UpscaleQuality.swift -o upscale && ./upscale
+          echo "=== with VideoToolbox super resolution"
+          swiftc -O -D VT_SR .github/probe/UpscaleQuality.swift -o upscale-vt 2>&1 | grep -E "error" | head -20
+          [ -x upscale-vt ] && ./upscale-vt | grep -E "VT|VideoToolbox" || true
