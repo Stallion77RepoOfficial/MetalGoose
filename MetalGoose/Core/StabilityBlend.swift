@@ -13,20 +13,20 @@ import Foundation
 /// by the same small amount whatever the texture. So the weight of the captures' mix falls with the ratio of the largest
 /// change between them to the largest contrast around, both within two pixels, which is about how far in pixels the
 /// content moved, up to one. A fixed tolerance on the change alone, which this replaces, could not tell a low contrast
-/// texture in motion from a still one with noise: it gained 4 dB on slow video and lost 0.3 to 0.7 on a voxel-game-like
-/// scene turning at 60 captures a second, and cost MetalFX up to 0.7 dB there.
+/// texture in motion from a still one with noise: it gained 4 dB on slow video and lost 0.3 to 0.7 on a scene turning at
+/// 60 captures a second, and cost MetalFX up to 0.7 dB there.
 ///
 /// The blend is the shaders `blendTowardCaptures...`; this is the numbers they take and the rule they apply, which is kept
 /// here so that it can be tested.
 enum StabilityBlend {
 
     /// How far, by that ratio, the content may have moved for the Neural Engine's image to stand alone. Chosen against the
-    /// real frame in between on 18 real-clip cases at 720p and 1080p and 54 voxel-game-like ones from 720p to 4K, 1, 2 and 4
-    /// frames apart (60, 30 and 15 captures a second): from 0.5 to 1.2 the games were within 0.1 dB of each other, and the
-    /// clips gained with it up to 0.9, where the structure of the picture (SSIM) started to give it back.
+    /// real frame in between on 18 real-clip cases at 720p and 1080p and 54 rendered scenes in motion from 720p to 4K, 1, 2
+    /// and 4 frames apart (60, 30 and 15 captures a second): from 0.5 to 1.2 the scenes were within 0.1 dB of each other, and
+    /// the clips gained with it up to 0.9, where the structure of the picture (SSIM) started to give it back.
     static let neuralEngineMotion: Float = 0.9
 
-    /// The same for MetalFX, whose images are closer to the captures to begin with: it gains 0.2 dB on the games from 0.5
+    /// The same for MetalFX, whose images are closer to the captures to begin with: it gains 0.2 dB on the scenes from 0.5
     /// to 0.9 and loses a little on the clips, less the smaller it is, so it is held to 0.7.
     static let metalFXMotion: Float = 0.7
 

@@ -78,7 +78,7 @@ struct GenerationChoice: Sendable, Equatable {
 /// - Until an engine has been timed, what it would take is predicted from the size, and held to the stricter share
 ///   that is asked to take it, not the looser one that is allowed to keep it.
 /// - Taking more — four images, a finer size, a better engine — is judged by the shortest interval between captures of
-///   the last few seconds, and keeping what is taken by the one now. A game that stutters for a second makes its captures
+///   the last few seconds, and keeping what is taken by the one now. A source that stutters for a second makes its captures
 ///   come further apart, and an option that fits only a rate it will be back from in a moment is not worth moving to.
 ///
 /// The Neural Engine and the media engine are separate units and do not slow each other (measured), so nothing waits

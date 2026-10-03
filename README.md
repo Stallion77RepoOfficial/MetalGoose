@@ -34,7 +34,9 @@ only games — anything that renders faster than it is being watched.
 ### MGFG-1 Frame Generation
 MGFG-1 makes the images between two captures by interpolation. The Neural Engine does it where it can, and MetalFX on
 the GPU where it cannot, and a single choice is made for every capture so that the two work as one. The HUD's
-**Frame Gen** row names the engine in use and what it delivers.
+**Frame Gen** row says MGFG-1 and the multiplier in use; its **Engine** row names the engine making the images (and the
+size the Neural Engine works at, where that is not the capture's own), or says why none is: Starting while the Neural
+Engine's session is being built, Not keeping up, or Display-limited.
 
 - **Neural Engine** — VideoToolbox low-latency frame interpolation, for 2x and 4x. It leaves the GPU to the captured
   app: the GPU converts the capture to 4:2:0 once, and turns an image into colour only as it is shown. It works at the

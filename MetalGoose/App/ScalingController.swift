@@ -362,20 +362,28 @@ final class ScalingController: ObservableObject {
     private func hudInfo(_ engine: GooseEngine) -> HUDInfo {
         let size = capture.capturePixelSize
         // What was asked for is a preference; the engine reports what is actually in use.
-        let generation = settings.frameGenMode == .off ? "Off" : Self.describe(engine.generation)
+        let off = settings.frameGenMode == .off
+        let choice = engine.generation
         return HUDInfo(deviceName: engine.deviceName,
                        pid: targetPID,
                        captureResolution: size == .zero ? "-" : "\(Int(size.width))x\(Int(size.height))",
                        upscale: "\(String(localized: settings.scalingMethod.title)) \(settings.scaleFactor.rawValue)",
                        renderScale: String(localized: settings.renderScale.title),
-                       frameGeneration: generation,
+                       frameGeneration: off ? "Off" : Self.describeMode(settings.frameGenMode, choice),
+                       generationEngine: off ? "-" : Self.describeEngine(choice),
                        antiAliasing: String(localized: settings.aaMode.title),
                        vsync: settings.vsync ? "On" : "Off")
     }
 
-    /// What the Frame Gen row says: the engine making the images and how many, and the size the Neural Engine works at where
-    /// that is not the capture's own.
-    private static func describe(_ choice: GenerationChoice) -> String {
+    /// What the Frame Gen row says: the mode, and how many images it delivers a capture where an engine is making them.
+    private static func describeMode(_ mode: FrameGenMode, _ choice: GenerationChoice) -> String {
+        let name = String(localized: mode.title)
+        return choice.engine == nil ? name : "\(name) \(choice.multiplier)x"
+    }
+
+    /// What the Engine row says: the engine making the images, and the size the Neural Engine works at where that is not the
+    /// capture's own; or why no engine is making any.
+    private static func describeEngine(_ choice: GenerationChoice) -> String {
         guard let engine = choice.engine else {
             // No engine: the panel could not show more than the captures, the Neural Engine's session is being built, or
             // nothing can make its images in time.
@@ -384,9 +392,9 @@ final class ScalingController: ObservableObject {
             if choice.neuralRung != nil { return String(localized: "Starting") }
             return String(localized: "Not keeping up")
         }
-        let label = "\(String(localized: engine.title)) \(choice.multiplier)x"
-        guard let size = choice.neuralSize else { return label }
-        return "\(label) (\(size.width)x\(size.height))"
+        let name = String(localized: engine.title)
+        guard let size = choice.neuralSize else { return name }
+        return "\(name) (\(size.width)x\(size.height))"
     }
 
     func bringToFront() {

@@ -8,6 +8,8 @@ struct HUDInfo: Equatable {
     var upscale = "Off"
     var renderScale = "-"
     var frameGeneration = "Off"
+    /// The engine making the generated images, or why none is.
+    var generationEngine = "-"
     var antiAliasing = "Off"
     var vsync = "On"
 }
@@ -120,6 +122,9 @@ struct HUDView: View {
             HUDRow(label: "Upscale", value: info.upscale)
             HUDRow(label: "Render Scale", value: info.renderScale)
             HUDRow(label: "Frame Gen", value: info.frameGeneration)
+            if info.frameGeneration != "Off" {
+                HUDRow(label: "Engine", value: info.generationEngine)
+            }
             HUDRow(label: "AA", value: info.antiAliasing)
             HUDRow(label: "VSync", value: info.vsync)
         }
