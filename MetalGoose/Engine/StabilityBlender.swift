@@ -25,7 +25,7 @@ final class StabilityBlender {
     /// `next`), encoded on `commandBuffer`, at the captures' size: an image the Neural Engine made at another size is
     /// enlarged as it is blended, and one it made in planes is turned into colour. Nil when the two captures do not have one
     /// size, which no pair of one session does; the caller shows the capture.
-    func blend(_ generated: GeneratedImages.Source, previous: MTLTexture, next: MTLTexture, phase: Double, tolerance: Float,
+    func blend(_ generated: GeneratedImages.Source, previous: MTLTexture, next: MTLTexture, phase: Double, motion: Float,
                commandBuffer: MTLCommandBuffer) -> MTLTexture? {
         let (width, height) = (previous.width, previous.height)
         guard next.width == width, next.height == height,
@@ -33,7 +33,7 @@ final class StabilityBlender {
               let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
         turn = (turn + 1) % textures.count
 
-        var parameters = StabilityBlendParams(phase: Float(phase), tolerance: tolerance)
+        var parameters = StabilityBlendParams(phase: Float(phase), motion: motion, noiseFloor: StabilityBlend.noiseFloor)
         let pipeline: MTLComputePipelineState
         let captures: Int
         switch generated {

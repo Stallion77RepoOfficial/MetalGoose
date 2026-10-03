@@ -97,6 +97,7 @@ final class GooseEngine: @unchecked Sendable {
         capture.reset()
         shared.errors.reset()
         shared.captureInterval.withLock { $0.reset() }
+        shared.captureSpread.withLock { $0.reset() }
         shared.stats.withLock { stats in
             // The panel does not change between sessions.
             let refresh = stats.screenRefreshRate

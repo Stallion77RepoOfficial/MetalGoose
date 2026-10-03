@@ -15,8 +15,12 @@ typedef struct {
 typedef struct {
     /// Where between the two captures the generated image sits, 0 at the first and 1 at the second.
     float phase;
-    /// The change between the captures, as a share of the full range, at which the generated image is left alone.
-    float tolerance;
+    /// How far the content may have moved between the captures, as the change between them over the contrast around it,
+    /// before the generated image is left alone.
+    float motion;
+    /// A change between the captures, as a share of the full range, that is noise rather than motion: added to the
+    /// contrast, so that a flat patch is not judged by a ratio of two tiny numbers.
+    float noiseFloor;
 } StabilityBlendParams;
 
 /// The motion field is summarised over a fixed square grid of tiles, one thread per

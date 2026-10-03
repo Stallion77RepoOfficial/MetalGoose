@@ -382,10 +382,15 @@ final class CapturePipeline: @unchecked Sendable {
         let yuv = runsNeuralEngine ? shared.neural.encodeConversion(of: history, commandBuffer: commandBuffer) : nil
         let partner = frame.isSceneCut ? nil : previousCapture?.timestamp
 
+        // How far behind real time the render clock runs for this pair, which tells the Neural Engine how long a pair may wait
+        // for it and still be shown.
+        let scheduleDelay = FramePlanner.interpolationDelay(captureInterval: shared.captureInterval.withLock { $0.value },
+                                                            generationLatency: choice.latency, steps: neuralSteps)
+
         commandBuffer.addCompletedHandler { [shared] buffer in
             let gpuTime = Float((buffer.gpuEndTime - buffer.gpuStartTime) * 1000)
             shared.stats.withLock { $0.captureGPUTime = gpuTime }
-            if let yuv { shared.neural.frameConverted(yuv, timestamp: now, previous: partner, steps: neuralSteps) }
+            if let yuv { shared.neural.frameConverted(yuv, timestamp: now, previous: partner, steps: neuralSteps, delay: scheduleDelay) }
         }
         commandBuffer.commit()
 
@@ -439,9 +444,11 @@ final class CapturePipeline: @unchecked Sendable {
         let inputs = GenerationSelector.Inputs(
             requested: config.multiplier,
             captureInterval: shared.captureInterval.withLock { $0.value },
+            shortestInterval: shared.captureSpread.withLock { $0.shortest },
             refreshRate: shared.stats.withLock { $0.screenRefreshRate },
             framePixels: width * height,
-            neuralRungs: usable ? neuralSizes.map(\.pixels) : [],
+            // A size the processor refused is as good as one with no time to spare.
+            neuralRungs: usable ? neuralSizes.map { shared.neural.isRejected($0) ? Int.max / 8 : $0.pixels } : [],
             neuralActive: usable ? shared.neural.activeSize.flatMap { neuralSizes.firstIndex(of: $0) } : nil,
             neuralMidpointTime: shared.neural.midpointTime, neuralQuartersTime: shared.neural.quartersTime,
             neuralLatency: shared.neuralLatency.value, metalFXLatency: shared.metalFXLatency.value)
@@ -561,6 +568,7 @@ final class CapturePipeline: @unchecked Sendable {
             let interval = now - lastArrival
             shared.captureInterval.withLock { $0.add(interval, window: EngineShared.measurementWindow) }
         }
+        shared.captureSpread.withLock { $0.add(arrival: now) }
         let delta = lastArrival > 0 ? (now - lastArrival) * 1000 : 0
         lastArrival = now
 

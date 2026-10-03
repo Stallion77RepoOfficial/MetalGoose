@@ -377,8 +377,12 @@ final class ScalingController: ObservableObject {
     /// that is not the capture's own.
     private static func describe(_ choice: GenerationChoice) -> String {
         guard let engine = choice.engine else {
-            // No engine yet: the Neural Engine's session is being built, or nothing can make its images in time.
-            return String(localized: choice.neuralRung != nil ? "Starting" : "Not keeping up")
+            // No engine: the panel could not show more than the captures, the Neural Engine's session is being built, or
+            // nothing can make its images in time.
+            if choice.limitedByPanel { return String(localized: "Display-limited") }
+            // Literal keys, one to a call, so that Xcode's string extraction sees every one of them.
+            if choice.neuralRung != nil { return String(localized: "Starting") }
+            return String(localized: "Not keeping up")
         }
         let label = "\(String(localized: engine.title)) \(choice.multiplier)x"
         guard let size = choice.neuralSize else { return label }

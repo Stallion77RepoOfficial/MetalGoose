@@ -1,21 +1,25 @@
-// Bringing a generated image back toward the captures it was made from, where they barely differ.
+// Bringing a generated image back toward the captures it was made from, where the content did not move.
 
 #include "ShaderCommon.h"
 
-constant int kStabilityHalo = 2;
+/// Two pixels either side for the window the weight is judged over, and one more for the contrast of the pixels at its edge.
+constant int kStabilityHalo = 3;
 constant int kStabilityTileWidth = MG_BLEND_TILE_WIDTH + 2 * kStabilityHalo;
 constant int kStabilityTileHeight = MG_BLEND_TILE_HEIGHT + 2 * kStabilityHalo;
+constant int kStabilityWindowWidth = MG_BLEND_TILE_WIDTH + 4;
+constant int kStabilityWindowHeight = MG_BLEND_TILE_HEIGHT + 4;
 
-/// The largest change between the two captures within two pixels of this one, as a share of the full range.
+/// How much of the captures' own mix a pixel gets, from how much the two captures differ around it compared with how much
+/// there is to differ (`StabilityBlend` has the reasoning and the numbers).
 ///
-/// The change at a pixel is the largest difference of any channel between the captures, and what counts is the largest
-/// in the 5x5 around it: an edge that moved decides its neighbours as well as itself, and a flat patch inside moving
-/// content is judged with the content. The difference of each pixel is evaluated once into threadgroup memory (tile plus
-/// a two pixel halo); the threadgroup must be exactly MG_BLEND_TILE_WIDTH x MG_BLEND_TILE_HEIGHT and every threadgroup of
-/// the grid must be full, because the halo is loaded cooperatively by all of its threads, and this is called by all of them
-/// before any returns.
-inline half largestChange(texture2d<half, access::read> previous, texture2d<half, access::read> next,
-                          threadgroup half* change, uint2 lid, uint2 tgid) {
+/// The captures are read once into threadgroup memory, tile plus a three pixel halo; the change between them and the
+/// contrast in them are worked out once for every pixel of the tile plus two, and each pixel takes the largest of both over
+/// its 5x5. The threadgroup must be exactly MG_BLEND_TILE_WIDTH x MG_BLEND_TILE_HEIGHT and every threadgroup of the grid
+/// must be full, because the halo is loaded cooperatively by all of its threads, and this is called by all of them before
+/// any returns.
+inline half stabilityWeight(texture2d<half, access::read> previous, texture2d<half, access::read> next,
+                            threadgroup half4* tilePrevious, threadgroup half4* tileNext, threadgroup half2* window,
+                            uint2 lid, uint2 tgid, constant StabilityBlendParams& params) {
     const int width = int(previous.get_width());
     const int height = int(previous.get_height());
     const int2 origin = int2(tgid * uint2(MG_BLEND_TILE_WIDTH, MG_BLEND_TILE_HEIGHT)) - kStabilityHalo;
@@ -25,33 +29,55 @@ inline half largestChange(texture2d<half, access::read> previous, texture2d<half
     for (uint i = linear; i < uint(kStabilityTileWidth * kStabilityTileHeight); i += threads) {
         const int2 p = clamp(origin + int2(int(i) % kStabilityTileWidth, int(i) / kStabilityTileWidth),
                              int2(0), int2(width - 1, height - 1));
-        const half3 delta = abs(next.read(uint2(p)).rgb - previous.read(uint2(p)).rgb);
-        change[i] = max(max(delta.r, delta.g), delta.b);
+        tilePrevious[i] = previous.read(uint2(p));
+        tileNext[i] = next.read(uint2(p));
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    const int cx = int(lid.x) + kStabilityHalo;
-    const int cy = int(lid.y) + kStabilityHalo;
-    half largest = 0.0h;
-    for (int dy = -kStabilityHalo; dy <= kStabilityHalo; ++dy) {
-        for (int dx = -kStabilityHalo; dx <= kStabilityHalo; ++dx) {
-            largest = max(largest, change[(cy + dy) * kStabilityTileWidth + cx + dx]);
+    // The change between the captures at a pixel is the largest difference of any channel, and its contrast the largest
+    // difference of any channel to the pixel beside or above it, in either capture.
+    for (uint i = linear; i < uint(kStabilityWindowWidth * kStabilityWindowHeight); i += threads) {
+        const int center = (int(i) / kStabilityWindowWidth + 1) * kStabilityTileWidth + int(i) % kStabilityWindowWidth + 1;
+        const half3 a = tilePrevious[center].rgb;
+        const half3 b = tileNext[center].rgb;
+        const half3 delta = abs(b - a);
+        half contrast = 0.0h;
+        const int neighbours[4] = { 1, -1, kStabilityTileWidth, -kStabilityTileWidth };
+        for (int k = 0; k < 4; ++k) {
+            const half3 da = abs(tilePrevious[center + neighbours[k]].rgb - a);
+            const half3 db = abs(tileNext[center + neighbours[k]].rgb - b);
+            const half3 largest = max(da, db);
+            contrast = max(contrast, max(largest.r, max(largest.g, largest.b)));
+        }
+        window[i] = half2(max(delta.r, max(delta.g, delta.b)), contrast);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const int cx = int(lid.x) + 2;
+    const int cy = int(lid.y) + 2;
+    half largestChange = 0.0h, nearestChange = 0.0h, largestContrast = 0.0h;
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            const half2 value = window[(cy + dy) * kStabilityWindowWidth + cx + dx];
+            largestChange = max(largestChange, value.x);
+            largestContrast = max(largestContrast, value.y);
+            if (abs(dx) <= 1 && abs(dy) <= 1) nearestChange = max(nearestChange, value.x);
         }
     }
-    return largest;
+    // Where the captures are the same around the pixel they are the picture, whatever the contrast.
+    if (nearestChange <= 1.0h / 255.0h) return 1.0h;
+    const half remaining = saturate(1.0h - (largestChange / (largestContrast + half(params.noiseFloor))) / half(params.motion));
+    return remaining * remaining;
 }
 
-/// The image shown: the generated one, and the captures' own mix at its phase in the share that `largest` leaves.
-///
-/// The share of the captures' mix falls linearly from all of it where nothing changed to none where the change reaches
-/// `tolerance`. Where nothing changed the capture is taken as it is, not through a mix that could round it.
-inline half3 stabilized(half3 image, half3 previous, half3 next, half largest, constant StabilityBlendParams& params) {
-    const half weight = saturate(1.0h - largest / half(params.tolerance));
+/// The image shown: the generated one, and the captures' own mix at its phase in the share that `weight` gives it. Where
+/// that is all of it the capture is taken as it is, not through a mix that could round it.
+inline half3 stabilized(half3 image, half3 previous, half3 next, half weight, constant StabilityBlendParams& params) {
     const half3 captured = mix(previous, next, half(params.phase));
     return clampColor(weight >= 1.0h ? captured : mix(image, captured, weight));
 }
 
-/// MetalFX's image, blended with the captures it came from, by how little they changed around each pixel.
+/// MetalFX's image, blended with the captures it came from.
 ///
 /// The Neural Engine's images are lossy where nothing moved: its model smooths what it is given, and the 4:2:0 it
 /// works in drops the colour of thin coloured text. Scored against the real in-between frame, an interface drawn
@@ -59,7 +85,7 @@ inline half3 stabilized(half3 image, half3 previous, half3 next, half largest, c
 /// capture. Where the captures are the same, the image between them is that same; where they differ by little it lies
 /// between them, and the captures' own mix at this phase is closer than a re-drawn image; where they differ by a lot,
 /// motion is what the engine is for, and its image stands untouched. MetalFX's images are close to the captures where
-/// nothing moved already, and it takes the same rule with a smaller tolerance, for what it gains at an interface.
+/// nothing moved already, and it takes the same rule with less motion allowed, for what it gains at an interface.
 ///
 /// On six 720p clips, with and without an interface drawn over them, 1, 2 and 4 captures apart, the Neural Engine's
 /// image went from 32.7, 32.0 and 31.2 dB to 40.5, 35.7 and 32.9 without the interface, and from 28.3, 28.0 and 27.7 to
@@ -75,11 +101,14 @@ kernel void blendTowardCaptures(
     uint2 lid [[thread_position_in_threadgroup]],
     uint2 tgid [[threadgroup_position_in_grid]]
 ) {
-    threadgroup half change[kStabilityTileWidth * kStabilityTileHeight];
-    const half largest = largestChange(previous, next, change, lid, tgid);
+    threadgroup half4 tilePrevious[kStabilityTileWidth * kStabilityTileHeight];
+    threadgroup half4 tileNext[kStabilityTileWidth * kStabilityTileHeight];
+    threadgroup half2 window[kStabilityWindowWidth * kStabilityWindowHeight];
+    const half weight = stabilityWeight(previous, next, tilePrevious, tileNext, window, lid, tgid, params);
     if (gid.x >= generated.get_width() || gid.y >= generated.get_height()) return;
 
-    output.write(half4(stabilized(generated.read(gid).rgb, previous.read(gid).rgb, next.read(gid).rgb, largest, params), 1.0h), gid);
+    const int center = (int(lid.y) + kStabilityHalo) * kStabilityTileWidth + int(lid.x) + kStabilityHalo;
+    output.write(half4(stabilized(generated.read(gid).rgb, tilePrevious[center].rgb, tileNext[center].rgb, weight, params), 1.0h), gid);
 }
 
 /// Catmull-Rom resampling in five bilinear fetches: the two taps of each of the four rows and columns around
@@ -128,15 +157,18 @@ kernel void blendTowardCapturesFromYUV(
     uint2 lid [[thread_position_in_threadgroup]],
     uint2 tgid [[threadgroup_position_in_grid]]
 ) {
-    threadgroup half change[kStabilityTileWidth * kStabilityTileHeight];
-    const half largest = largestChange(previous, next, change, lid, tgid);
+    threadgroup half4 tilePrevious[kStabilityTileWidth * kStabilityTileHeight];
+    threadgroup half4 tileNext[kStabilityTileWidth * kStabilityTileHeight];
+    threadgroup half2 window[kStabilityWindowWidth * kStabilityWindowHeight];
+    const half weight = stabilityWeight(previous, next, tilePrevious, tileNext, window, lid, tgid, params);
     if (gid.x >= luma.get_width() || gid.y >= luma.get_height()) return;
 
     // The chroma plane is half the size: sampled bilinearly rather than replicated, which would show as blocks of four.
     constexpr sampler linearSampler(filter::linear, address::clamp_to_edge, coord::normalized);
     const float2 uv = (float2(gid) + 0.5f) / float2(luma.get_width(), luma.get_height());
     const half3 image = yuvToRgb(luma.read(gid).r, half2(chroma.sample(linearSampler, uv).rg));
-    output.write(half4(stabilized(image, previous.read(gid).rgb, next.read(gid).rgb, largest, params), 1.0h), gid);
+    const int center = (int(lid.y) + kStabilityHalo) * kStabilityTileWidth + int(lid.x) + kStabilityHalo;
+    output.write(half4(stabilized(image, tilePrevious[center].rgb, tileNext[center].rgb, weight, params), 1.0h), gid);
 }
 
 /// The same for planes of another size than the captures: the Neural Engine works at what it takes, and a capture it does not
@@ -155,13 +187,16 @@ kernel void blendTowardCapturesFromYUVResampled(
     uint2 lid [[thread_position_in_threadgroup]],
     uint2 tgid [[threadgroup_position_in_grid]]
 ) {
-    threadgroup half change[kStabilityTileWidth * kStabilityTileHeight];
-    const half largest = largestChange(previous, next, change, lid, tgid);
+    threadgroup half4 tilePrevious[kStabilityTileWidth * kStabilityTileHeight];
+    threadgroup half4 tileNext[kStabilityTileWidth * kStabilityTileHeight];
+    threadgroup half2 window[kStabilityWindowWidth * kStabilityWindowHeight];
+    const half weight = stabilityWeight(previous, next, tilePrevious, tileNext, window, lid, tgid, params);
     if (gid.x >= previous.get_width() || gid.y >= previous.get_height()) return;
 
     constexpr sampler linearSampler(filter::linear, address::clamp_to_edge, coord::normalized);
     const float2 uv = (float2(gid) + 0.5f) / float2(previous.get_width(), previous.get_height());
     const half y = half(sampleCatmullRom(luma, linearSampler, uv, float2(luma.get_width(), luma.get_height())).x);
     const half3 image = yuvToRgb(y, half2(chroma.sample(linearSampler, uv).rg));
-    output.write(half4(stabilized(image, previous.read(gid).rgb, next.read(gid).rgb, largest, params), 1.0h), gid);
+    const int center = (int(lid.y) + kStabilityHalo) * kStabilityTileWidth + int(lid.x) + kStabilityHalo;
+    output.write(half4(stabilized(image, tilePrevious[center].rgb, tileNext[center].rgb, weight, params), 1.0h), gid);
 }

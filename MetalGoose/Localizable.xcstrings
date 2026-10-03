@@ -86,6 +86,9 @@
         }
       }
     },
+    "Display-limited" : {
+
+    },
     "Download & Install" : {
       "comment" : "Update button"
     },

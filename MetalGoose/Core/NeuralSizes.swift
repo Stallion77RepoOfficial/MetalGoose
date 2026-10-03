@@ -22,7 +22,7 @@ import Foundation
 /// pipeline holds, only the session the Neural Engine runs them through.
 enum NeuralSizes {
 
-    struct Size: Equatable, Sendable {
+    struct Size: Equatable, Hashable, Sendable {
         let width: Int
         let height: Int
         var pixels: Int { width * height }
@@ -36,6 +36,20 @@ enum NeuralSizes {
 
     /// The processor takes nothing smaller on either side.
     static let minimumDimension = 64
+
+    /// Whether the processor takes frames of this size. What it reports — 1920 px on a side and 2,073,600 pixels — is not the
+    /// whole of it: it starts a session for 1874x1106 (2.07 MP) and then answers every call with "Processor is not
+    /// initialized", where 1920x1080 and 1708x1016 work. Over 196 sizes from 1.2 to 2.16 MP, with the sides rounded up to a
+    /// multiple of 64 and of 32 (the grain a model is compiled at) the area must not pass the limit, or the size must be the
+    /// largest one, 1920x1080, exactly; no size that rule takes was refused, and two it does not take were (1808x1102 and
+    /// 1872x1072). The rule leaves a session that is tried with a call before it serves to find those two.
+    static func accepts(width: Int, height: Int, limits: Limits) -> Bool {
+        guard width >= minimumDimension, height >= minimumDimension, width % 2 == 0, height % 2 == 0,
+              max(width, height) <= limits.maximumDimension, width * height <= limits.maximumPixels else { return false }
+        if width * height == limits.maximumPixels { return true }
+        let padded = ((width + 63) / 64 * 64) * ((height + 31) / 32 * 32)
+        return padded <= limits.maximumPixels
+    }
 
     /// The pixels the rungs below the finest are given: the largest size before the call gets dearer, and one more. A
     /// rung is offered only if it has clearly fewer pixels than the one above it, and its longer side is at least
@@ -53,14 +67,19 @@ enum NeuralSizes {
         guard frameWidth >= minimumDimension, frameHeight >= minimumDimension,
               limits.maximumDimension > 0, limits.maximumPixels > 0 else { return [] }
 
-        let share = min(1.0,
+        var share = min(1.0,
                         Double(limits.maximumDimension) / Double(max(frameWidth, frameHeight)),
                         (Double(limits.maximumPixels) / Double(frameWidth * frameHeight)).squareRoot())
         func even(_ value: Double) -> Int { Int(value.rounded(.down)) & ~1 }
 
-        let finest = Size(width: even(Double(frameWidth) * share), height: even(Double(frameHeight) * share))
-        guard finest.width >= minimumDimension, finest.height >= minimumDimension,
-              max(finest.width, finest.height) <= limits.maximumDimension, finest.pixels <= limits.maximumPixels else { return [] }
+        // The largest size, in the frame's proportions, that the processor takes: a frame that is taken is kept as it is,
+        // and one that is not is shrunk a little at a time until it is.
+        var finest = Size(width: even(Double(frameWidth) * share), height: even(Double(frameHeight) * share))
+        for _ in 0..<80 where !accepts(width: finest.width, height: finest.height, limits: limits) {
+            share *= 0.99
+            finest = Size(width: even(Double(frameWidth) * share), height: even(Double(frameHeight) * share))
+        }
+        guard accepts(width: finest.width, height: finest.height, limits: limits) else { return [] }
 
         var rungs = [finest]
         for budget in budgets where Double(budget) <= Double(rungs[rungs.count - 1].pixels) * smallestShare {

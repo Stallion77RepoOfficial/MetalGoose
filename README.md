@@ -40,9 +40,11 @@ the GPU where it cannot, and a single choice is made for every capture so that t
   app: the GPU converts the capture to 4:2:0 once, and turns an image into colour only as it is shown. It works at the
   largest size it takes (1920 px on a side, 2.07 MP): a larger capture is shrunk for it and its images are enlarged as
   they are blended with the captures, so a 1440p or 4K window is covered too. Where the capture rate leaves no time for
-  that size, it works at a coarser one — 1280×720 or 960×540 — rather than giving way. A size it has not been
-  used at takes a second or two to prepare, the first time; the session that is serving goes on until the new one has
-  started, and MetalFX stands in meanwhile.
+  that size, it works at a coarser one — 1280×720 or 960×540 — rather than giving way; so it does where the captures come
+  unevenly, as a 60 fps source does on a 120 Hz panel (a tenth of them arrive 8 ms after the one before), since a pair
+  that arrives while the last is still being made would go by without its images. A size it has not been used at takes
+  a second or two to prepare, the first time; the session that is serving goes on until the new one has started, and
+  MetalFX stands in meanwhile.
 - **MetalFX** — interpolation with the media engine's motion field, for 2x where the Neural Engine cannot be used or
   cannot keep up. It is the more faithful of the two, makes the midpoint only, and uses GPU time.
 - Where neither can make its images before the next capture is due, nothing is held back: the captures are shown as
@@ -50,9 +52,14 @@ the GPU where it cannot, and a single choice is made for every capture so that t
 - **Multiplier** — images presented per captured frame: 2x (the midpoint of each pair) or 4x (its quarters, on the
   Neural Engine). A multiplier the panel cannot show is not made (4x at 30 captures a second on a 60 Hz panel is 2x),
   and 4x falls back to 2x where the quarters do not fit the time between captures.
-- **Interface and text stay as captured** — where the two captures barely differ (an interface, text, a still
-  background) they are blended back into the generated image, which keeps what did not move: the Neural Engine's
-  images are lossy there, and MetalFX's gain a little.
+- **Interface and text stay as captured** — where the content did not move between the two captures (an interface,
+  text, a still background) they are blended back into the generated image, which keeps what did not move: the Neural
+  Engine's images are lossy there, and MetalFX's gain a little. What counts is how much the captures differ compared with
+  how much there is to differ, which is about how far the content moved, so a low contrast texture that is moving keeps
+  the engine's image and is not cross-faded.
+- **When there is no room, nothing is made** — where the panel shows fewer than about two images in a capture interval
+  (60 captures a second on a 60 Hz panel, 120 on 120), a generated image would never be seen, and the captures are shown
+  as they arrive with nothing held back. The HUD says Display-limited.
 
 Interpolation holds the newest capture back by most of a capture interval plus the time the first generated image
 takes to make (some 40 to 50 ms at 30 captures a second). That delay is eased where it falls, so that a change of

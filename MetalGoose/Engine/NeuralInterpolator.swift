@@ -84,6 +84,15 @@ final class NeuralInterpolator: @unchecked Sendable {
         ladder(frameWidth: width, frameHeight: height).first == NeuralSizes.Size(width: width, height: height)
     }
 
+    /// Two captures that followed one another, and what the schedule behind them looks like.
+    private struct Pair {
+        let previous: (frame: YUVFrame, timestamp: CFTimeInterval)
+        let current: (frame: YUVFrame, timestamp: CFTimeInterval)
+        let steps: Int
+        /// How far behind real time the frame clock runs, as the capture path expects it to.
+        let delay: CFTimeInterval
+    }
+
     // MARK: A session at one size
 
     /// Everything that belongs to a session at one size: the buffers it works in, the processor, and what has been seen of
@@ -111,6 +120,9 @@ final class NeuralInterpolator: @unchecked Sendable {
         var busy = false
         var isRetired = false
 
+        /// The newest pair that arrived while a call was on the engine, made when the call is done if it can still be shown in time.
+        var pending: Pair?
+
         /// How long a call takes, for the midpoint alone and for all three quarters.
         let midpointTimes = OSAllocatedUnfairLock(initialState: IntervalFilter())
         let quarterTimes = OSAllocatedUnfairLock(initialState: IntervalFilter())
@@ -121,6 +133,9 @@ final class NeuralInterpolator: @unchecked Sendable {
             self.inputs = inputs
             self.outputs = outputs
         }
+
+        /// Two captures' buffers and one for the image, for the call that tries the session.
+        var probeFrames: (previous: YUVFrame, current: YUVFrame, destination: YUVFrame) { (inputs[0], inputs[1], outputs[0]) }
 
         func takeInput() -> YUVFrame {
             let index = nextInput.withLock { value -> Int in
@@ -146,8 +161,24 @@ final class NeuralInterpolator: @unchecked Sendable {
 
     private let failure = OSAllocatedUnfairLock(initialState: false)
 
+    /// Sizes whose session started and then refused a call, until when. The processor reports the largest size it takes, but
+    /// takes only the shapes its network was built for: 1874x1106 starts a session and fails every call with "Processor is not
+    /// initialized", where 1920x1080 and 1708x1016 do not. A session is therefore tried with one call before it serves; a size
+    /// it refuses is not asked for again, and one that failed for another reason is left alone for a while.
+    private let rejected = OSAllocatedUnfairLock(initialState: [NeuralSizes.Size: CFTimeInterval]())
+    private static let retryAfterFailedTrial: CFTimeInterval = 30
+
     /// Where sessions are ended, off to the side: ending one can take seconds.
     private static let retiring = DispatchQueue(label: "com.metalgoose.neural.retire", qos: .utility)
+
+    /// Ends a session that no call is on, a little after its last call came back: VideoToolbox goes on with the call's own
+    /// bookkeeping for a moment after it has run its completion, and a session ended under that is what brought the process
+    /// down once (the bookkeeping read state that was gone). Nothing waits for it, and a model held for a third of a second
+    /// longer costs nothing.
+    private static func end(_ processor: VTFrameProcessor) {
+        nonisolated(unsafe) let retired = processor
+        retiring.asyncAfter(deadline: .now() + 0.3) { retired.endSession() }
+    }
 
     init(gpu: GPUContext, errors: ErrorLog, latency: GenerationLatency, images: GeneratedImages) {
         self.gpu = gpu
@@ -158,6 +189,11 @@ final class NeuralInterpolator: @unchecked Sendable {
 
     /// The processor failed at run time, and the caller should use another engine from now on.
     var hasFailed: Bool { failure.withLock { $0 } }
+
+    /// Whether a session at this size was found to refuse calls.
+    func isRejected(_ size: NeuralSizes.Size) -> Bool {
+        rejected.withLock { state in state[size].map { CACurrentMediaTime() < $0 } ?? false }
+    }
 
     /// The size of the session that is serving, if one is.
     var activeSize: NeuralSizes.Size? { published.withLockUnchecked { $0.active?.size } }
@@ -178,14 +214,21 @@ final class NeuralInterpolator: @unchecked Sendable {
         }
     }
 
-    /// Lets go of a session, and ends its processor off to the side.
+    /// Lets go of a session. Its processor is ended off to the side once no call is on it (`endIfIdle`).
     private func retire(_ rig: Rig?) {
         guard let rig else { return }
         rig.isRetired = true
-        guard let processor = rig.processor else { return }
+        endIfIdle(rig)
+    }
+
+    /// Ends the processor of a session that has been let go of, if no call is on it; the call's completion does it otherwise.
+    /// A call is made on this object's queue, as this is, so a processor is never called after it has been ended: calling
+    /// one that was ended reads state that is gone and brings the process down (a `process` that was still to start on a
+    /// task when its session was replaced did exactly that).
+    private func endIfIdle(_ rig: Rig) {
+        guard rig.isRetired, !rig.busy, let processor = rig.processor else { return }
         rig.processor = nil
-        nonisolated(unsafe) let retired = processor
-        Self.retiring.async { retired.endSession() }
+        Self.end(processor)
     }
 
     // MARK: - Capture side
@@ -234,18 +277,40 @@ final class NeuralInterpolator: @unchecked Sendable {
     /// it, and interpolates between them, into `steps` steps: 2 makes the midpoint, 4 its quarters. A pair is two captures that
     /// follow one another: where the session was not given the one before — it was not the engine then, or it was still
     /// being converted — this capture only becomes the one the next is paired with.
-    func frameConverted(_ frame: YUVFrame, timestamp: CFTimeInterval, previous partner: CFTimeInterval?, steps: Int) {
+    ///
+    /// Only one pair is worked on at a time. One that arrives while the Neural Engine is on the last waits, the newest
+    /// alone, for the call to finish, and is made then if its first image can still be there when the render clock wants it
+    /// (`delay`, how far behind real time that clock runs): captures do not arrive evenly, and a pair that follows its
+    /// predecessor closely is wanted later after its own arrival than one a whole interval long. Otherwise it has missed its
+    /// moment, and the screen stays on a capture.
+    func frameConverted(_ frame: YUVFrame, timestamp: CFTimeInterval, previous partner: CFTimeInterval?, steps: Int,
+                        delay: CFTimeInterval) {
         queue.async { [self] in
             guard let rig = active, rig.id == frame.session else { return }
             defer { rig.previous = (frame, timestamp) }
-            // Only one pair is worked on at a time. A pair that arrives while the Neural Engine is still on the last has
-            // missed its moment: the render clock will have moved on before it finished.
-            guard let processor = rig.processor, let previous = rig.previous, !rig.busy,
-                  let partner, previous.timestamp == partner else { return }
-            rig.busy = true
-            submit(rig: rig, processor: processor, previous: previous, current: (frame, timestamp),
-                   phases: Self.phases(steps: steps))
+            guard rig.processor != nil, let previous = rig.previous, let partner, previous.timestamp == partner else { return }
+            let pair = Pair(previous: previous, current: (frame, timestamp), steps: steps, delay: delay)
+            if rig.busy {
+                rig.pending = pair
+            } else {
+                start(pair, on: rig, waited: false)
+            }
         }
+    }
+
+    /// Whether the first image of a pair that has been waiting for the engine can still be made before it is wanted.
+    private func isStillWanted(_ pair: Pair, on rig: Rig) -> Bool {
+        let call = pair.steps >= InterpolationSteps.quarters ? rig.quarterTimes : rig.midpointTimes
+        let wanted = FramePlanner.firstImageWanted(previous: pair.previous.timestamp, next: pair.current.timestamp,
+                                                   delay: pair.delay, steps: pair.steps)
+        return CACurrentMediaTime() + call.withLock { $0.value } <= wanted
+    }
+
+    private func start(_ pair: Pair, on rig: Rig, waited: Bool) {
+        guard let processor = rig.processor else { return }
+        rig.busy = true
+        submit(rig: rig, processor: processor, previous: pair.previous, current: pair.current,
+               phases: Self.phases(steps: pair.steps), waited: waited)
     }
 
     // MARK: - Interpolating
@@ -259,7 +324,7 @@ final class NeuralInterpolator: @unchecked Sendable {
     private func submit(rig: Rig, processor: VTFrameProcessor,
                         previous: (frame: YUVFrame, timestamp: CFTimeInterval),
                         current: (frame: YUVFrame, timestamp: CFTimeInterval),
-                        phases: [Double]) {
+                        phases: [Double], waited: Bool) {
         func frame(_ yuv: YUVFrame, _ seconds: CFTimeInterval) -> VTFrameProcessorFrame? {
             VTFrameProcessorFrame(buffer: yuv.buffer, presentationTimeStamp: CMTime(seconds: seconds, preferredTimescale: 1_000_000))
         }
@@ -285,20 +350,20 @@ final class NeuralInterpolator: @unchecked Sendable {
             return
         }
 
-        nonisolated(unsafe) let processor = processor
         nonisolated(unsafe) let request = parameters
         let pair = (previous: previous.timestamp, next: current.timestamp)
         let images = made
-        Task { [self] in
-            let started = CACurrentMediaTime()
-            let failed: Bool
-            do { try await processor.process(parameters: request); failed = false } catch { failed = true }
+        let started = CACurrentMediaTime()
+        processor.process(parameters: request) { [self] _, error in
             let spent = CACurrentMediaTime() - started
             queue.async { [self] in
                 rig.busy = false
-                // A session that was replaced while it was on a call is not a failure of the engine.
-                guard !rig.isRetired else { return }
-                if failed {
+                // A session that was replaced while it was on a call is not a failure of the engine, and is ended now.
+                guard !rig.isRetired else {
+                    endIfIdle(rig)
+                    return
+                }
+                if error != nil {
                     // Not worth an alert: the capture path switches to MetalFX, which is slower on the GPU
                     // but always there. What would be worth knowing is that this happened.
                     failure.withLock { $0 = true }
@@ -307,19 +372,25 @@ final class NeuralInterpolator: @unchecked Sendable {
                 (images.count > 1 ? rig.quarterTimes : rig.midpointTimes).withLock {
                     $0.add(spent, window: EngineShared.measurementWindow, elapsed: duration)
                 }
-                publish(images, previous: pair.previous, next: pair.next)
+                publish(images, previous: pair.previous, next: pair.next, measuresLatency: !waited)
+                if let next = rig.pending {
+                    rig.pending = nil
+                    if isStillWanted(next, on: rig) { start(next, on: rig, waited: true) }
+                }
             }
         }
     }
 
     /// Makes the images of a pair available to the render thread: they are complete, and are shown from the planes the
-    /// processor wrote, so the GPU is not asked for anything until one of them is shown.
-    private func publish(_ made: [Image], previous: CFTimeInterval, next: CFTimeInterval) {
+    /// processor wrote, so the GPU is not asked for anything until one of them is shown. How long they took to arrive sets
+    /// how far behind the schedule runs, except for a pair that waited for the engine: that one was only taken because it was
+    /// still in time, and must not move the schedule for the pairs that were not kept waiting.
+    private func publish(_ made: [Image], previous: CFTimeInterval, next: CFTimeInterval, measuresLatency: Bool) {
         images.publish(made.map {
             GeneratedImages.Image(previous: previous, next: next, phase: $0.phase,
                                   source: .planes(luma: $0.destination.luma, chroma: $0.destination.chroma), engine: .neuralEngine)
         })
-        latency.record(previous: previous, next: next)
+        if measuresLatency { latency.record(previous: previous, next: next) }
     }
 
     // MARK: - Set-up
@@ -369,10 +440,23 @@ final class NeuralInterpolator: @unchecked Sendable {
                 return
             }
             nonisolated(unsafe) let started = session
+            let result = Self.tryCall(on: session, with: rig.probeFrames)
             queue.async { [self] in
+                guard result.trial == .accepted else {
+                    // Not a failure of the engine: this is a size it does not take, and the others may be. Asked for again
+                    // if the size is wanted after all (a session that failed for another reason may well work later).
+                    rejected.withLock {
+                        $0[size] = result.trial == .refused ? .infinity : CACurrentMediaTime() + Self.retryAfterFailedTrial
+                    }
+                    published.withLockUnchecked { if $0.wanted == size { $0.wanted = nil } }
+                    if building === rig { building = nil }
+                    retire(rig)
+                    if result.returned { Self.end(started) }
+                    return
+                }
                 // Replaced, or the size is not the one wanted any more, while it was starting.
                 guard building === rig, published.withLockUnchecked({ $0.wanted }) == size else {
-                    Self.retiring.async { started.endSession() }
+                    Self.end(started)
                     return
                 }
                 rig.processor = started
@@ -382,6 +466,57 @@ final class NeuralInterpolator: @unchecked Sendable {
                 published.withLockUnchecked { $0.active = rig }
                 retire(before)
             }
+        }
+    }
+
+    private enum Trial { case accepted, refused, failed }
+
+    /// How a trial call went, and whether it came back. One that did not is ended with its session when it does.
+    private struct TrialResult {
+        let trial: Trial
+        let returned: Bool
+    }
+
+    private struct TrialState {
+        var trial = Trial.accepted
+        var returned = false
+        var abandoned = false
+    }
+
+    /// One call for the midpoint of two blank frames, to see whether the session takes calls at all. A call that has not come
+    /// back in five seconds is given up on, and its session is not ended until it has: ending one under a call that is still
+    /// to finish is what a session may not have done to it.
+    private static func tryCall(on session: VTFrameProcessor,
+                                with frames: (previous: YUVFrame, current: YUVFrame, destination: YUVFrame)) -> TrialResult {
+        func frame(_ yuv: YUVFrame, _ seconds: Double) -> VTFrameProcessorFrame? {
+            VTFrameProcessorFrame(buffer: yuv.buffer, presentationTimeStamp: CMTime(seconds: seconds, preferredTimescale: 1_000_000))
+        }
+        guard let reference = frame(frames.previous, 0), let source = frame(frames.current, 1), let destination = frame(frames.destination, 0.5),
+              let parameters = VTLowLatencyFrameInterpolationParameters(sourceFrame: source, previousFrame: reference,
+                                                                       interpolationPhase: [0.5], destinationFrames: [destination]) else {
+            return TrialResult(trial: .failed, returned: true)
+        }
+        let finished = DispatchSemaphore(value: 0)
+        let state = OSAllocatedUnfairLock(initialState: TrialState())
+        nonisolated(unsafe) let request = parameters
+        nonisolated(unsafe) let processor = session
+        processor.process(parameters: request) { _, error in
+            let endsSession = state.withLock { value -> Bool in
+                value.returned = true
+                if let error {
+                    // -19730, "Processor is not initialized": what a size it does not take answers, at once, to every call.
+                    let code = (error as NSError)
+                    value.trial = code.domain == VTFrameProcessorErrorDomain && code.code == -19730 ? .refused : .failed
+                }
+                return value.abandoned
+            }
+            if endsSession { end(processor) }
+            finished.signal()
+        }
+        if finished.wait(timeout: .now() + 5) == .success { return TrialResult(trial: state.withLock { $0.trial }, returned: true) }
+        return state.withLock { value in
+            if !value.returned { value.abandoned = true }
+            return value.returned ? TrialResult(trial: value.trial, returned: true) : TrialResult(trial: .failed, returned: false)
         }
     }
 

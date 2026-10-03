@@ -100,6 +100,13 @@ enum FramePlanner {
         (1 - firstImageStart(steps: steps)) * captureInterval + generationLatency
     }
 
+    /// When the first image of a pair is first wanted on the screen: when the clock, `delay` behind real time, is
+    /// `firstImageStart` of the way from `previous` to `next`. For a pair a capture interval long it is the delay's generation
+    /// latency after `next` arrived; for a pair shorter than the interval, later than that, and for a longer one, sooner.
+    static func firstImageWanted(previous: CFTimeInterval, next: CFTimeInterval, delay: CFTimeInterval, steps: Int) -> CFTimeInterval {
+        previous + firstImageStart(steps: steps) * (next - previous) + delay
+    }
+
     private static func interpolate<F: TimedFrame>(_ frames: [F], _ input: PlanningInput) -> PresentationPlan {
         let steps = InterpolationSteps.steps(for: input.multiplier)
         let targetTime = input.sampleTime - input.delay

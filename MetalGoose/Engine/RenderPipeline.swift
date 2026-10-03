@@ -86,7 +86,7 @@ final class RenderPipeline: @unchecked Sendable {
         let previous: MTLTexture
         let next: MTLTexture
         let phase: Double
-        let tolerance: Float
+        let motion: Float
     }
 
     func render(into drawable: CAMetalDrawable, displayRate: DisplayRate) {
@@ -133,7 +133,7 @@ final class RenderPipeline: @unchecked Sendable {
             shown = texture
         case .generated(let blend):
             guard let blended = stability.blend(blend.image, previous: blend.previous, next: blend.next, phase: blend.phase,
-                                                tolerance: blend.tolerance, commandBuffer: commandBuffer) else {
+                                                motion: blend.motion, commandBuffer: commandBuffer) else {
                 commandBuffer.commit()
                 return
             }
@@ -215,7 +215,7 @@ final class RenderPipeline: @unchecked Sendable {
                 // arrived, so that is the honest age to report — and it makes the two engines directly comparable.
                 // It is shown blended with the captures it sits between, as the engine that made it is trusted.
                 let blend = Blend(image: made.source, previous: frames[previous].texture, next: frames[next].texture, phase: phase,
-                                  tolerance: StabilityBlend.tolerance(for: made.engine))
+                                  motion: StabilityBlend.motion(for: made.engine))
                 return Content(image: .interpolated(previous: earlier, next: later, phase: phase),
                                picture: .generated(blend), sourceTimestamp: later, isGenerated: true)
             }

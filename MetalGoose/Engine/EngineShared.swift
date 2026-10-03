@@ -16,6 +16,9 @@ final class EngineShared: @unchecked Sendable {
     /// thread for every frame — the frame schedule is built on it — so it cannot be a bare property.
     let captureInterval = OSAllocatedUnfairLock(initialState: IntervalFilter())
 
+    /// How close together captures come (`IntervalSpread`): the engine has to keep up with the short intervals, not the average.
+    let captureSpread = OSAllocatedUnfairLock(initialState: IntervalSpread())
+
     /// The processing queue asks the render thread to drop what it holds. The render thread does it at the top of its
     /// next frame, so a texture is never created on one thread and released on another mid-encode.
     let renderResetRequested = OSAllocatedUnfairLock(initialState: false)
