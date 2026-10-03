@@ -115,6 +115,13 @@ cd MetalGoose
 open MetalGoose.xcodeproj
 ```
 
+The engine's decisions that need no Metal or window server — the frame schedule, the engine choice, the Neural Engine's
+sizes, the stability blend's rule, where the pointer is held — are built on their own by `LogicTests/Package.swift`,
+which links the app's sources in, with tests that run on macOS or Linux:
+```bash
+swift test --package-path LogicTests
+```
+
 ## Usage
 
 1. Launch MetalGoose and grant Screen Recording access (and Accessibility while Capture Cursor is on).
@@ -133,6 +140,16 @@ open MetalGoose.xcodeproj
 
 Both are global and outlive the main window, so closing it with `⌘W` leaves the
 overlay running and `⌘⇧T` still stops it.
+
+### The Pointer (Capture Cursor)
+
+The system cursor stays inside the captured window, under the overlay, and moves there as it always does; the overlay
+draws the pointer where that spot appears in the magnified image. Every app reads the same position however it reads
+it — an event's location, the deltas it adds up, or the cursor it polls — so a click lands where the pointer is drawn.
+The pointer crosses the overlay in the time it crosses the window: in Fullscreen or at a Scale Factor above 1.0x it
+moves faster across the screen, as it would in the game at that size; at 1.0x it is exactly the system's pointer. The
+event tap that holds it in the window runs on a thread of its own, so the game's mouse input never waits for
+MetalGoose's interface.
 
 ## Error Codes
 

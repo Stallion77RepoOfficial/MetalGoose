@@ -102,8 +102,10 @@ final class OverlayWindowManager {
         targetFrame = configuration.windowFrame
 
         let frame = outputFrame(forWindow: configuration.windowFrame, on: configuration.screen)
+        // `frame` is in global coordinates. Given a screen, the window would take it as relative to that screen's origin
+        // and open off to the side on any screen but the primary one, until the first refresh moved it.
         let window = NonActivatingWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered,
-                                         defer: false, screen: configuration.screen)
+                                         defer: false, screen: nil)
         window.isReleasedWhenClosed = false
         window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)) + 1)
         window.backgroundColor = .clear
@@ -237,12 +239,11 @@ final class OverlayWindowManager {
             mouse.stopConstraining()
             return
         }
-        let displayBounds = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID)
-            .map(CGDisplayBounds) ?? .zero
+        let displays = ScreenGeometry.displayBounds
         if mouse.isConstraining {
-            mouse.update(sourceRect: cgFrame, displayBounds: displayBounds)
+            mouse.update(window: cgFrame, displays: displays)
         } else {
-            mouse.startConstraining(sourceRect: cgFrame, displayBounds: displayBounds)
+            mouse.startConstraining(window: cgFrame, displays: displays)
         }
     }
 
