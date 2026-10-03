@@ -40,4 +40,14 @@ jobs:
       - name: Probe the GPU
         if: always()
         run: |
-          MTL_DEBUG_LAYER=1 swift .github/probe/MetalProbe.swift 2>&1 | tail -40 || true
+          MTL_DEBUG_LAYER=1 swift .github/probe/MetalProbe.swift 2>&1 | grep PROBE || true
+      - name: VideoToolbox headers and test images
+        if: always()
+        run: |
+          headers="$(xcrun --show-sdk-path)/System/Library/Frameworks/VideoToolbox.framework/Headers"
+          ls "$headers" | grep -i -E "lowlatency|superres|frameprocessor" || true
+          for h in VTLowLatencySuperResolutionScalerConfiguration.h VTLowLatencySuperResolutionScalerParameters.h \
+                   VTLowLatencyFrameInterpolationConfiguration.h VTLowLatencyFrameInterpolationParameters.h VTFrameProcessor.h; do
+            echo "=== $h"; grep -v -E "^\s*$|^//|^\s*\*|^/\*" "$headers/$h" | head -120 || true
+          done
+          ls "/System/Library/Desktop Pictures" "/Library/Desktop Pictures" 2>/dev/null | head -60 || true
