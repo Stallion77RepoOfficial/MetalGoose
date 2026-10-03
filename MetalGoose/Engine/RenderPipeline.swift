@@ -20,6 +20,18 @@ final class RenderPipeline: @unchecked Sendable {
     /// How far behind the newest capture the schedule runs, as it is allowed to change.
     private var delay = DelayGovernor()
 
+    /// Whether the captures keep a beat of the display's refreshes, where on the refresh grid they and the display callbacks
+    /// fall, and the delay that was chosen from them last (`ScheduleAlignment`).
+    private var cadence = CaptureCadence()
+    private var callbackPhase = GridPhase()
+    private var capturePhase = GridPhase()
+    private var lastNoted: CFTimeInterval = 0
+    private var alignedDelay: CFTimeInterval?
+    /// The time between refreshes, from the link's own target times: the panel's nominal rate is a whole number, and 59.94 Hz
+    /// read as 60 would slide the grid a millisecond a second.
+    private var refreshInterval = IntervalFilter()
+    private var lastTarget: CFTimeInterval = 0
+
     private var spatialScaler: MTLFXSpatialScaler?
     private var upscaled: MTLTexture?
 
@@ -55,6 +67,13 @@ final class RenderPipeline: @unchecked Sendable {
         upscaled = nil
         stability.reset()
         delay.reset()
+        cadence.reset()
+        callbackPhase.reset()
+        capturePhase.reset()
+        lastNoted = 0
+        alignedDelay = nil
+        refreshInterval.reset()
+        lastTarget = 0
         lastPresented = nil
         requestRedraw()
         pacing.withLock { $0.reset() }
@@ -89,7 +108,15 @@ final class RenderPipeline: @unchecked Sendable {
         let motion: Float
     }
 
-    func render(into drawable: CAMetalDrawable, displayRate: DisplayRate) {
+    /// A capture as the schedule sees it: at the compositor's time for it.
+    private struct ScheduledCapture: TimedFrame {
+        let timestamp: CFTimeInterval
+        let isSceneCut: Bool
+    }
+
+    /// - Parameter targetTime: when the image this callback presents is to reach the screen, which is on the display's
+    ///   refresh grid.
+    func render(into drawable: CAMetalDrawable, displayRate: DisplayRate, targetTime: CFTimeInterval) {
         if shared.renderResetRequested.withLock({ requested -> Bool in
             defer { requested = false }
             return requested
@@ -104,27 +131,35 @@ final class RenderPipeline: @unchecked Sendable {
         // screen: that latency is the same for every image and drops out, where a clock that included it
         // would start every capture interval most of the way through.
         let now = CACurrentMediaTime()
+        if lastTarget > 0 { refreshInterval.add(targetTime - lastTarget, window: EngineShared.measurementWindow) }
+        lastTarget = targetTime
+        let refreshPeriod = refreshInterval.value > 0 ? refreshInterval.value
+            : displayRate.maximum > 0 ? 1 / Double(displayRate.maximum) : 0
+        note(frames, now: now, targetTime: targetTime, refreshPeriod: refreshPeriod)
+
+        // The schedule runs on the compositor's times for the captures, which are the content's own and on the display's
+        // grid; their arrivals wander by how long each took to be delivered and reached.
+        let timeline = frames.map { ScheduledCapture(timestamp: $0.presentationTime, isSceneCut: $0.isSceneCut) }
         let generation = config.generatesFrames ? shared.generation.withLock { $0 } : .nothing
-        let plan = FramePlanner.plan(frames, PlanningInput(
-            multiplier: generation.multiplier, sampleTime: now, delay: scheduleDelay(for: generation, now: now)))
+        let plan = FramePlanner.plan(timeline, PlanningInput(
+            multiplier: generation.multiplier, sampleTime: now,
+            delay: scheduleDelay(for: generation, frames: frames, now: now, refreshPeriod: refreshPeriod)))
 
         publishRates(now: now, displayRate: displayRate)
 
-        guard let planned = FramePlanner.image(of: plan, in: frames) else { return }
+        guard let planned = FramePlanner.image(of: plan, in: timeline) else { return }
         let redraw = redrawRequested.withLock { $0 }
-        guard planned != lastPresented || redraw,
-              let commandBuffer = gpu.makeCommandBuffer("MetalGoose present") else { return }
+        guard planned != lastPresented || redraw else { return }
 
         let content = realize(plan, frames: frames)
 
         // The planned image is not always the one that came out: a midpoint that has not been made yet —
         // the motion for the pair is still being measured — falls back to a capture. Remembering the
         // *plan* as shown would never try again once the image arrives, and presenting the fallback
-        // over and over would redraw what is already on screen, so only the realised image counts.
-        guard content.image != lastPresented || redraw else {
-            commandBuffer.commit()
-            return
-        }
+        // over and over would redraw what is already on screen, so only the realised image counts. The
+        // command buffer is made only now: a callback that waits for an image used to commit an empty one.
+        guard content.image != lastPresented || redraw,
+              let commandBuffer = gpu.makeCommandBuffer("MetalGoose present") else { return }
 
         // Only now, with the image known to be shown: a pass for one that is not would be spent for nothing.
         let shown: MTLTexture
@@ -174,24 +209,62 @@ final class RenderPipeline: @unchecked Sendable {
     // MARK: - Realising a plan
 
     /// How far behind the newest capture the schedule runs: most of a capture interval, plus how long the engine takes to
-    /// make the first image of a pair, eased where it falls (`DelayGovernor`). Nothing is held back where nothing is made.
-    private func scheduleDelay(for generation: GenerationChoice, now: CFTimeInterval) -> CFTimeInterval {
+    /// make the first image of a pair, eased where it falls (`DelayGovernor`). Where the captures keep a beat of the refreshes
+    /// it is chosen from where the callbacks' samples land (`ScheduleAlignment`), and otherwise for the worst place they
+    /// could. Nothing is held back where nothing is made.
+    private func scheduleDelay(for generation: GenerationChoice, frames: [FrameHistory], now: CFTimeInterval,
+                               refreshPeriod: CFTimeInterval) -> CFTimeInterval {
         guard generation.engine != nil else {
             delay.reset()
+            alignedDelay = nil
             return 0
         }
-        let needed = FramePlanner.interpolationDelay(captureInterval: shared.captureInterval.withLock { $0.value },
-                                                     generationLatency: generation.latency,
-                                                     steps: InterpolationSteps.steps(for: generation.multiplier))
+        let steps = InterpolationSteps.steps(for: generation.multiplier)
+        // The engines measure their latency from a capture's arrival; the schedule runs on the compositor's times, which
+        // are earlier by how long the capture took to be delivered.
+        let latency = generation.latency + Self.delivery(of: frames)
+        var needed = FramePlanner.interpolationDelay(captureInterval: shared.captureInterval.withLock { $0.value },
+                                                     generationLatency: latency, steps: steps)
+        if let beat = cadence.beat(refreshPeriod: refreshPeriod),
+           let callbacks = callbackPhase.offset(period: refreshPeriod),
+           let captures = capturePhase.offset(period: refreshPeriod),
+           let aligned = ScheduleAlignment.delay(captureInterval: beat, generationLatency: latency, steps: steps,
+                                                 phase: callbacks - captures, refreshPeriod: refreshPeriod,
+                                                 current: alignedDelay) {
+            alignedDelay = aligned
+            needed = aligned
+        } else {
+            alignedDelay = nil
+        }
         return delay.apply(needed, now: now)
+    }
+
+    /// Takes in what this callback adds to what the schedule knows: where on the refresh grid the callback fell, and the
+    /// beat and the place on the grid of the captures that have come in since the last. The grid is the target time's.
+    private func note(_ frames: [FrameHistory], now: CFTimeInterval, targetTime: CFTimeInterval, refreshPeriod: CFTimeInterval) {
+        guard refreshPeriod > 0 else { return }
+        callbackPhase.add(now - targetTime, period: refreshPeriod)
+        for frame in frames where frame.timestamp > lastNoted {
+            cadence.add(frame.presentationTime)
+            capturePhase.add(frame.presentationTime - targetTime, period: refreshPeriod)
+            lastNoted = frame.timestamp
+        }
+    }
+
+    /// How long after the compositor showed them the captures reached the pipeline, the median of those held.
+    private static func delivery(of frames: [FrameHistory]) -> CFTimeInterval {
+        let delays = frames.map { $0.timestamp - $0.presentationTime }.sorted()
+        return delays.isEmpty ? 0 : delays[delays.count / 2]
     }
 
     /// Turns the plan into a texture. A generated image that does not exist yet falls back to a capture
     /// rather than leaving the screen without an image.
     private func realize(_ plan: PresentationPlan, frames: [FrameHistory]) -> Content {
+        // What is shown is named on the schedule's timeline, as the plan names it; the images are looked up by the captures'
+        // arrivals, under which the engines publish them.
         func captured(_ index: Int) -> Content {
             let frame = frames[index]
-            return Content(image: .captured(frame.timestamp), picture: .capture(frame.texture),
+            return Content(image: .captured(frame.presentationTime), picture: .capture(frame.texture),
                            sourceTimestamp: frame.timestamp, isGenerated: false)
         }
 
@@ -216,7 +289,8 @@ final class RenderPipeline: @unchecked Sendable {
                 // It is shown blended with the captures it sits between, as the engine that made it is trusted.
                 let blend = Blend(image: made.source, previous: frames[previous].texture, next: frames[next].texture, phase: phase,
                                   motion: StabilityBlend.motion(for: made.engine))
-                return Content(image: .interpolated(previous: earlier, next: later, phase: phase),
+                return Content(image: .interpolated(previous: frames[previous].presentationTime,
+                                                    next: frames[next].presentationTime, phase: phase),
                                picture: .generated(blend), sourceTimestamp: later, isGenerated: true)
             }
             return captured(previous)
@@ -308,9 +382,9 @@ final class RenderPipeline: @unchecked Sendable {
         shared.stats.withLock {
             $0.outputFPS = presents
             $0.generatedFPS = generated
-            // What the screen should be given: every capture, and the images generated between them. The
-            // panel's refresh rate is not it — it repeats whatever it last showed.
-            $0.targetOutputFPS = Int(($0.captureFPS * Float(imagesPerCapture)).rounded())
+            // What the screen should be given: every capture, and the images generated between them, up to one a
+            // refresh — four steps are made with fewer than four refreshes a capture, and not all of them are shown.
+            $0.targetOutputFPS = min(Int(($0.captureFPS * Float(imagesPerCapture)).rounded()), displayRate.maximum)
             $0.gpuLoad = load
             if let summary {
                 $0.avgFrameTime = Float(summary.averageInterval * 1000)

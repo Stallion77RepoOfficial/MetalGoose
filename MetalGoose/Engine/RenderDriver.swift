@@ -99,7 +99,7 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     // MARK: - Callback (render thread)
 
     func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
-        pipeline.render(into: update.drawable, displayRate: displayRate)
+        pipeline.render(into: update.drawable, displayRate: displayRate, targetTime: update.targetPresentationTimestamp)
     }
 }
 

@@ -90,6 +90,9 @@ final class CapturePipeline: @unchecked Sendable {
     // MARK: Timing (processing queue only)
 
     private var lastArrival: CFTimeInterval = 0
+    /// The last capture's presentation time, and how long after it the capture arrived (`presentationTime(of:arrival:)`).
+    private var lastPresentation: CFTimeInterval = 0
+    private var lastDelivery: CFTimeInterval = 0
     private var fpsWindowStart: CFTimeInterval = 0
     private var fpsWindowFrames = 0
     private var lastResourceSample: CFTimeInterval = 0
@@ -259,6 +262,12 @@ final class CapturePipeline: @unchecked Sendable {
         // back to the window's size first was measured to add nothing for MetalFX, and costs a MetalFX
         // pass per capture and every later stage at four times the pixels. Only the Neural Engine takes
         // the window's own size, when that fits it (`CaptureRestore`).
+        //
+        // Sharpening the capture before MetalFX, rather than MetalFX's output, was measured (luma PSNR
+        // against the original, 24 photos and 4 drawn interfaces reduced by area and by point and brought
+        // back by MetalFX, at each Sharpening strength): 0.07 to 0.21 dB closer on interface and text, and
+        // up to 0.21 dB further on photos. It is also one pass at the capture's size a capture, where after
+        // MetalFX it would be one at the screen's size for every image presented.
         let native = frame.nativePixelSize
         let isReduced = native.width >= CGFloat(input.width) + 1 && native.height >= CGFloat(input.height) + 1
         // What the Neural Engine is given whole is even in both dimensions, because its chroma planes are half-size. A
@@ -403,8 +412,29 @@ final class CapturePipeline: @unchecked Sendable {
             motion.submit(frame: history, timestamp: now, interval: shared.captureInterval.withLock { $0.value })
         }
 
-        shared.ring.push(FrameHistory(texture: history, timestamp: now, isSceneCut: frame.isSceneCut))
+        shared.ring.push(FrameHistory(texture: history, timestamp: now, presentationTime: presentationTime(of: frame, arrival: now),
+                                      isSceneCut: frame.isSceneCut))
     }
+
+    /// When the compositor showed `frame`: ScreenCaptureKit's time for it, where that is one — not in the future, not from
+    /// long ago, after the last; otherwise its arrival less how late the last frame that had one arrived. A frame whose time
+    /// is off keeps the timeline going rather than moving it to a clock of its own.
+    private func presentationTime(of frame: CapturedFrame, arrival: CFTimeInterval) -> CFTimeInterval {
+        let stamped = frame.captureTime
+        let time: CFTimeInterval
+        if stamped > lastPresentation, stamped <= arrival, arrival - stamped < Self.longestDelivery {
+            lastDelivery = arrival - stamped
+            time = stamped
+        } else {
+            time = max(arrival - lastDelivery, lastPresentation + Self.leastPresentationStep)
+        }
+        lastPresentation = time
+        return time
+    }
+
+    /// A presentation time further back than this is not the frame's.
+    private static let longestDelivery: CFTimeInterval = 0.25
+    private static let leastPresentationStep: CFTimeInterval = 0.0001
 
     /// Frame generation was switched off: what the engines hold is released, and nothing is made until it is on again.
     private func stopGeneration() {
