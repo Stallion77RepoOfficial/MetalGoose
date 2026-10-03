@@ -13,7 +13,7 @@ import Foundation
 /// half-step the choice flips from one callback to the next with the smallest unevenness in the timing, and the image
 /// wanted there is missing half the time; where they fall past it, the delay is longer than it had to be. Which of the two
 /// a session got moved with the measured latency, in bands a refresh apart. Modelled at 30 captures a second on a 60 Hz
-/// panel (`ScheduleAlignmentTests`), latencies of 14 to 17 ms and 28 to 30 ms lost up to a sixth of the midpoints, and the
+/// panel, latencies of 14 to 17 ms and 28 to 30 ms lost up to a sixth of the midpoints, and the
 /// content on screen was up to 6 ms off an even pace, where it can be exact.
 ///
 /// So the delay is chosen from where the samples land. Every delay over a span of a refresh is tried; one is possible when

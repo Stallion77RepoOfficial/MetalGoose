@@ -1,7 +1,5 @@
-import Foundation
-#if canImport(CoreGraphics)
 import CoreGraphics
-#endif
+import Foundation
 
 /// Where the pointer may be while the overlay magnifies a window, and where on the overlay it is drawn.
 ///
@@ -16,7 +14,7 @@ import CoreGraphics
 /// undivided motion, so an app that added those up (a pointer the game draws itself, Wine while the cursor is on an edge of
 /// where it may go) moved further than the pointer that was drawn, by the overlay's stretch — 18% across and 31% down for a
 /// 1280x748 window on a 1512x982 display in Fullscreen — and its clicks drifted off the drawn pointer, most of all up and
-/// down. Modelled (`PointerMappingTests`), that was 85 points on average at a click and up to 237; it is now none for all
+/// down. Modelled, that was 85 points on average at a click and up to 237; it is now none for all
 /// three ways of reading the mouse. A window that reached past the display was a second way to miss: the pointer could be
 /// drawn over its part off the display, where the cursor could not follow. The cost of following the system is that the
 /// pointer crosses the overlay in the time it crosses the window, which is how the game moves it at that size anyway, and

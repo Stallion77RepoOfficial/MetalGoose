@@ -1,1 +1,0 @@
-../../../MetalGoose/Overlay/PointerMapping.swift

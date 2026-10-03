@@ -123,16 +123,6 @@ cd MetalGoose
 open MetalGoose.xcodeproj
 ```
 
-The engine's decisions that need no Metal or window server — the frame schedule, the engine choice, the Neural Engine's
-sizes, the stability blend's rule, where the pointer is held — are built on their own by `LogicTests/Package.swift`,
-which links the app's sources in, with tests that run on macOS or Linux:
-```bash
-swift test --package-path LogicTests
-```
-
-The upscaling's quality — MetalFX and the sharpening, in either order, against the original images — is scored by
-`.github/probe/UpscaleQuality.swift`, which the **Upscale quality** workflow runs on GitHub's macOS runner by hand.
-
 ## Usage
 
 1. Launch MetalGoose and grant Screen Recording access (and Accessibility while Capture Cursor is on).
