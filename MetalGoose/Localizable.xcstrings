@@ -32,6 +32,17 @@
     "Accessibility" : {
 
     },
+    "Align Pointer" : {
+      "comment" : "Toggle label",
+      "localizations" : {
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kurzor igazítása"
+          }
+        }
+      }
+    },
     "Already up to date" : {
       "comment" : "Update alert title"
     },
@@ -47,17 +58,6 @@
     },
     "Balanced" : {
 
-    },
-    "Capture Cursor" : {
-      "comment" : "Toggle label",
-      "localizations" : {
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Kurzor rögzítése"
-          }
-        }
-      }
     },
     "Check for Updates" : {
       "localizations" : {

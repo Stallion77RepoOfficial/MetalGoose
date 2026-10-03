@@ -17,7 +17,9 @@ final class OverlayWindowManager {
         let screen: NSScreen
         /// The target window's frame in CoreGraphics coordinates.
         let windowFrame: CGRect
-        let captureCursor: Bool
+        /// Whether the pointer is taken to where the picture shows the window, where the overlay is not over it point for
+        /// point.
+        let alignsPointer: Bool
         /// Requested magnification. 1.0 overlays the target window exactly; larger values grow around
         /// the window centre and stop at the screen edges.
         let outputScale: CGFloat
@@ -44,7 +46,7 @@ final class OverlayWindowManager {
     private var targetIsFrontmost = true
     private var isPresenting = false
 
-    private var captureCursor = false
+    private var alignsPointer = true
     private var outputScale: CGFloat = 1
     private var fillsScreen = false
 
@@ -86,8 +88,8 @@ final class OverlayWindowManager {
         self.fillsScreen = fillsScreen
     }
 
-    func setCaptureCursor(_ enabled: Bool) {
-        captureCursor = enabled
+    func setAlignsPointer(_ enabled: Bool) {
+        alignsPointer = enabled
     }
 
     // MARK: - Lifecycle
@@ -96,14 +98,16 @@ final class OverlayWindowManager {
     func createOverlay(_ configuration: Configuration) -> CAMetalLayer {
         destroyOverlay()
 
-        captureCursor = configuration.captureCursor
+        alignsPointer = configuration.alignsPointer
         outputScale = max(1.0, configuration.outputScale)
         fillsScreen = configuration.fillsScreen
         targetFrame = configuration.windowFrame
 
         let frame = outputFrame(forWindow: configuration.windowFrame, on: configuration.screen)
+        // `frame` is in global coordinates. Given a screen, the window would take it as relative to that screen's origin
+        // and open off to the side on any screen but the primary one, until the first refresh moved it.
         let window = NonActivatingWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered,
-                                         defer: false, screen: configuration.screen)
+                                         defer: false, screen: nil)
         window.isReleasedWhenClosed = false
         window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)) + 1)
         window.backgroundColor = .clear
@@ -232,17 +236,18 @@ final class OverlayWindowManager {
             onGeometryChange?()
         }
 
+        // The pointer is taken to the picture where the picture is not where the window is. Where it is, the pointer is
+        // where the user sees it already.
         let mouse = MouseConstraintManager.shared
-        guard captureCursor else {
+        guard alignsPointer, !PointerMapping.isIdentity(window: cgFrame, overlay: ScreenGeometry.cgFrame(from: frame)) else {
             mouse.stopConstraining()
             return
         }
-        let displayBounds = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID)
-            .map(CGDisplayBounds) ?? .zero
+        let displays = ScreenGeometry.displayBounds
         if mouse.isConstraining {
-            mouse.update(sourceRect: cgFrame, displayBounds: displayBounds)
+            mouse.update(window: cgFrame, displays: displays)
         } else {
-            mouse.startConstraining(sourceRect: cgFrame, displayBounds: displayBounds)
+            mouse.startConstraining(window: cgFrame, displays: displays)
         }
     }
 

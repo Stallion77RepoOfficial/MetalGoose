@@ -3,7 +3,7 @@ import SwiftUI
 /// What is missing before scaling can start, and the way to get it.
 struct PermissionBanner: View {
     @ObservedObject var permissions: PermissionManager
-    /// Accessibility only matters while the pointer is being remapped.
+    /// Accessibility only matters where the pointer is taken to a picture that is not where its window is.
     let needsAccessibility: Bool
 
     var body: some View {
@@ -19,6 +19,11 @@ struct PermissionBanner: View {
                 StatusRow(label: "Accessibility", granted: permissions.accessibilityGranted,
                           grant: permissions.requestAccessibility,
                           openSettings: permissions.openAccessibilitySettings)
+                if !permissions.accessibilityGranted {
+                    Text("Needed to keep the pointer on the picture while the window is scaled up. Without it, turn Align Pointer off or set Scale Factor to 1.0x.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding()

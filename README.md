@@ -106,7 +106,7 @@ A HUD overlay reports, live:
 1. Download the latest release from [Releases](https://github.com/Stallion77RepoOfficial/MetalGoose/releases)
 2. Move `MetalGoose.app` to `/Applications`
 3. Open `Terminal` and type `xattr -dr com.apple.quarantine /Applications/MetalGoose.app`
-4. Grant Screen Recording (and Accessibility, if Capture Cursor is on) when prompted
+4. Grant Screen Recording (and Accessibility, for Align Pointer while the picture is scaled up) when prompted
 
 ### Build from Source
 ```bash
@@ -117,12 +117,20 @@ open MetalGoose.xcodeproj
 
 ## Usage
 
-1. Launch MetalGoose and grant Screen Recording access (and Accessibility while Capture Cursor is on).
+1. Launch MetalGoose and grant Screen Recording access (and Accessibility, for Align Pointer while the picture is scaled up).
 2. Configure upscaling (MGUP-1), frame generation (MGFG-1), and anti-aliasing. Changes apply
    to a running session.
 3. Switch to the window you want to capture — it has to be frontmost, since
    MetalGoose targets whichever app is in front when scaling starts.
 4. Press `⌘⇧T`, or return to MetalGoose and click **Start Scaling**.
+
+### Pointer
+
+Where the overlay is bigger than the window (a Scale Factor above 1.0x, or Fullscreen) the window is not where its picture
+is, so **Align Pointer** takes the pointer to the picture: the system pointer is kept inside the window and hidden, and
+the overlay draws one where the pointer appears in the scaled picture, so a click lands under it. This needs Accessibility,
+which is how mouse events are held inside the window. While an app has taken the mouse for itself, to look around with, no
+pointer is drawn. Turn Align Pointer off to leave the system pointer alone; at 1.0x there is nothing to align.
 
 ### Keyboard Shortcuts
 

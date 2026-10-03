@@ -68,6 +68,11 @@ enum ScaleFactor: String, SettingOption {
     /// aspect ratio follows the screen rather than the source window.
     var fillsScreen: Bool { self == .fullscreen }
 
+    /// Whether the overlay is bigger than the window it shows, so that the window is not where its picture is: every factor
+    /// above 1.0x, and Fullscreen, which fills the display whatever the window's size. The pointer has to be taken to the
+    /// picture then (`PointerMapping`).
+    var magnifies: Bool { fillsScreen || value > 1 }
+
     var value: Float {
         switch self {
         case .fullscreen, .x1: return 1.0

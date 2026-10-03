@@ -16,7 +16,10 @@ struct ContentView: View {
         return "macOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
     }
 
-    /// Screen Recording always; Accessibility only while the pointer is being remapped.
+    /// Screen Recording is what everything waits for. Accessibility is only the pointer's (`pointerNeedsAccessibility`), and
+    /// without it the settings still have to be open: turning Align Pointer off, or the scale down, is a way on, and only
+    /// starting is held.
+    private var screenRecordingGranted: Bool { permissions.screenRecordingGranted }
     private var permissionsGranted: Bool { controller.permissionsAllowScaling }
 
     var body: some View {
@@ -74,7 +77,7 @@ struct ContentView: View {
             .padding()
         }
         .frame(minWidth: 200)
-        .disabled(!permissionsGranted)
+        .disabled(!screenRecordingGranted)
         .navigationTitle("MetalGoose")
     }
 
@@ -84,7 +87,7 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if !permissionsGranted {
-                    PermissionBanner(permissions: permissions, needsAccessibility: settings.captureCursor)
+                    PermissionBanner(permissions: permissions, needsAccessibility: controller.pointerNeedsAccessibility)
                         .padding(.bottom, 8)
                 }
 
@@ -94,8 +97,8 @@ struct ContentView: View {
                     leftColumn
                     rightColumn
                 }
-                .disabled(!permissionsGranted)
-                .opacity(permissionsGranted ? 1.0 : 0.5)
+                .disabled(!screenRecordingGranted)
+                .opacity(screenRecordingGranted ? 1.0 : 0.5)
             }
             .padding(24)
         }
@@ -160,7 +163,7 @@ struct ContentView: View {
 
             ConfigPanel(title: "Display Settings") {
                 ToggleRow(label: "Show MG HUD", isOn: $settings.showMGHUD)
-                ToggleRow(label: "Capture Cursor", isOn: $settings.captureCursor)
+                ToggleRow(label: "Align Pointer", isOn: $settings.alignPointer)
                 ToggleRow(label: "VSync", isOn: $settings.vsync)
                 ToggleRow(label: "Triple Buffering", isOn: $settings.tripleBuffering)
                     .disabled(controller.isActive)

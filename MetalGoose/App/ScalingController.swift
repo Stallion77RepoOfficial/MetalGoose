@@ -135,11 +135,15 @@ final class ScalingController: ObservableObject {
         if isActive { stop() } else { start() }
     }
 
-    /// Screen Recording is always needed. Accessibility only is while the pointer is being remapped:
-    /// without it the event tap cannot be made, and the overlay would show a pointer that is not
-    /// where the game thinks it is.
+    /// Whether the pointer is to be taken to a picture that is not where its window is, which is what Accessibility is
+    /// for: without it the event tap cannot be made, and the overlay would show a window that its pointer is not on.
+    var pointerNeedsAccessibility: Bool {
+        settings.alignPointer && settings.isUpscaling && settings.scaleFactor.magnifies
+    }
+
+    /// Screen Recording is always needed. Accessibility is only where the pointer needs it.
     var permissionsAllowScaling: Bool {
-        permissions.screenRecordingGranted && (permissions.accessibilityGranted || !settings.captureCursor)
+        permissions.screenRecordingGranted && (permissions.accessibilityGranted || !pointerNeedsAccessibility)
     }
 
     func startCountdown() {
@@ -235,7 +239,7 @@ final class ScalingController: ObservableObject {
         }
 
         let configuration = OverlayWindowManager.Configuration(
-            screen: screen, windowFrame: target.frame, captureCursor: settings.captureCursor,
+            screen: screen, windowFrame: target.frame, alignsPointer: settings.alignPointer,
             outputScale: upscaling ? CGFloat(settings.scaleFactor.value) : 1.0,
             fillsScreen: upscaling && settings.scaleFactor.fillsScreen)
         engine.attach(to: overlay.createOverlay(configuration), displayRate: displayRate)
@@ -305,7 +309,7 @@ final class ScalingController: ObservableObject {
         let upscaling = settings.isUpscaling
         overlay.setOutputScale(upscaling ? CGFloat(settings.scaleFactor.value) : 1.0,
                                fillsScreen: upscaling && settings.scaleFactor.fillsScreen)
-        overlay.setCaptureCursor(settings.captureCursor)
+        overlay.setAlignsPointer(settings.alignPointer)
         guard isActive else { return }
 
         Task { await capture.reconfigure(renderScale: upscaling ? settings.renderScale.multiplier : 1.0) }

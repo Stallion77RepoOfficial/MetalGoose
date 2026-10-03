@@ -17,7 +17,10 @@ final class CaptureSettings: ObservableObject {
     /// destroy a setting the user chose.
     @Published var frameGenMultiplier: Int = 2                  { didSet { save(frameGenMultiplier, .frameGenMultiplier) } }
     @Published var aaMode: AAMode = .off                        { didSet { save(aaMode.rawValue, .aaMode) } }
-    @Published var captureCursor: Bool = true                   { didSet { save(captureCursor, .captureCursor) } }
+    /// Whether the pointer is taken to where the picture shows the window, while the overlay is not over it point for point
+    /// (`PointerMapping`). It is not the setting that was stored as `captureCursor`: that one belonged to a pointer of another
+    /// kind, and was turned off by anyone it got in the way of, which would now leave every click away from the pointer.
+    @Published var alignPointer: Bool = true                    { didSet { save(alignPointer, .alignPointer) } }
     @Published var showMGHUD: Bool = true                       { didSet { save(showMGHUD, .showMGHUD) } }
     @Published var vsync: Bool = true                           { didSet { save(vsync, .vsync) } }
     /// Double versus triple buffering. Stored as a flag because the pipeline only ever
@@ -53,7 +56,7 @@ final class CaptureSettings: ObservableObject {
         case scalingMethod = "scalingType"   // the key predates the rename and is kept for stored values
         case scaleFactor, renderScale, frameGenMode, frameGenMultiplier
         case sharpening = "qualityMode"      // ditto
-        case aaMode, captureCursor, showMGHUD, vsync, tripleBuffering
+        case aaMode, alignPointer, showMGHUD, vsync, tripleBuffering
 
         var path: String { "MetalGoose." + rawValue }
     }
@@ -71,7 +74,7 @@ final class CaptureSettings: ObservableObject {
         frameGenMode        = restoreFrameGeneration()
         frameGenMultiplier  = restore(.frameGenMultiplier, frameGenMultiplier)
         aaMode              = restore(.aaMode, aaMode)
-        captureCursor       = restore(.captureCursor, captureCursor)
+        alignPointer        = restore(.alignPointer, alignPointer)
         showMGHUD           = restore(.showMGHUD, showMGHUD)
         vsync               = restore(.vsync, vsync)
         tripleBuffering     = restore(.tripleBuffering, tripleBuffering)
