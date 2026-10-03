@@ -6,7 +6,12 @@ import os
 /// generate something.
 struct FrameHistory: TimedFrame {
     let texture: MTLTexture
+    /// When the capture reached the pipeline. It names the capture: the engines publish its pair's images under it, and
+    /// measure their latency from it.
     let timestamp: CFTimeInterval
+    /// When the compositor showed it — ScreenCaptureKit's presentation time — on the same clock: the moment its content
+    /// stands for, on the display's refresh grid, without the wander of its delivery. The render clock plans on this.
+    let presentationTime: CFTimeInterval
     let isSceneCut: Bool
 }
 

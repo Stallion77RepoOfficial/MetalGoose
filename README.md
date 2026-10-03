@@ -65,7 +65,12 @@ Engine's session is being built, Not keeping up, or Display-limited.
 
 Interpolation holds the newest capture back by most of a capture interval plus the time the first generated image
 takes to make (some 40 to 50 ms at 30 captures a second). That delay is eased where it falls, so that a change of
-engine or load does not step the motion on the screen.
+engine or load does not step the motion on the screen. The schedule runs on ScreenCaptureKit's presentation times —
+the compositor's, on the display's refresh grid — rather than on when each capture happened to reach the pipeline. For a
+game that presents in step with the display (30, 60 or 120 a second), the delay is also chosen so that the display's
+refreshes fall clear of the points where one image gives way to the next: every image is then shown on its refresh,
+where a delay set by the measured latency alone could put them on those points, and lose some of the images and pace the
+rest unevenly, at latencies that came in bands a refresh apart.
 
 An engine is left at once when it stops keeping up, and not tried again for 30 seconds; a better one is taken only when
 it would keep up with room to spare and the choice has stood for 10 seconds, so a rate near a limit does not move the
