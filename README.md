@@ -130,6 +130,9 @@ which links the app's sources in, with tests that run on macOS or Linux:
 swift test --package-path LogicTests
 ```
 
+The upscaling's quality — MetalFX and the sharpening, in either order, against the original images — is scored by
+`.github/probe/UpscaleQuality.swift`, which the **Upscale quality** workflow runs on GitHub's macOS runner by hand.
+
 ## Usage
 
 1. Launch MetalGoose and grant Screen Recording access (and Accessibility while Capture Cursor is on).
