@@ -361,14 +361,8 @@ final class ScalingController: ObservableObject {
 
     private func hudInfo(_ engine: GooseEngine) -> HUDInfo {
         let size = capture.capturePixelSize
-        let generation: String
-        switch settings.frameGenMode {
-        case .off:           generation = "Off"
-        case .interpolation:
-            // What was asked for is a preference; the engine reports what is actually in use.
-            generation = "Interp (\(engine.interpolationSteps)x) · \(String(localized: engine.activeInterpolationEngine.title))"
-        case .extrapolation: generation = "Extrap (\(settings.effectiveMultiplier)x)"
-        }
+        // What was asked for is a preference; the engine reports what is actually in use.
+        let generation = settings.frameGenMode == .off ? "Off" : Self.describe(engine.generation)
         return HUDInfo(deviceName: engine.deviceName,
                        pid: targetPID,
                        captureResolution: size == .zero ? "-" : "\(Int(size.width))x\(Int(size.height))",
@@ -377,6 +371,18 @@ final class ScalingController: ObservableObject {
                        frameGeneration: generation,
                        antiAliasing: String(localized: settings.aaMode.title),
                        vsync: settings.vsync ? "On" : "Off")
+    }
+
+    /// What the Frame Gen row says: the engine making the images and how many, and the size the Neural Engine works at where
+    /// that is not the capture's own.
+    private static func describe(_ choice: GenerationChoice) -> String {
+        guard let engine = choice.engine else {
+            // No engine yet: the Neural Engine's session is being built, or nothing can make its images in time.
+            return String(localized: choice.neuralRung != nil ? "Starting" : "Not keeping up")
+        }
+        let label = "\(String(localized: engine.title)) \(choice.multiplier)x"
+        guard let size = choice.neuralSize else { return label }
+        return "\(label) (\(size.width)x\(size.height))"
     }
 
     func bringToFront() {

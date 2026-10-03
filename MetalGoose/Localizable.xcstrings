@@ -169,10 +169,7 @@
         }
       }
     },
-    "MGFG-1-Extrapolation" : {
-
-    },
-    "MGFG-1-Interpolation" : {
+    "MGFG-1" : {
 
     },
     "MGUP-1" : {
@@ -217,6 +214,9 @@
     },
     "No Metal cache found to clear." : {
       "comment" : "Alert: nothing to clear"
+    },
+    "Not keeping up" : {
+
     },
     "Off" : {
 
@@ -296,6 +296,9 @@
           }
         }
       }
+    },
+    "Starting" : {
+
     },
     "Stop Scaling" : {
       "localizations" : {

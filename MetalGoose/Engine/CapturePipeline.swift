@@ -7,7 +7,8 @@ import QuartzCore
 import os
 
 /// Everything a captured frame goes through before it can be shown: restoring render scale,
-/// sharpening, anti-aliasing, and — for extrapolation — the motion it will be warped along.
+/// sharpening, anti-aliasing, and what the engine making the images between captures needs of it — its conversion to
+/// 4:2:0 for the Neural Engine, or the motion between it and the capture before for MetalFX.
 ///
 /// Runs on its own serial queue, which owns every texture and counter in here. The only things
 /// shared with the render thread are the ring the finished frames go into and the handful of
@@ -27,6 +28,20 @@ final class CapturePipeline: @unchecked Sendable {
     /// as dropped instead of being shown late.
     private let mailbox = OSAllocatedUnfairLock<CapturedFrame?>(initialState: nil)
 
+    /// Where the processing queue is, and since when. When frames pile up behind it for seconds, `receive` says where it
+    /// is stuck: a pipeline that stops taking frames looks the same from the HUD whatever it is waiting for.
+    private struct Progress {
+        var stage = "idle"
+        var since = CACurrentMediaTime()
+        var reported = false
+    }
+    private let progress = OSAllocatedUnfairLock(initialState: Progress())
+    private static let stallReport: CFTimeInterval = 3
+
+    private func enter(_ stage: String) {
+        progress.withLock { $0 = Progress(stage: stage, since: CACurrentMediaTime(), reported: false) }
+    }
+
     /// Never replaced. A completion handler resolves this when the GPU finishes, so swapping the
     /// object mid-flight would signal a semaphore the frame never waited on. Shallower pipelines
     /// park permits instead.
@@ -39,20 +54,32 @@ final class CapturePipeline: @unchecked Sendable {
     /// the ring can reference plus everything the pipeline can have in flight behind it.
     private static let poolDepth = FrameRing.capacity + GooseEngine.maxInFlight
     private var historyTextures = [MTLTexture?](repeating: nil, count: CapturePipeline.poolDepth)
-    private var maskTextures = [MTLTexture?](repeating: nil, count: CapturePipeline.poolDepth)
     private var historyIndex = 0
     private var restoreTexture: MTLTexture?
     private var restoreScaler: MTLFXSpatialScaler?
+    private var cropTexture: MTLTexture?
     private var sharpenTexture: MTLTexture?
     private var smaaEdges: MTLTexture?
     private var smaaWeights: MTLTexture?
     private var processedSize: CGSize = .zero
+    private var generating = false
 
-    /// The steps interpolation is cut into now, 2 or 4. The choice has memory: a rate near the limit of what
-    /// four steps need does not flip between the two.
-    private var steps = InterpolationSteps.halves
-    private var quartersAllowedAfter: CFTimeInterval = 0
-    private static let quartersCooldown: CFTimeInterval = 10
+    /// Which engine makes the images between captures, and how many. The choice has memory: a rate near the limit of
+    /// what an engine needs does not flip between two of them.
+    private var selector = GenerationSelector()
+
+    /// What the previous capture was given to, so that the engine the work goes to next can be handed over to without a
+    /// pair going by: the one that made the last pair finishes it, and the one that takes over takes this capture in.
+    private var lastChoice = GenerationChoice.nothing
+
+    /// The capture the media engine was last given, so that the motion of a pair is only measured between two captures that
+    /// followed one another: after a stretch in which none was given — the Neural Engine making the images — the reference
+    /// is old.
+    private var lastMotionTimestamp: CFTimeInterval?
+
+    /// The sizes the Neural Engine can work at for the frames this pipeline holds, finest first.
+    private var neuralSizes: [NeuralSizes.Size] = []
+    private var neuralSizesFor = CGSize.zero
 
     /// ScreenCaptureKit recycles a small pool of surfaces, so the same few come back frame after
     /// frame. Wrapping each in a texture again for every capture allocated for surfaces that were
@@ -87,6 +114,15 @@ final class CapturePipeline: @unchecked Sendable {
         if superseded {
             // Frames replaced while the overlay is hidden were never going to be shown.
             if presenting { shared.stats.withLock { $0.droppedFrames += 1 } }
+            let stuck = progress.withLock { state -> (String, CFTimeInterval)? in
+                let waited = CACurrentMediaTime() - state.since
+                guard presenting, state.stage != "idle", !state.reported, waited > Self.stallReport else { return nil }
+                state.reported = true
+                return (state.stage, waited)
+            }
+            if let (stage, waited) = stuck {
+                NSLog("MetalGoose: the capture queue has been %@ for %.1f s and frames are being dropped", stage, waited)
+            }
         } else if presenting {
             queue.async { [self] in drain() }
         }
@@ -99,6 +135,7 @@ final class CapturePipeline: @unchecked Sendable {
                   return slot
               }) {
             process(frame)
+            enter("idle")
         }
     }
 
@@ -156,29 +193,37 @@ final class CapturePipeline: @unchecked Sendable {
     private func resetState() {
         restoreTexture = nil
         restoreScaler = nil
+        cropTexture = nil
         sharpenTexture = nil
         smaaEdges = nil
         smaaWeights = nil
         historyTextures = [MTLTexture?](repeating: nil, count: Self.poolDepth)
-        maskTextures = [MTLTexture?](repeating: nil, count: Self.poolDepth)
         historyIndex = 0
         surfaceTextures.removeAll()
         processedSize = .zero
         motion.reset()
         shared.neural.reset()
         shared.metalFX.reset()
-        shared.generationLatency.reset()
+        shared.images.reset()
+        shared.neuralLatency.reset()
+        shared.metalFXLatency.reset()
         shared.renderResetRequested.withLock { $0 = true }
         shared.ring.clear()
         shared.stats.withLock { $0.resetCumulativeCounters() }
-        steps = InterpolationSteps.halves
-        quartersAllowedAfter = 0
+        selector.reset()
+        lastChoice = .nothing
+        lastMotionTimestamp = nil
+        neuralSizes = []
+        neuralSizesFor = .zero
+        shared.generation.withLock { $0 = .nothing }
     }
 
     // MARK: - One frame
 
     private func process(_ frame: CapturedFrame) {
+        enter("waiting for the GPU to finish earlier frames")
         inFlight.wait()
+        enter("encoding a capture")
         let now = CACurrentMediaTime()
         recordArrival(now: now, captureTime: frame.captureTime)
 
@@ -202,30 +247,56 @@ final class CapturePipeline: @unchecked Sendable {
         }
 
         let config = shared.config.withLock { $0 }
+        let generates = config.generatesFrames
+        if generates != generating {
+            generating = generates
+            if !generates { stopGeneration() }
+        }
 
         // ScreenCaptureKit delivers the render resolution directly and the spatial upscale runs once
         // per presented frame, so the capture path only sharpens and anti-aliases before the frame
         // enters the ring, at the reduced size. Generation works on the capture as it is: bringing it
-        // back to the window's size first was measured to add nothing for MetalFX and extrapolation,
-        // and costs a MetalFX pass per capture and every later stage at four times the pixels. Only
-        // the Neural Engine takes the window's own size, when that fits it, and a window that does
-        // not fit it goes to MetalFX on the capture (`CaptureRestore`).
+        // back to the window's size first was measured to add nothing for MetalFX, and costs a MetalFX
+        // pass per capture and every later stage at four times the pixels. Only the Neural Engine takes
+        // the window's own size, when that fits it (`CaptureRestore`).
         let native = frame.nativePixelSize
         let isReduced = native.width >= CGFloat(input.width) + 1 && native.height >= CGFloat(input.height) + 1
-        let windowWidth = isReduced ? Int(native.width) : input.width
-        let windowHeight = isReduced ? Int(native.height) : input.height
-        let neuralEngineFitsWindow = config.frameGeneration == .interpolation
-            && NeuralInterpolator.supports(width: windowWidth, height: windowHeight)
-        let restores = CaptureRestore.isRestored(upscaling: config.upscaling, mode: config.frameGeneration,
-                                                 isReduced: isReduced, neuralEngineFitsWindow: neuralEngineFitsWindow)
-        let width = restores ? Int(native.width) : input.width
-        let height = restores ? Int(native.height) : input.height
+        // What the Neural Engine is given whole is even in both dimensions, because its chroma planes are half-size. A
+        // window or a capture that is odd in one is taken one pixel short: a restored frame is made that much smaller, and
+        // a capture is cropped by it where what is left fits. A frame that is larger than the Neural Engine takes is not
+        // cropped: it is shrunk to what it takes, whatever its parity.
+        let windowWidth = (isReduced ? Int(native.width) : input.width) & ~1
+        let windowHeight = (isReduced ? Int(native.height) : input.height) & ~1
+        let neuralEngineFitsWindow = generates && NeuralInterpolator.supports(width: windowWidth, height: windowHeight)
+        let restores = CaptureRestore.isRestored(upscaling: config.upscaling, generating: generates, isReduced: isReduced,
+                                                 neuralEngineFitsWindow: neuralEngineFitsWindow)
+        let evenWidth = input.width & ~1
+        let evenHeight = input.height & ~1
+        let crops = !restores && generates && (evenWidth != input.width || evenHeight != input.height)
+            && NeuralInterpolator.supports(width: evenWidth, height: evenHeight)
+        let width = restores ? windowWidth : (crops ? evenWidth : input.width)
+        let height = restores ? windowHeight : (crops ? evenHeight : input.height)
 
         let size = CGSize(width: width, height: height)
         if size != processedSize {
             resetState()
             processedSize = size
         }
+        if neuralSizesFor != size {
+            neuralSizes = NeuralInterpolator.ladder(frameWidth: width, frameHeight: height)
+            neuralSizesFor = size
+        }
+
+        // Which engine makes this frame's pair, from what the settings, the size and the engines' own times say, and what
+        // each engine is to be given of this capture: the engine that makes the pair, and the one that made the pair
+        // before it, which finishes it as the new one takes this capture in.
+        let choice = generates ? chooseGeneration(config: config, width: width, height: height, now: now) : GenerationChoice.nothing
+        let outgoing = lastChoice.engine
+        let handsOver = outgoing != nil && outgoing != choice.engine
+        let neuralSteps = choice.engine == .neuralEngine ? choice.multiplier : lastChoice.multiplier
+        lastChoice = choice
+        let runsNeuralEngine = choice.engine == .neuralEngine || (handsOver && outgoing == .neuralEngine)
+        let runsMetalFX = choice.engine == .metalFX || (handsOver && outgoing == .metalFX)
 
         // Every scratch texture is reused next frame, so the LAST active stage writes straight into
         // the ring slot; a passthrough configuration needs a copy.
@@ -240,6 +311,19 @@ final class CapturePipeline: @unchecked Sendable {
         let sharpens = config.sharpness > 0.01
         let antiAliases = config.antiAliasing != .off
         var working = input
+
+        if crops {
+            guard let cropped = gpu.ensureTexture(&cropTexture, width: width, height: height, usage: targetUsage),
+                  let blit = commandBuffer.makeBlitCommandEncoder() else {
+                drop(commandBuffer)
+                return
+            }
+            blit.copy(from: input, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                      sourceSize: MTLSize(width: width, height: height, depth: 1),
+                      to: cropped, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+            blit.endEncoding()
+            working = cropped
+        }
 
         if restores {
             let destination: MTLTexture?
@@ -291,51 +375,51 @@ final class CapturePipeline: @unchecked Sendable {
             blit.endEncoding()
         }
 
-        // The mask compares this capture with the one before it, so the first capture of a
-        // session has none and cannot be warped from.
-        var mask: MTLTexture?
-        if config.frameGeneration == .extrapolation,
-           let previous = shared.ring.snapshot().last,
-           previous.texture.width == width, previous.texture.height == height {
-            mask = encodeStaticMask(history, previous: previous.texture, slot: slot, commandBuffer: commandBuffer)
-        }
-
-        // The Neural Engine takes the capture in 4:2:0, converted here and handed over once the GPU has
-        // written it. A size it cannot take, or a processor that failed, falls back to MetalFX.
-        let backend = interpolationBackend(neuralEngineFitsWindow: neuralEngineFitsWindow)
-        let backendChanged = shared.interpolationBackend.withLock { current -> Bool in
-            defer { current = backend }
-            return current != backend
-        }
-        // The two engines take different times to make an image, so one's measurement says nothing about
-        // the other's.
-        if backendChanged { shared.generationLatency.reset() }
-        let steps = interpolationSteps(for: config, backend: backend)
-        let yuv = backend == .neuralEngine
-            ? shared.neural.encodeConversion(of: history, commandBuffer: commandBuffer) : nil
+        // The Neural Engine takes the capture in 4:2:0, converted here and handed over once the GPU has written it. It is
+        // paired with the capture before it, which is the one the render clock will bracket it with.
+        let previousCapture = shared.ring.snapshot().last
+        enter("handing the capture to the Neural Engine")
+        let yuv = runsNeuralEngine ? shared.neural.encodeConversion(of: history, commandBuffer: commandBuffer) : nil
+        let partner = frame.isSceneCut ? nil : previousCapture?.timestamp
 
         commandBuffer.addCompletedHandler { [shared] buffer in
             let gpuTime = Float((buffer.gpuEndTime - buffer.gpuStartTime) * 1000)
             shared.stats.withLock { $0.captureGPUTime = gpuTime }
-            if let yuv { shared.neural.frameConverted(yuv, timestamp: now, steps: steps) }
+            if let yuv { shared.neural.frameConverted(yuv, timestamp: now, previous: partner, steps: neuralSteps) }
         }
         commandBuffer.commit()
 
-        // MetalFX takes the motion between the pair as an input, and extrapolation warps along it; the
-        // Neural Engine needs none.
-        if config.frameGeneration == .extrapolation
-            || (config.frameGeneration == .interpolation && backend == .metalFX) {
+        // MetalFX takes the motion between the pair as an input; the Neural Engine needs none. The motion of a pair is
+        // measured between two captures that followed one another, so after a stretch in which the media engine was given
+        // none the next capture starts a pair, rather than being compared with one from long ago.
+        if runsMetalFX {
+            if lastMotionTimestamp != previousCapture?.timestamp { motion.breakSequence() }
+            lastMotionTimestamp = now
             motion.submit(frame: history, timestamp: now, interval: shared.captureInterval.withLock { $0.value })
         }
 
-        shared.ring.push(FrameHistory(texture: history, timestamp: now, isSceneCut: frame.isSceneCut, staticMask: mask))
+        shared.ring.push(FrameHistory(texture: history, timestamp: now, isSceneCut: frame.isSceneCut))
     }
 
-    /// A motion field has just been stored. When MetalFX is interpolating, it is the last thing the pair
-    /// it belongs to was waiting for, so the pair is fed now rather than when a display callback asks.
+    /// Frame generation was switched off: what the engines hold is released, and nothing is made until it is on again.
+    private func stopGeneration() {
+        motion.reset()
+        shared.neural.reset()
+        shared.metalFX.reset()
+        shared.images.reset()
+        shared.neuralLatency.reset()
+        shared.metalFXLatency.reset()
+        selector.reset()
+        lastChoice = .nothing
+        lastMotionTimestamp = nil
+        shared.generation.withLock { $0 = .nothing }
+    }
+
+    /// A motion field has just been stored. It is the last thing the pair it belongs to was waiting for, so the pair is fed
+    /// to MetalFX now rather than when a display callback asks. Also when MetalFX has just been left for the Neural Engine:
+    /// the pair it was still on is finished.
     private func fieldMeasured(_ field: MotionField) {
-        guard shared.config.withLock({ $0.frameGeneration }) == .interpolation,
-              shared.interpolationBackend.withLock({ $0 }) == .metalFX else { return }
+        guard shared.config.withLock({ $0.generatesFrames }) else { return }
 
         let frames = shared.ring.snapshot()
         guard let index = frames.lastIndex(where: { $0.timestamp == field.timestamp }), index > 0 else { return }
@@ -347,35 +431,30 @@ final class CapturePipeline: @unchecked Sendable {
         shared.metalFX.feed(previous: frames[index - 1], next: next, field: field)
     }
 
-    /// Which engine interpolates this frame's pair: the Neural Engine while it can take the window's own size
-    /// (which is the size it is given) and has not failed, and MetalFX is what is left.
-    private func interpolationBackend(neuralEngineFitsWindow: Bool) -> InterpolationEngine {
-        neuralEngineFitsWindow && !shared.neural.hasFailed ? .neuralEngine : .metalFX
-    }
+    /// Which engine makes this frame's pair and how many images it carries, published for the render thread, which
+    /// plans with it. The Neural Engine is asked for the size the choice wants beside the one that is serving, which goes
+    /// on until the new one has started.
+    private func chooseGeneration(config: EngineConfig, width: Int, height: Int, now: CFTimeInterval) -> GenerationChoice {
+        let usable = !neuralSizes.isEmpty && !shared.neural.hasFailed
+        let inputs = GenerationSelector.Inputs(
+            requested: config.multiplier,
+            captureInterval: shared.captureInterval.withLock { $0.value },
+            refreshRate: shared.stats.withLock { $0.screenRefreshRate },
+            framePixels: width * height,
+            neuralRungs: usable ? neuralSizes.map(\.pixels) : [],
+            neuralActive: usable ? shared.neural.activeSize.flatMap { neuralSizes.firstIndex(of: $0) } : nil,
+            neuralMidpointTime: shared.neural.midpointTime, neuralQuartersTime: shared.neural.quartersTime,
+            neuralLatency: shared.neuralLatency.value, metalFXLatency: shared.metalFXLatency.value)
 
-    /// The steps this frame's pair is cut into, and what the render thread plans with. MetalFX makes the
-    /// midpoint alone. The Neural Engine makes quarters when they are asked for, as long as it can make three
-    /// images inside the time between captures and the panel can show them.
-    private func interpolationSteps(for config: EngineConfig, backend: InterpolationEngine) -> Int {
-        let now = CACurrentMediaTime()
-        if config.frameGeneration == .interpolation, backend == .neuralEngine {
-            let chosen = InterpolationSteps.choose(
-                requested: config.multiplier, current: steps,
-                midpointTime: shared.neural.midpointTime, quartersTime: shared.neural.quartersTime,
-                captureInterval: shared.captureInterval.withLock { $0.value },
-                refreshRate: shared.stats.withLock { $0.screenRefreshRate },
-                mayEnter: now >= quartersAllowedAfter)
-            // Having just failed to keep up, four steps are not tried again for a while: the first time
-            // they were tried is what showed they did not fit, and trying costs a pair its images.
-            if steps == InterpolationSteps.quarters, chosen == InterpolationSteps.halves {
-                quartersAllowedAfter = now + Self.quartersCooldown
-            }
-            steps = chosen
-        } else {
-            steps = InterpolationSteps.halves
+        var choice = selector.choose(inputs, now: now)
+        if let rung = choice.neuralRung, rung < neuralSizes.count { shared.neural.prepare(neuralSizes[rung]) }
+        // Where the Neural Engine works at a size other than the frames' own, the size is reported.
+        if choice.engine == .neuralEngine, let size = shared.neural.activeSize, size.width != width || size.height != height {
+            choice.neuralSize = size
         }
-        shared.interpolationSteps.withLock { $0 = steps }
-        return steps
+        let published = choice
+        shared.generation.withLock { $0 = published }
+        return choice
     }
 
     /// The single way a captured frame is abandoned. Going through one function makes the accounting
@@ -471,29 +550,6 @@ final class CapturePipeline: @unchecked Sendable {
             encoder.endEncoding()
             return true
         }
-    }
-
-    /// Where this capture and the one before it are pixel-identical. `staticMask` loads its halo
-    /// cooperatively, so every threadgroup of the grid has to be full-size; the grid is rounded up
-    /// and the kernel discards what falls outside the image.
-    private func encodeStaticMask(_ frame: MTLTexture, previous: MTLTexture, slot: Int,
-                                  commandBuffer: MTLCommandBuffer) -> MTLTexture? {
-        guard let mask = gpu.ensureTexture(&maskTextures[slot], width: frame.width, height: frame.height,
-                                           pixelFormat: .r8Unorm),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
-
-        let tileWidth = Int(MG_MASK_TILE_WIDTH)
-        let tileHeight = Int(MG_MASK_TILE_HEIGHT)
-        encoder.setComputePipelineState(gpu.pipelines.staticMask)
-        encoder.setTexture(frame, index: 0)
-        encoder.setTexture(previous, index: 1)
-        encoder.setTexture(mask, index: 2)
-        encoder.dispatchThreadgroups(
-            MTLSize(width: (frame.width + tileWidth - 1) / tileWidth,
-                    height: (frame.height + tileHeight - 1) / tileHeight, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: tileWidth, height: tileHeight, depth: 1))
-        encoder.endEncoding()
-        return mask
     }
 
     // MARK: - Statistics

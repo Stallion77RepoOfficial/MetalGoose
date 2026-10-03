@@ -8,9 +8,6 @@ struct FrameHistory: TimedFrame {
     let texture: MTLTexture
     let timestamp: CFTimeInterval
     let isSceneCut: Bool
-    /// 1 where this frame's surroundings are identical to the previous capture's. Only
-    /// extrapolation needs it, so only extrapolation builds it.
-    let staticMask: MTLTexture?
 }
 
 /// The most recent captures, oldest first.

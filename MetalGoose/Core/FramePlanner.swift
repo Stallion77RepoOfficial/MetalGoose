@@ -20,8 +20,6 @@ enum PresentationPlan: Equatable {
     /// The image `step` of `steps` of the way from one capture to the next: the midpoint of a pair at 2 steps,
     /// its quarters at 4.
     case interpolated(previous: Int, next: Int, step: Int, steps: Int)
-    /// The newest capture warped `step` of `steps` of the way into the next interval.
-    case extrapolated(source: Int, step: Int, steps: Int)
 }
 
 /// What a presented image is, identified without reference to how it was produced.
@@ -32,14 +30,11 @@ enum PresentedImage: Equatable {
     /// `phase` is how far from `previous` to `next` the image sits: the midpoint is 0.5 whether the pair was cut
     /// into two steps or four, so the same image is the same image either way.
     case interpolated(previous: CFTimeInterval, next: CFTimeInterval, phase: Double)
-    case extrapolated(source: CFTimeInterval, step: Int)
 }
 
 struct PlanningInput {
-    var mode: FrameGenMode
-    /// How many images each capture interval should carry. Extrapolation samples its warp at that many
-    /// points. Interpolation takes the steps its engine can make: 2, the midpoint of each pair, or 4, its
-    /// quarters.
+    /// How many images each capture interval carries: a pair is cut into 2 steps, which is its midpoint, or into 4,
+    /// which is its quarters. Less than 2 generates nothing, and the newest capture is shown as it arrives.
     var multiplier: Int
     /// The time at which to sample the capture timeline, on the same clock as the frame timestamps: the
     /// moment of the display callback.
@@ -50,33 +45,17 @@ struct PlanningInput {
     /// and a clock that already includes the pipeline's latency starts every interval most of the way
     /// through it.
     var sampleTime: CFTimeInterval
-    /// Smoothed interval between captures; 0 until it has been measured.
-    var captureInterval: CFTimeInterval
-    /// How long after a capture arrives the midpoint of the pair it completes can be shown; 0 until it has
-    /// been measured. Only interpolation reads it.
-    var generationLatency: CFTimeInterval
-    /// The newest capture has already been shown as captured.
-    var newestWasPresented: Bool
-    /// Timestamp of the capture the latest motion field was measured against, if there is one.
-    var motionTimestamp: CFTimeInterval?
+    /// How far behind the newest capture's arrival the schedule runs (`FramePlanner.interpolationDelay`), as the
+    /// caller smooths it.
+    var delay: CFTimeInterval
 }
 
 enum FramePlanner {
 
-    private static let motionFreshness: CFTimeInterval = 1.0 / 30.0
-
     static func plan<F: TimedFrame>(_ frames: [F], _ input: PlanningInput) -> PresentationPlan {
         guard let newestIndex = frames.indices.last else { return .nothing }
-
-        switch input.mode {
-        case .extrapolation:
-            return extrapolate(frames, newestIndex: newestIndex, input)
-        case .interpolation:
-            guard frames.count >= 2 else { return .captured(newestIndex) }
-            return interpolate(frames, input)
-        case .off:
-            return .captured(newestIndex)
-        }
+        guard input.multiplier >= InterpolationSteps.halves, frames.count >= 2 else { return .captured(newestIndex) }
+        return interpolate(frames, input)
     }
 
     /// The identity of what a plan shows, for the frames it was made from.
@@ -89,46 +68,7 @@ enum FramePlanner {
         case .interpolated(let previous, let next, let step, let steps):
             return .interpolated(previous: frames[previous].timestamp, next: frames[next].timestamp,
                                  phase: Double(step) / Double(steps))
-        case .extrapolated(let source, let step, _):
-            return .extrapolated(source: frames[source].timestamp, step: step)
         }
-    }
-
-    // MARK: - Extrapolation
-
-    /// Every capture is shown as captured, once. Only the gaps between captures are
-    /// generated — warping real frames as well destroys the image for no benefit.
-    ///
-    /// The multiplier is how many images the gap should carry, so the gap is cut into
-    /// that many slots: slot 0 is the capture itself and each later slot is one warp
-    /// phase.
-    private static func extrapolate<F: TimedFrame>(_ frames: [F], newestIndex: Int,
-                                                   _ input: PlanningInput) -> PresentationPlan {
-        let newest = frames[newestIndex]
-        guard input.newestWasPresented else { return .captured(newestIndex) }
-
-        let interval = input.captureInterval
-        let steps = max(1, input.multiplier)
-        let elapsed = interval > 0
-            ? min(max((input.sampleTime - newest.timestamp) / interval, 0), 1)
-            : 0
-        let step = min(steps - 1, Int(elapsed * Double(steps)))
-
-        // A field much older than the capture it is being applied to describes a velocity
-        // the scene has already left. Warping on it is what turned a flick of the
-        // mouse into a violent throw and back. The newest capture's own field is not ready
-        // in the first slots after it arrives, and those slots use the one before: two
-        // intervals of the rate actually being measured are tolerated, because refusing it
-        // — as one interval's tolerance did, by a hair, whenever arrivals jittered —
-        // switched the warp off and on within a single interval. How long a field takes
-        // does not shrink with the capture rate, so at a high one it is several intervals
-        // old by the time it exists; a thirtieth of a second is tolerated whatever the rate.
-        guard step > 0, !newest.isSceneCut, newestIndex >= 1,
-              let motionTimestamp = input.motionTimestamp,
-              interval <= 0 || newest.timestamp - motionTimestamp <= max(2 * interval, motionFreshness) else {
-            return .captured(newestIndex)
-        }
-        return .extrapolated(source: newestIndex, step: step, steps: steps)
     }
 
     // MARK: - Interpolation
@@ -162,9 +102,7 @@ enum FramePlanner {
 
     private static func interpolate<F: TimedFrame>(_ frames: [F], _ input: PlanningInput) -> PresentationPlan {
         let steps = InterpolationSteps.steps(for: input.multiplier)
-        let delay = interpolationDelay(captureInterval: input.captureInterval, generationLatency: input.generationLatency,
-                                       steps: steps)
-        let targetTime = input.sampleTime - delay
+        let targetTime = input.sampleTime - input.delay
         let (previousIndex, nextIndex) = bracket(frames, around: targetTime)
         let previous = frames[previousIndex]
         let next = frames[nextIndex]

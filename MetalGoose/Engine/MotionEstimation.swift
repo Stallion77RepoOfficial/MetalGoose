@@ -6,23 +6,11 @@ import Foundation
 import QuartzCore
 import os
 
-/// A motion field and the maps derived from it.
-///
-/// Two of them are properties of the field alone — one value per block, not one per pixel —
-/// so they are built once per capture at the field's own resolution.
+/// The motion between two consecutive captures, one vector per block of the frame.
 struct MotionField {
-    /// Backward motion against the previous capture, in pixels.
+    /// Backward motion against the previous capture, in pixels of the frame MetalFX works on.
     let vectors: MTLTexture
-    /// Where neighbouring vectors disagree, the field is straddling a motion boundary it
-    /// cannot represent, and the warp fades there.
-    let disagreement: MTLTexture
-    /// One vector: what the frame as a whole is doing. Pixels whose own vector is not trusted
-    /// fall back to this instead of freezing, which keeps the image internally coherent — a
-    /// slightly misplaced frame reads as motion, a half-frozen one reads as a fault.
-    let global: MTLBuffer
-    /// Timestamp of the newer frame of the pair this was measured from. The warp extrapolates
-    /// forward assuming the field describes the interval that just ended; a field measured
-    /// earlier describes a velocity the scene has already left.
+    /// Timestamp of the newer frame of the pair this was measured from.
     let timestamp: CFTimeInterval
 }
 
@@ -36,8 +24,8 @@ struct MotionField {
 /// capture the field has to explain:
 ///
 /// - One search pass, the default, finds vectors that explain a large frame *worse* than assuming nothing
-///   moved (31 dB against 35 on 1440p video), and the warp turns the wrong ones into the swimming,
-///   dough-like picture. Several passes ("true motion") cost a fraction of a millisecond more and gave 38 dB.
+///   moved (31 dB against 35 on 1440p video), and an image made along the wrong ones swims like dough. Several
+///   passes ("true motion") cost a fraction of a millisecond more and gave 38 dB.
 /// - 4x4 blocks are more accurate again (43 dB) but much slower, and the media engine will not build them at
 ///   4K at all. `MotionAnalysis` decides how finely a frame can afford to be searched, and in what blocks;
 ///   this follows it.
@@ -111,6 +99,12 @@ private final class MediaEngineEstimator {
     }
 
     init(device: MTLDevice) { self.device = device }
+
+    /// The next frame starts a new pair instead of completing one with the last frame this was given, which after a
+    /// stretch in which none was given is old.
+    func breakSequence() {
+        hasReference = false
+    }
 
     func reset() {
         if let session { __VTMotionEstimationSessionInvalidate(session) }
@@ -197,7 +191,7 @@ private final class MediaEngineEstimator {
     /// landed after the next capture had already asked for a destination, both frames were
     /// converted into the same buffer, and the estimate then compared a frame against a stale
     /// partner. The resulting vectors describe a pair that never existed — which is exactly the
-    /// smearing the warp showed when the GPU was busiest.
+    /// smearing the images showed when the GPU was busiest.
     ///
     /// Requests queue inside the media engine, so one that takes longer than a capture interval would fall
     /// further behind with every frame — measured, 200 ms late at 1440p. What bounds the queue is the
@@ -292,37 +286,31 @@ private final class MediaEngineEstimator {
 
 // MARK: - Pipeline
 
-/// Produces the motion field extrapolation warps along: measures it with the chosen estimator,
-/// then derives the maps the warp reads from it. Every method runs on the processing queue,
-/// which owns the estimators' state; the latest field is the one thing the render thread reads.
+/// Produces the motion field MetalFX interpolates along: measures it with the media engine, then removes the vectors
+/// the block matcher got wildly wrong. Every method runs on the processing queue, which owns the estimator's state.
 final class MotionPipeline: @unchecked Sendable {
 
     private struct Slot {
-        /// The field as measured, scaled into the warp's units. Everything downstream reads `vectors`,
-        /// which is this with its outliers removed.
+        /// The field as measured, scaled into the units of the frame MetalFX works on. Everything downstream reads
+        /// `vectors`, which is this with its outliers removed.
         var raw: MTLTexture?
         var vectors: MTLTexture?
-        var disagreement: MTLTexture?
+        /// What the frame as a whole is doing, which the wild vectors are judged against.
         var global: MTLBuffer?
     }
 
     /// Fields are replaced as new ones arrive, so only the latest and the few still referenced by
-    /// in-flight render command buffers need to stay distinct.
+    /// in-flight command buffers need to stay distinct.
     private static let slotCount = 4
-
-    /// Neighbouring vectors are compared this far apart in frame pixels, whatever block the field was
-    /// measured in: VideoToolbox's default block, and what the warp's trust in a vector was tuned on.
-    private static let blockSpan = 16
 
     private let gpu: GPUContext
     private let queue: DispatchQueue
     private let mediaEngine: MediaEngineEstimator
     private var slots = [Slot](repeating: Slot(), count: MotionPipeline.slotCount)
     private var slotIndex = 0
-    private let latestField = OSAllocatedUnfairLock<MotionField?>(uncheckedState: nil)
 
-    /// Called on the processing queue each time a field has been stored, for whoever needs the
-    /// measurement the moment it exists rather than when the next display callback looks for it.
+    /// Called on the processing queue each time a field has been stored, so that the pair it belongs to is fed to
+    /// MetalFX the moment its motion exists.
     var onField: ((MotionField) -> Void)?
 
     init(gpu: GPUContext, queue: DispatchQueue) {
@@ -331,18 +319,20 @@ final class MotionPipeline: @unchecked Sendable {
         self.mediaEngine = MediaEngineEstimator(device: gpu.device)
     }
 
-    /// The most recent field, from whichever thread asks.
-    var latest: MotionField? { latestField.withLockUnchecked { $0 } }
+    /// For when frames stop being submitted and start again, as when another engine made the images for a while: the
+    /// first one then has nothing before it to be measured against, rather than a frame from long ago.
+    func breakSequence() {
+        mediaEngine.breakSequence()
+    }
 
     func reset() {
         slots = [Slot](repeating: Slot(), count: Self.slotCount)
         slotIndex = 0
-        latestField.withLockUnchecked { $0 = nil }
         mediaEngine.reset()
     }
 
-    /// Starts measuring the motion that brought the capture to where it is. The field lands later,
-    /// from the media engine's own thread, and is picked up through `latest`.
+    /// Starts measuring the motion that brought the capture to where it is. The field lands later, from the media
+    /// engine's own thread, and is handed to `onField`.
     ///
     /// Converts the frame to luma, hands it to the media engine, and copies the resulting vectors
     /// into a slot we own — VideoToolbox recycles its own buffers, and a field is read long after
@@ -402,11 +392,11 @@ final class MotionPipeline: @unchecked Sendable {
         return buffer
     }
 
-    /// Copies the estimator's output into a slot we own — VideoToolbox recycles its buffers while
-    /// the warp still reads the field — and derives the maps the warp needs alongside it.
+    /// Copies the estimator's output into a slot we own — VideoToolbox recycles its buffers while the field is still
+    /// being read — and removes the vectors the block matcher got wildly wrong.
     ///
     /// The vectors are measured on the averaged-down image the media engine searched, so they are carried
-    /// into the units of the frame the warp runs on; and the field is cut to the vectors that cover the
+    /// into the units of the frame MetalFX works on; and the field is cut to the vectors that cover the
     /// frame, because what the media engine pads it with is not the image.
     private func store(_ field: MTLTexture, analysis: MotionAnalysis, frameWidth: Int,
                        timestamp: CFTimeInterval) {
@@ -417,8 +407,6 @@ final class MotionPipeline: @unchecked Sendable {
         guard let raw = gpu.ensureTexture(&slots[index].raw, width: width, height: height, pixelFormat: .rg16Float),
               let vectors = gpu.ensureTexture(&slots[index].vectors, width: width, height: height,
                                               pixelFormat: .rg16Float),
-              let disagreement = gpu.ensureTexture(&slots[index].disagreement, width: width, height: height,
-                                                   pixelFormat: .r16Float),
               let global = ensureGlobalBuffer(&slots[index].global),
               let commandBuffer = gpu.makeCommandBuffer("MetalGoose motion field"),
               let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -450,20 +438,9 @@ final class MotionPipeline: @unchecked Sendable {
         encoder.setBuffer(global, offset: 0, index: 0)
         encoder.setBytes(&frame, length: MemoryLayout<Float>.size, index: 1)
         gpu.dispatch(gpu.pipelines.despeckle, on: encoder, width: width, height: height)
-
-        // One texel of the field spans a block, and neighbours are compared a fixed distance apart in
-        // the frame, so that is the same number of texels whatever block the field was measured in.
-        var stride = Int32(max(1, Self.blockSpan / analysis.span))
-        encoder.setComputePipelineState(gpu.pipelines.disagreement)
-        encoder.setTexture(vectors, index: 0)
-        encoder.setTexture(disagreement, index: 1)
-        encoder.setBytes(&stride, length: MemoryLayout<Int32>.size, index: 0)
-        gpu.dispatch(gpu.pipelines.disagreement, on: encoder, width: width, height: height)
         encoder.endEncoding()
         commandBuffer.commit()
 
-        let stored = MotionField(vectors: vectors, disagreement: disagreement, global: global, timestamp: timestamp)
-        latestField.withLockUnchecked { $0 = stored }
-        onField?(stored)
+        onField?(MotionField(vectors: vectors, timestamp: timestamp))
     }
 }

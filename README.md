@@ -32,28 +32,37 @@ only games — anything that renders faster than it is being watched.
   anti-aliasing sensitivity.
 
 ### MGFG-1 Frame Generation
-- **MGFG-1-Interpolation** — synthesises the images between two captured frames. Highest
-  quality; the newest frame is held back by most of a capture interval plus the time the first
-  generated image takes to make (measured live). It runs on the **Neural Engine** (VideoToolbox
-  low-latency frame interpolation), which leaves the GPU to the captured app; the GPU only
-  converts pixel formats. A window larger than the processor takes (1920 px, 2.07 MP), or a
-  processor failure, falls back to **MetalFX** frame interpolation with the media engine's motion
-  field, automatically; it makes the midpoint only and uses GPU time. With Render Scale below 100%,
-  generation works on the reduced capture and the final scale-up treats captured and generated
-  frames alike; only the Neural Engine takes the window's own size, when that fits it, which
-  measured closer to the real image.
-- **MGFG-1-Extrapolation** — warps the newest frame forward along measured motion. Nothing is
-  held back, so latency is unchanged. The gap can be sampled at 2, 3, or 4 points; quality
-  degrades around disocclusions and at each additional point. Motion comes from the media engine
-  (VideoToolbox, multi-pass search), is despeckled before use, and is searched as finely as the
-  capture rate allows: 4×4 blocks on a half-size frame, coarser blocks as the frame grows or the
-  rate climbs.
-- **Multiplier** — images presented per captured frame. Extrapolation: 2x–4x. Interpolation: 2x,
-  the midpoint of each pair, or 4x, its quarters. Four steps are three images per pair, and the
-  Neural Engine takes about three times as long for them as for one, so 4x is delivered only while
-  that fits the time between captures and the panel can show four images in it — about 30 fps at
-  1280×720, below 17 fps at 1280×1016 — and the HUD reports what is delivered. MetalFX is always 2x.
-- Scene-cut detection avoids generating across hard cuts.
+MGFG-1 makes the images between two captures by interpolation. The Neural Engine does it where it can, and MetalFX on
+the GPU where it cannot, and a single choice is made for every capture so that the two work as one. The HUD's
+**Frame Gen** row names the engine in use and what it delivers.
+
+- **Neural Engine** — VideoToolbox low-latency frame interpolation, for 2x and 4x. It leaves the GPU to the captured
+  app: the GPU converts the capture to 4:2:0 once, and turns an image into colour only as it is shown. It works at the
+  largest size it takes (1920 px on a side, 2.07 MP): a larger capture is shrunk for it and its images are enlarged as
+  they are blended with the captures, so a 1440p or 4K window is covered too. Where the capture rate leaves no time for
+  that size, it works at a coarser one — 1280×720 or 960×540 — rather than giving way. A size it has not been
+  used at takes a second or two to prepare, the first time; the session that is serving goes on until the new one has
+  started, and MetalFX stands in meanwhile.
+- **MetalFX** — interpolation with the media engine's motion field, for 2x where the Neural Engine cannot be used or
+  cannot keep up. It is the more faithful of the two, makes the midpoint only, and uses GPU time.
+- Where neither can make its images before the next capture is due, nothing is held back: the captures are shown as
+  they arrive.
+- **Multiplier** — images presented per captured frame: 2x (the midpoint of each pair) or 4x (its quarters, on the
+  Neural Engine). A multiplier the panel cannot show is not made (4x at 30 captures a second on a 60 Hz panel is 2x),
+  and 4x falls back to 2x where the quarters do not fit the time between captures.
+- **Interface and text stay as captured** — where the two captures barely differ (an interface, text, a still
+  background) they are blended back into the generated image, which keeps what did not move: the Neural Engine's
+  images are lossy there, and MetalFX's gain a little.
+
+Interpolation holds the newest capture back by most of a capture interval plus the time the first generated image
+takes to make (some 40 to 50 ms at 30 captures a second). That delay is eased where it falls, so that a change of
+engine or load does not step the motion on the screen.
+
+An engine is left at once when it stops keeping up, and not tried again for 30 seconds; a better one is taken only when
+it would keep up with room to spare and the choice has stood for 10 seconds, so a rate near a limit does not move the
+engine back and forth. With Render Scale below 100%, generation works on the reduced capture and the final scale-up
+treats captured and generated frames alike; only the Neural Engine takes the window's own size, when that fits it,
+which measured closer to the real image. Scene-cut detection avoids generating across hard cuts.
 
 An image is never presented twice, so **Generated + Passthrough = Presented** in the HUD.
 

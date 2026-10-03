@@ -17,12 +17,12 @@ final class GPUContext: @unchecked Sendable {
         let luma: MTLComputePipelineState
         let copyMotion: MTLComputePipelineState
         let despeckle: MTLComputePipelineState
-        let disagreement: MTLComputePipelineState
         let globalMotion: MTLComputePipelineState
-        let staticMask: MTLComputePipelineState
+        let stabilityBlend: MTLComputePipelineState
+        let stabilityBlendFromYUV: MTLComputePipelineState
+        let stabilityBlendFromYUVResampled: MTLComputePipelineState
         let convertTo420: MTLComputePipelineState
-        let convertFrom420: MTLComputePipelineState
-        let extrapolate: MTLComputePipelineState
+        let convertTo420Resampled: MTLComputePipelineState
         let present: MTLRenderPipelineState
     }
 
@@ -79,12 +79,12 @@ final class GPUContext: @unchecked Sendable {
                 luma: try compute("bgraToLuma"),
                 copyMotion: try compute("copyMotionField"),
                 despeckle: try compute("despeckleMotion"),
-                disagreement: try compute("motionDisagreement"),
                 globalMotion: try compute("globalMotion"),
-                staticMask: try compute("staticMask"),
+                stabilityBlend: try compute("blendTowardCaptures"),
+                stabilityBlendFromYUV: try compute("blendTowardCapturesFromYUV"),
+                stabilityBlendFromYUVResampled: try compute("blendTowardCapturesFromYUVResampled"),
                 convertTo420: try compute("bgraTo420"),
-                convertFrom420: try compute("yuv420ToBgra"),
-                extrapolate: try compute("extrapolateFrame"),
+                convertTo420Resampled: try compute("bgraTo420Resampled"),
                 present: try device.makeRenderPipelineState(descriptor: presentDescriptor))
             return .success(GPUContext(device: device, queue: queue, pipelines: pipelines))
         } catch let error as MGError {

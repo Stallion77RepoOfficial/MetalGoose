@@ -20,24 +20,15 @@ import os
 /// interpolator guesses the motion itself (an image 30 dB from the real one against 50 dB with it). A
 /// pair whose motion has not arrived is not interpolated; the capture is shown instead.
 ///
-/// Concurrency: everything but `texture(previous:next:)` runs on the capture pipeline's queue.
+/// Concurrency: everything runs on the capture pipeline's queue; the render thread reads the images from
+/// `GeneratedImages`.
 final class MetalFXInterpolator: @unchecked Sendable {
 
-    private struct Output {
-        let previous: CFTimeInterval
-        let next: CFTimeInterval
-        let texture: MTLTexture
-    }
-
-    private struct Results {
-        /// Bumped on every reset, so the completion of a command buffer from before it cannot publish into
-        /// what follows.
-        var epoch = 0
-        var outputs: [Output] = []
-    }
+    /// Bumped on every reset, so the completion of a command buffer from before it cannot publish into what follows.
+    private let epoch = OSAllocatedUnfairLock(initialState: 0)
 
     /// One result per pair the ring can hold: the render clock never reads further back than that.
-    private static let resultCapacity = FrameRing.capacity - 1
+    private static let resultCapacity = GeneratedImages.capacity(of: .metalFX)
 
     /// Calls that return the current frame unchanged before MetalFX interpolates: after a new
     /// interpolator's first call, and after a pair that was never fed.
@@ -53,6 +44,7 @@ final class MetalFXInterpolator: @unchecked Sendable {
     private let gpu: GPUContext
     private let errors: ErrorLog
     private let latency: GenerationLatency
+    private let images: GeneratedImages
 
     // Processing queue only.
     private var interpolator: MTLFXFrameInterpolator?
@@ -71,13 +63,13 @@ final class MetalFXInterpolator: @unchecked Sendable {
     private var outputs: [MTLTexture] = []
     private var outputIndex = 0
 
-    private let results = OSAllocatedUnfairLock<Results>(uncheckedState: Results())
     private let pending = OSAllocatedUnfairLock(initialState: 0)
 
-    init(gpu: GPUContext, errors: ErrorLog, latency: GenerationLatency) {
+    init(gpu: GPUContext, errors: ErrorLog, latency: GenerationLatency, images: GeneratedImages) {
         self.gpu = gpu
         self.errors = errors
         self.latency = latency
+        self.images = images
     }
 
     /// Drops everything. The captures the interpolator held references to are gone, and a stream begun
@@ -91,17 +83,7 @@ final class MetalFXInterpolator: @unchecked Sendable {
         flatDepthIsCleared = false
         outputs.removeAll()
         outputIndex = 0
-        results.withLockUnchecked {
-            $0.epoch &+= 1
-            $0.outputs.removeAll()
-        }
-    }
-
-    /// The midpoint of a pair, once it has been produced. Called from the render thread.
-    func texture(previous: CFTimeInterval, next: CFTimeInterval) -> MTLTexture? {
-        results.withLockUnchecked { state in
-            state.outputs.last { $0.previous == previous && $0.next == next }?.texture
-        }
+        epoch.withLock { $0 &+= 1 }
     }
 
     // MARK: - Interpolating
@@ -160,19 +142,14 @@ final class MetalFXInterpolator: @unchecked Sendable {
         if !producesImage { warmUpCalls -= 1 }
 
         let pair = (previous: previous.timestamp, next: next.timestamp)
-        let epoch = results.withLockUnchecked { $0.epoch }
-        nonisolated(unsafe) let image = output
+        let issued = epoch.withLock { $0 }
+        let made = GeneratedImages.Image(previous: pair.previous, next: pair.next, phase: 0.5, source: .colour(output), engine: .metalFX)
         pending.withLock { $0 += 1 }
-        commandBuffer.addCompletedHandler { [results, latency, pending] _ in
+        commandBuffer.addCompletedHandler { [epoch, images, latency, pending] _ in
             pending.withLock { $0 -= 1 }
-            guard producesImage else { return }
-            let published = results.withLockUnchecked { state -> Bool in
-                guard state.epoch == epoch else { return false }
-                state.outputs.append(Output(previous: pair.previous, next: pair.next, texture: image))
-                if state.outputs.count > Self.resultCapacity { state.outputs.removeFirst() }
-                return true
-            }
-            if published { latency.record(previous: pair.previous, next: pair.next) }
+            guard producesImage, epoch.withLock({ $0 }) == issued else { return }
+            images.publish([made])
+            latency.record(previous: pair.previous, next: pair.next)
         }
         commandBuffer.commit()
     }
@@ -219,10 +196,7 @@ final class MetalFXInterpolator: @unchecked Sendable {
         // A new interpolator has no history: it begins a stream, with the warm-up that comes with one.
         // Nothing the old one was fed carries over, and nothing it produced can be published.
         lastFedNext = nil
-        results.withLockUnchecked {
-            $0.epoch &+= 1
-            $0.outputs.removeAll()
-        }
+        epoch.withLock { $0 &+= 1 }
         interpolator = created
         return created
     }

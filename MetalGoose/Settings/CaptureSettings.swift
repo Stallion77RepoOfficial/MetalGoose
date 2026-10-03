@@ -68,13 +68,23 @@ final class CaptureSettings: ObservableObject {
         scaleFactor         = restore(.scaleFactor, scaleFactor)
         renderScale         = restore(.renderScale, renderScale)
         sharpening          = restore(.sharpening, sharpening)
-        frameGenMode        = restore(.frameGenMode, frameGenMode)
+        frameGenMode        = restoreFrameGeneration()
         frameGenMultiplier  = restore(.frameGenMultiplier, frameGenMultiplier)
         aaMode              = restore(.aaMode, aaMode)
         captureCursor       = restore(.captureCursor, captureCursor)
         showMGHUD           = restore(.showMGHUD, showMGHUD)
         vsync               = restore(.vsync, vsync)
         tripleBuffering     = restore(.tripleBuffering, tripleBuffering)
+    }
+
+    /// The stored frame generation mode. Versions before MGFG-1 stored the mode that interpolated or the one that
+    /// extrapolated, and both are MGFG-1 now (`FrameGenMode.init(storedValue:)`); the value is written back at once, so
+    /// that what is stored is the current one from then on.
+    private func restoreFrameGeneration() -> FrameGenMode {
+        guard let raw = defaults.string(forKey: Key.frameGenMode.path),
+              let mode = FrameGenMode(storedValue: raw) else { return frameGenMode }
+        if mode.rawValue != raw { save(mode.rawValue, .frameGenMode) }
+        return mode
     }
 
     private func save(_ value: Any, _ key: Key) {

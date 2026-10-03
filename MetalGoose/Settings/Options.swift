@@ -93,35 +93,36 @@ enum ScaleFactor: String, SettingOption {
 
 enum FrameGenMode: String, SettingOption {
     case off = "Off"
-    /// Blends between two captured frames. Highest quality, but the newest frame has
-    /// to be held back: the schedule runs behind real time by most of a capture interval
-    /// plus the time the first generated image takes to make, because an image cannot be
-    /// shown before it exists and a clock any closer to real time asks for it too early.
-    /// The Neural Engine makes the midpoint of each pair, or its quarters; MetalFX, which
-    /// takes over when the Neural Engine cannot take the frames, makes only the midpoint.
-    case interpolation = "MGFG-1-Interpolation"
-    /// Warps the newest frame forward along its motion. Lower quality around
-    /// disocclusions, but nothing is held back, so latency is unchanged, and the warp
-    /// phase is continuous — the gap can be sampled at as many points as the
-    /// multiplier asks for.
-    case extrapolation = "MGFG-1-Extrapolation"
+    /// MGFG-1 makes the images between captures by interpolation: the Neural Engine, and MetalFX on the GPU where the
+    /// Neural Engine cannot (`GenerationSelector`). It blends between two captured frames, so the newest one has to be
+    /// held back: the schedule runs behind real time by most of a capture interval plus the time the first generated
+    /// image takes to make, because an image cannot be shown before it exists and a clock any closer to real time asks
+    /// for it too early.
+    case mgfg1 = "MGFG-1"
 
     var title: LocalizedStringResource {
         switch self {
-        case .off:           return "Off"
-        case .interpolation: return "MGFG-1-Interpolation"
-        case .extrapolation: return "MGFG-1-Extrapolation"
+        case .off:   return "Off"
+        case .mgfg1: return "MGFG-1"
         }
     }
 
-    /// The multipliers the mode can deliver, lowest first. Interpolation cuts a pair into two steps, the
-    /// midpoint, or four, its quarters, and nothing in between. The warp used by extrapolation takes a
-    /// continuous phase, so it can be sampled at as many points in the gap as asked for.
+    /// The multipliers the mode can deliver, lowest first. A pair of captures is cut into two steps, the midpoint, or
+    /// four, its quarters, and nothing in between: the Neural Engine rounds any other phase to the nearest eighth, and
+    /// takes five times as long for thirds.
     var multipliers: [Int] {
         switch self {
-        case .off:           return [1]
-        case .interpolation: return [2, 4]
-        case .extrapolation: return [2, 3, 4]
+        case .off:   return [1]
+        case .mgfg1: return [2, 4]
+        }
+    }
+
+    /// Versions before MGFG-1 stored the mode that interpolated or the one that extrapolated. There is one mode now, and
+    /// it interpolates, so both are MGFG-1; a value that was never a mode is none.
+    init?(storedValue: String) {
+        switch storedValue {
+        case "MGFG-1-Interpolation", "MGFG-1-Extrapolation": self = .mgfg1
+        default:                                              self.init(rawValue: storedValue)
         }
     }
 }

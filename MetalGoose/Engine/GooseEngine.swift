@@ -44,13 +44,9 @@ final class GooseEngine: @unchecked Sendable {
 
     var stats: PipelineStats { shared.stats.withLock { $0 } }
 
-    /// What is producing the in-between images right now: the Neural Engine, unless the window is too large
-    /// for it or its processor failed, which MetalFX takes over from.
-    var activeInterpolationEngine: InterpolationEngine { shared.interpolationBackend.withLock { $0 } }
-
-    /// The steps each pair is cut into right now, which is what interpolation delivers: the multiplier it was
-    /// asked for, unless the engine cannot make that many images in time.
-    var interpolationSteps: Int { shared.interpolationSteps.withLock { $0 } }
+    /// What is producing the in-between images right now, and how many a capture interval carries: what MGFG-1 chose
+    /// for the window and the load, which is not always what was asked for. No engine at all when none keeps up.
+    var generation: GenerationChoice { shared.generation.withLock { $0 } }
 
     /// The next error raised off the main thread, if any.
     func takeError() -> MGError? { shared.errors.take() }
@@ -136,7 +132,7 @@ final class GooseEngine: @unchecked Sendable {
             $0.screenRefreshRate = displayRate.maximum
             $0.isProMotion = displayRate.isVariable
         }
-        let pipeline = RenderPipeline(shared: shared, motion: capture.motion)
+        let pipeline = RenderPipeline(shared: shared)
         let driver = RenderDriver(shared: shared, pipeline: pipeline, displayRate: displayRate)
         presentation = Presentation(pipeline: pipeline, driver: driver, layer: layer)
         driver.start(layer: layer)

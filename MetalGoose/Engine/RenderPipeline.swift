@@ -5,18 +5,20 @@ import QuartzCore
 import os
 
 /// Puts the right image on screen for each display callback: decides what the callback should
-/// show, extrapolates it if that is what it is, scales it up to the drawable, and presents.
+/// show, blends it with the captures it sits between if it was generated, scales it up to the drawable, and presents.
 ///
-/// Runs on the render thread alone, and owns everything it keeps — the scaler, the extrapolator and
-/// their textures. It shares only what `EngineShared` and the motion pipeline lock. Interpolated
-/// images are not made here: the capture side makes each as its pair completes, and this only picks
+/// Runs on the render thread alone, and owns everything it keeps — the scaler, the blender and
+/// their textures. It shares only what `EngineShared` locks. Interpolated
+/// images are not made here: the engines make each as its pair completes, and this only picks
 /// up the ones that exist.
 final class RenderPipeline: @unchecked Sendable {
 
     private let shared: EngineShared
     private let gpu: GPUContext
-    private let motion: MotionPipeline
-    private let extrapolator: FrameExtrapolator
+    private let stability: StabilityBlender
+
+    /// How far behind the newest capture the schedule runs, as it is allowed to change.
+    private var delay = DelayGovernor()
 
     private var spatialScaler: MTLFXSpatialScaler?
     private var upscaled: MTLTexture?
@@ -25,7 +27,6 @@ final class RenderPipeline: @unchecked Sendable {
     /// draw at all: the layer keeps its contents, so presenting the same pixels again would cost a
     /// full pass over the drawable and a recomposite by the window server for nothing.
     private var lastPresented: PresentedImage?
-    private var newestPresentedTimestamp: CFTimeInterval = -1
 
     /// Set from any thread when the overlay changes shape or reappears: the drawable then has to
     /// be filled again even though no new image has arrived.
@@ -38,11 +39,10 @@ final class RenderPipeline: @unchecked Sendable {
     private var windowGenerated = 0
     private var windowBusyStart = 0.0
 
-    init(shared: EngineShared, motion: MotionPipeline) {
+    init(shared: EngineShared) {
         self.shared = shared
         self.gpu = shared.gpu
-        self.motion = motion
-        self.extrapolator = FrameExtrapolator(gpu: shared.gpu)
+        self.stability = StabilityBlender(gpu: shared.gpu)
     }
 
     func requestRedraw() {
@@ -53,9 +53,9 @@ final class RenderPipeline: @unchecked Sendable {
     func reset() {
         spatialScaler = nil
         upscaled = nil
-        extrapolator.reset()
+        stability.reset()
+        delay.reset()
         lastPresented = nil
-        newestPresentedTimestamp = -1
         requestRedraw()
         pacing.withLock { $0.reset() }
     }
@@ -67,11 +67,26 @@ final class RenderPipeline: @unchecked Sendable {
         /// What is actually being shown, which is not always what was planned: a midpoint that does not
         /// exist yet falls back to a capture, and that capture is what the screen then holds.
         let image: PresentedImage
-        let texture: MTLTexture
-        /// Age is reported from this: the newest real information on screen. Extrapolated pixels
-        /// are a guess, and crediting them made the figure read as zero.
+        /// A capture, as it is, or an image an engine made, which is shown blended with the captures it sits between.
+        let picture: Picture
+        /// Age is reported from this: the newest real information on screen. A generated image could only be
+        /// made once the capture it ends at had arrived, so that is its age.
         let sourceTimestamp: CFTimeInterval
         let isGenerated: Bool
+    }
+
+    private enum Picture {
+        case capture(MTLTexture)
+        case generated(Blend)
+    }
+
+    /// An image an engine made, the two captures it sits between, where, and how far the image is trusted.
+    private struct Blend {
+        let image: GeneratedImages.Source
+        let previous: MTLTexture
+        let next: MTLTexture
+        let phase: Double
+        let tolerance: Float
     }
 
     func render(into drawable: CAMetalDrawable, displayRate: DisplayRate) {
@@ -84,20 +99,14 @@ final class RenderPipeline: @unchecked Sendable {
 
         let config = shared.config.withLock { $0 }
         let frames = shared.ring.snapshot()
-        let field = config.generatesFrames ? motion.latest : nil
 
         // The schedule is read at the callback, not at the time the link says its image will reach the
         // screen: that latency is the same for every image and drops out, where a clock that included it
         // would start every capture interval most of the way through.
         let now = CACurrentMediaTime()
+        let generation = config.generatesFrames ? shared.generation.withLock { $0 } : .nothing
         let plan = FramePlanner.plan(frames, PlanningInput(
-            mode: config.frameGeneration,
-            multiplier: multiplier(for: config),
-            sampleTime: now,
-            captureInterval: shared.captureInterval.withLock { $0.value },
-            generationLatency: shared.generationLatency.value,
-            newestWasPresented: frames.last?.timestamp == newestPresentedTimestamp,
-            motionTimestamp: field?.timestamp))
+            multiplier: generation.multiplier, sampleTime: now, delay: scheduleDelay(for: generation, now: now)))
 
         publishRates(now: now, displayRate: displayRate)
 
@@ -106,7 +115,7 @@ final class RenderPipeline: @unchecked Sendable {
         guard planned != lastPresented || redraw,
               let commandBuffer = gpu.makeCommandBuffer("MetalGoose present") else { return }
 
-        let content = realize(plan, frames: frames, field: field, commandBuffer: commandBuffer)
+        let content = realize(plan, frames: frames)
 
         // The planned image is not always the one that came out: a midpoint that has not been made yet —
         // the motion for the pair is still being measured — falls back to a capture. Remembering the
@@ -117,7 +126,20 @@ final class RenderPipeline: @unchecked Sendable {
             return
         }
 
-        encodePresent(content.texture, to: drawable.texture, upscaling: config.upscaling, commandBuffer: commandBuffer)
+        // Only now, with the image known to be shown: a pass for one that is not would be spent for nothing.
+        let shown: MTLTexture
+        switch content.picture {
+        case .capture(let texture):
+            shown = texture
+        case .generated(let blend):
+            guard let blended = stability.blend(blend.image, previous: blend.previous, next: blend.next, phase: blend.phase,
+                                                tolerance: blend.tolerance, commandBuffer: commandBuffer) else {
+                commandBuffer.commit()
+                return
+            }
+            shown = blended
+        }
+        encodePresent(shown, to: drawable.texture, upscaling: config.upscaling, commandBuffer: commandBuffer)
 
         // A redraw of the image already on screen — the overlay changed shape — is not a new generated image.
         let isNewImage = content.image != lastPresented
@@ -149,22 +171,27 @@ final class RenderPipeline: @unchecked Sendable {
         commandBuffer.commit()
     }
 
-    /// How many images each capture interval is planned to carry: what extrapolation was asked for, and
-    /// what interpolation is delivering, which is not always what it was asked for.
-    private func multiplier(for config: EngineConfig) -> Int {
-        config.frameGeneration == .interpolation ? shared.interpolationSteps.withLock { $0 } : config.multiplier
-    }
-
     // MARK: - Realising a plan
+
+    /// How far behind the newest capture the schedule runs: most of a capture interval, plus how long the engine takes to
+    /// make the first image of a pair, eased where it falls (`DelayGovernor`). Nothing is held back where nothing is made.
+    private func scheduleDelay(for generation: GenerationChoice, now: CFTimeInterval) -> CFTimeInterval {
+        guard generation.engine != nil else {
+            delay.reset()
+            return 0
+        }
+        let needed = FramePlanner.interpolationDelay(captureInterval: shared.captureInterval.withLock { $0.value },
+                                                     generationLatency: generation.latency,
+                                                     steps: InterpolationSteps.steps(for: generation.multiplier))
+        return delay.apply(needed, now: now)
+    }
 
     /// Turns the plan into a texture. A generated image that does not exist yet falls back to a capture
     /// rather than leaving the screen without an image.
-    private func realize(_ plan: PresentationPlan, frames: [FrameHistory], field: MotionField?,
-                         commandBuffer: MTLCommandBuffer) -> Content {
+    private func realize(_ plan: PresentationPlan, frames: [FrameHistory]) -> Content {
         func captured(_ index: Int) -> Content {
             let frame = frames[index]
-            if index == frames.count - 1 { newestPresentedTimestamp = frame.timestamp }
-            return Content(image: .captured(frame.timestamp), texture: frame.texture,
+            return Content(image: .captured(frame.timestamp), picture: .capture(frame.texture),
                            sourceTimestamp: frame.timestamp, isGenerated: false)
         }
 
@@ -183,23 +210,16 @@ final class RenderPipeline: @unchecked Sendable {
             let (earlier, later) = (frames[previous].timestamp, frames[next].timestamp)
             for candidate in stride(from: step, through: 1, by: -1) {
                 let phase = Double(candidate) / Double(steps)
-                guard let texture = shared.interpolated(previous: earlier, next: later, phase: phase) else { continue }
+                guard let made = shared.images.image(previous: earlier, next: later, phase: phase) else { continue }
                 // The image stands for a time between the pair, but it could only be made once `next` had
-                // arrived, so that is the honest age to report — and it makes the two generation modes
-                // directly comparable.
+                // arrived, so that is the honest age to report — and it makes the two engines directly comparable.
+                // It is shown blended with the captures it sits between, as the engine that made it is trusted.
+                let blend = Blend(image: made.source, previous: frames[previous].texture, next: frames[next].texture, phase: phase,
+                                  tolerance: StabilityBlend.tolerance(for: made.engine))
                 return Content(image: .interpolated(previous: earlier, next: later, phase: phase),
-                               texture: texture, sourceTimestamp: later, isGenerated: true)
+                               picture: .generated(blend), sourceTimestamp: later, isGenerated: true)
             }
             return captured(previous)
-
-        case .extrapolated(let source, let step, let steps):
-            guard let field,
-                  let texture = extrapolator.extrapolate(source: frames[source], field: field, step: step, steps: steps,
-                                                         commandBuffer: commandBuffer) else {
-                return captured(source)
-            }
-            return Content(image: .extrapolated(source: frames[source].timestamp, step: step),
-                           texture: texture, sourceTimestamp: frames[source].timestamp, isGenerated: true)
         }
     }
 
@@ -284,7 +304,7 @@ final class RenderPipeline: @unchecked Sendable {
         let load = Float((busy - windowBusyStart) / elapsed * 100)
         windowBusyStart = busy
         let config = shared.config.withLock { $0 }
-        let imagesPerCapture = config.generatesFrames ? max(1, multiplier(for: config)) : 1
+        let imagesPerCapture = config.generatesFrames ? max(1, shared.generation.withLock { $0.multiplier }) : 1
         shared.stats.withLock {
             $0.outputFPS = presents
             $0.generatedFPS = generated
