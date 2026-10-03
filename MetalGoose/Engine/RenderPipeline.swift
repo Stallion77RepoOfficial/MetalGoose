@@ -382,9 +382,9 @@ final class RenderPipeline: @unchecked Sendable {
         shared.stats.withLock {
             $0.outputFPS = presents
             $0.generatedFPS = generated
-            // What the screen should be given: every capture, and the images generated between them. The
-            // panel's refresh rate is not it — it repeats whatever it last showed.
-            $0.targetOutputFPS = Int(($0.captureFPS * Float(imagesPerCapture)).rounded())
+            // What the screen should be given: every capture, and the images generated between them, up to one a
+            // refresh — four steps are made with fewer than four refreshes a capture, and not all of them are shown.
+            $0.targetOutputFPS = min(Int(($0.captureFPS * Float(imagesPerCapture)).rounded()), displayRate.maximum)
             $0.gpuLoad = load
             if let summary {
                 $0.avgFrameTime = Float(summary.averageInterval * 1000)

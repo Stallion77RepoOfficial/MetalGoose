@@ -70,8 +70,10 @@ struct GenerationChoice: Sendable, Equatable {
 ///   over the moment it is ready. A session that is serving while a better-sized one is built keeps serving while it is
 ///   not far behind.
 /// - A multiplier the panel cannot show is not made: it shows about as many images as its refresh rate gives in a
-///   capture interval, so 4 at 30 captures a second on 60 Hz is 2. Where it shows fewer than two — 60 captures a second on
-///   60 Hz, 120 on 120 — there is no room between the captures for an image to be seen, and nothing is made or held back.
+///   capture interval. Four steps are made where it shows two and a half or more, at 120 Hz up to about 46 captures a
+///   second: not every quarter is seen then, but the ones that are put the picture nearer its place than the midpoint alone
+///   does. 4 at 30 captures a second on 60 Hz is 2. Where it shows fewer than two — 60 captures a second on 60 Hz, 120 on
+///   120 — there is no room between the captures for an image to be seen, and nothing is made or held back.
 /// - An engine that stops keeping up is left at once, and not tried again for a while. A better one is taken only
 ///   when it would keep up with room to spare and the choice has stood for a while, so a rate near a limit does not
 ///   move the engine back and forth: every move shifts the schedule by what interpolation holds back.
@@ -167,10 +169,17 @@ struct GenerationSelector {
     /// the picture is the captures' own, and getting images between them is worth more than the quiet of a long wait.
     private static let idleDwell: CFTimeInterval = 5
 
-    /// A multiplier of 4 is made while the panel can show about that many images in a capture interval, and kept down
-    /// to a little less.
-    private static let enterSlack = 0.4
-    private static let keepSlack = 0.7
+    /// Images the panel shows in a capture interval for four steps to be made, and to be kept. Fewer than four refreshes a pair
+    /// do not show every quarter, but each refresh shows the step nearest its moment, and four steps leave it a quarter of a
+    /// pair off at most where two leave it half. Modelled at 120 Hz with the Neural Engine making the quarters at 960x540
+    /// (13.5 ms) against the midpoint at 1280x720 (7 ms), the content on screen was off an even pace by 1.7 ms against 3.4 for
+    /// a game in step with the display at 40 a second, and by 3.0 to 3.5 against 4.1 to 4.9 for games running freely at 34
+    /// to 45, with every refresh given a new image where two steps gave 70 to 90 a second; it cost 9 to 11 ms of latency,
+    /// the quarters' longer call. At 2.4 images, 50 a second, four steps were still ahead with a 13.5 ms call and behind with
+    /// 16, and from 2.2 on they were no better. The call has to fit the interval as well (`InterpolationSteps`), which keeps
+    /// a slow one from taking them where they would be behind.
+    private static let quartersEnterImages = 2.6
+    private static let quartersKeepImages = 2.5
 
     /// Images the panel shows in a capture interval for two to be worth making, to be taken and to be kept: below these the
     /// generated image would be on the screen for less than a refresh, or for none.
@@ -324,13 +333,13 @@ struct GenerationSelector {
         return images < (keeping ? Self.keepImages : Self.enterImages)
     }
 
-    /// The steps asked for, or 2 where the panel cannot show four images in a capture interval.
+    /// The steps asked for, or 2 where the panel shows too few images in a capture interval for four to be worth making.
     private func deliverable(_ i: Inputs, requested: Int) -> Int {
         guard requested == InterpolationSteps.quarters, i.refreshRate > 0, i.captureInterval > 0 else { return requested }
         let keeping = decided && choice.multiplier == InterpolationSteps.quarters
         let images = Double(i.refreshRate) * (keeping ? i.captureInterval : enteringInterval(i))
-        let slack = keeping ? Self.keepSlack : Self.enterSlack
-        return images >= Double(InterpolationSteps.quarters) - slack ? InterpolationSteps.quarters : InterpolationSteps.halves
+        return images >= (keeping ? Self.quartersKeepImages : Self.quartersEnterImages)
+            ? InterpolationSteps.quarters : InterpolationSteps.halves
     }
 
     // MARK: The interval

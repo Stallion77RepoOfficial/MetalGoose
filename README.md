@@ -52,8 +52,11 @@ Engine's session is being built, Not keeping up, or Display-limited.
 - Where neither can make its images before the next capture is due, nothing is held back: the captures are shown as
   they arrive.
 - **Multiplier** — images presented per captured frame: 2x (the midpoint of each pair) or 4x (its quarters, on the
-  Neural Engine). A multiplier the panel cannot show is not made (4x at 30 captures a second on a 60 Hz panel is 2x),
-  and 4x falls back to 2x where the quarters do not fit the time between captures.
+  Neural Engine). 4x is made while the panel shows at least two and a half refreshes per capture — at 120 Hz up to about
+  46 captures a second; where it shows fewer than four, each refresh shows the quarter nearest its moment, which keeps the
+  motion more even than the midpoint alone. Below that it is 2x (4x at 30 captures a second on a 60 Hz panel is 2x), and
+  4x falls back to 2x where the quarters do not fit the time between captures. The HUD's Target is never more than the
+  panel's refresh rate.
 - **Interface and text stay as captured** — where the content did not move between the two captures (an interface,
   text, a still background) they are blended back into the generated image, which keeps what did not move: the Neural
   Engine's images are lossy there, and MetalFX's gain a little. What counts is how much the captures differ compared with
