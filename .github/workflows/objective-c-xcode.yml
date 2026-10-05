@@ -1,0 +1,23 @@
+name: Xcode - Build and Analyze
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build and analyze
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild clean build analyze \
+            -scheme MetalGoose \
+            -project MetalGoose.xcodeproj \
+            CODE_SIGNING_ALLOWED=NO
