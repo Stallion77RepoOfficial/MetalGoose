@@ -3,8 +3,6 @@ import SwiftUI
 /// What is missing before scaling can start, and the way to get it.
 struct PermissionBanner: View {
     @ObservedObject var permissions: PermissionManager
-    /// Accessibility only matters where the pointer is taken to a picture that is not where its window is.
-    let needsAccessibility: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -15,16 +13,9 @@ struct PermissionBanner: View {
             StatusRow(label: "Screen Recording", granted: permissions.screenRecordingGranted,
                       grant: permissions.requestScreenRecording,
                       openSettings: permissions.openScreenRecordingSettings)
-            if needsAccessibility {
-                StatusRow(label: "Accessibility", granted: permissions.accessibilityGranted,
-                          grant: permissions.requestAccessibility,
-                          openSettings: permissions.openAccessibilitySettings)
-                if !permissions.accessibilityGranted {
-                    Text("Needed to keep the pointer on the picture while the window is scaled up. Without it, turn Align Pointer off or set Scale Factor to 1.0x.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            StatusRow(label: "Accessibility", granted: permissions.accessibilityGranted,
+                      grant: permissions.requestAccessibility,
+                      openSettings: permissions.openAccessibilitySettings)
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)

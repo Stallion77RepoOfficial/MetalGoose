@@ -47,14 +47,14 @@ final class RenderPipeline: @unchecked Sendable {
     private let pacing = OSAllocatedUnfairLock(initialState: PacingTracker())
 
     private var windowStart: CFTimeInterval = 0
-    private var windowPresents = 0
-    private var windowGenerated = 0
+    private let presentations = PresentationCounter()
     private var windowBusyStart = 0.0
 
     init(shared: EngineShared) {
         self.shared = shared
         self.gpu = shared.gpu
         self.stability = StabilityBlender(gpu: shared.gpu)
+        windowBusyStart = shared.gpu.busyTime
     }
 
     func requestRedraw() {
@@ -77,6 +77,9 @@ final class RenderPipeline: @unchecked Sendable {
         lastPresented = nil
         requestRedraw()
         pacing.withLock { $0.reset() }
+        presentations.reset()
+        windowStart = 0
+        windowBusyStart = gpu.busyTime
     }
 
     // MARK: - One display callback
@@ -91,7 +94,11 @@ final class RenderPipeline: @unchecked Sendable {
         /// Age is reported from this: the newest real information on screen. A generated image could only be
         /// made once the capture it ends at had arrived, so that is its age.
         let sourceTimestamp: CFTimeInterval
+        let compositorTimestamp: CFTimeInterval
+        let validity: WorkValidity
+        let referenceValidity: WorkValidity?
         let isGenerated: Bool
+        var isValid: Bool { validity.isValid && referenceValidity?.isValid != false }
     }
 
     private enum Picture {
@@ -152,6 +159,7 @@ final class RenderPipeline: @unchecked Sendable {
         guard planned != lastPresented || redraw else { return }
 
         let content = realize(plan, frames: frames)
+        guard content.isValid else { return }
 
         // The planned image is not always the one that came out: a midpoint that has not been made yet —
         // the motion for the pair is still being measured — falls back to a capture. Remembering the
@@ -180,27 +188,37 @@ final class RenderPipeline: @unchecked Sendable {
         let isNewImage = content.image != lastPresented
         lastPresented = content.image
         redrawRequested.withLock { $0 = false }
-        recordPresent(content, isNewImage: isNewImage,
-                      drawableSize: CGSize(width: drawable.texture.width, height: drawable.texture.height))
 
         let source = content.sourceTimestamp
+        let compositor = content.compositorTimestamp
+        let validity = content.validity
+        let referenceValidity = content.referenceValidity
+        let generated = content.isGenerated
+        let drawableSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
+        let epoch = presentations.epoch
+        let counterEpoch = shared.stats.withLock { $0.counterEpoch }
         let capacity = max(8, Int((Double(displayRate.maximum) * EngineShared.measurementWindow).rounded()))
-        drawable.addPresentedHandler { [shared, pacing] presented in
+        drawable.addPresentedHandler { [shared, pacing, presentations] presented in
             // Zero means the system could not say when it reached the screen.
             let time = presented.presentedTime
-            guard time > 0 else { return }
-            pacing.withLock { $0.record(time, capacity: capacity) }
+            guard time > 0, validity.isValid, referenceValidity?.isValid != false else { return }
             let latency = Float((time - source) * 1000)
             shared.stats.withLock {
+                guard $0.counterEpoch == counterEpoch,
+                      presentations.record(epoch: epoch, isNewImage: isNewImage, isGenerated: generated) else { return }
+                if isNewImage {
+                    pacing.withLock { $0.record(time, capacity: capacity) }
+                    $0.outputFrameCount += 1
+                    if generated { $0.generatedFrameCount += 1 }
+                    else { $0.passthroughFrameCount += 1 }
+                }
+                $0.outputResolution = drawableSize
                 $0.presentLatency = latency
-                $0.endToEndLatency = $0.captureLatency + latency
+                $0.endToEndLatency = Float((time - compositor) * 1000)
             }
         }
         commandBuffer.addCompletedHandler { [shared] buffer in
-            // Generation and the upscale live here, so the capture buffer alone does not represent
-            // the pipeline's GPU cost.
-            let renderTime = Float((buffer.gpuEndTime - buffer.gpuStartTime) * 1000)
-            shared.stats.withLock { $0.gpuTime = $0.captureGPUTime + renderTime }
+            if buffer.status != .completed { shared.renderResetRequested.withLock { $0 = true } }
         }
         commandBuffer.present(drawable)
         commandBuffer.commit()
@@ -265,7 +283,8 @@ final class RenderPipeline: @unchecked Sendable {
         func captured(_ index: Int) -> Content {
             let frame = frames[index]
             return Content(image: .captured(frame.presentationTime), picture: .capture(frame.texture),
-                           sourceTimestamp: frame.timestamp, isGenerated: false)
+                           sourceTimestamp: frame.timestamp, compositorTimestamp: frame.presentationTime,
+                           validity: frame.validity, referenceValidity: nil, isGenerated: false)
         }
 
         switch plan {
@@ -291,7 +310,8 @@ final class RenderPipeline: @unchecked Sendable {
                                   motion: StabilityBlend.motion(for: made.engine))
                 return Content(image: .interpolated(previous: frames[previous].presentationTime,
                                                     next: frames[next].presentationTime, phase: phase),
-                               picture: .generated(blend), sourceTimestamp: later, isGenerated: true)
+                               picture: .generated(blend), sourceTimestamp: later, compositorTimestamp: frames[next].presentationTime,
+                               validity: frames[next].validity, referenceValidity: frames[previous].validity, isGenerated: true)
             }
             return captured(previous)
         }
@@ -349,20 +369,6 @@ final class RenderPipeline: @unchecked Sendable {
 
     // MARK: - Statistics
 
-    private func recordPresent(_ content: Content, isNewImage: Bool, drawableSize: CGSize) {
-        windowPresents += 1
-        if content.isGenerated && isNewImage { windowGenerated += 1 }
-        shared.stats.withLock {
-            $0.outputResolution = drawableSize
-            $0.outputFrameCount += 1
-            if content.isGenerated {
-                $0.generatedFrameCount += 1
-            } else {
-                $0.passthroughFrameCount += 1
-            }
-        }
-    }
-
     /// Once a second: the rates over that window, and the pacing of what actually reached the
     /// screen. Runs whether or not this callback presents, so a pipeline that has gone quiet shows
     /// zero rather than its last good figure.
@@ -372,10 +378,12 @@ final class RenderPipeline: @unchecked Sendable {
         guard elapsed >= 1.0 else { return }
 
         let summary = pacing.withLock { $0.summary }
-        let presents = Float(windowPresents) / Float(elapsed)
-        let generated = Float(windowGenerated) / Float(elapsed)
+        let window = presentations.takeWindow()
+        let presents = Float(window.images) / Float(elapsed)
+        let generated = Float(window.generated) / Float(elapsed)
         let busy = gpu.busyTime
-        let load = Float((busy - windowBusyStart) / elapsed * 100)
+        let duration = max(0, busy - windowBusyStart)
+        let load = Float(duration / elapsed * 100)
         windowBusyStart = busy
         let config = shared.config.withLock { $0 }
         let imagesPerCapture = config.generatesFrames ? max(1, shared.generation.withLock { $0.multiplier }) : 1
@@ -386,6 +394,8 @@ final class RenderPipeline: @unchecked Sendable {
             // refresh — four steps are made with fewer than four refreshes a capture, and not all of them are shown.
             $0.targetOutputFPS = min(Int(($0.captureFPS * Float(imagesPerCapture)).rounded()), displayRate.maximum)
             $0.gpuLoad = load
+            // Average cost of all GPU stages per new image actually presented.
+            $0.gpuTime = window.images > 0 ? Float(duration * 1000 / Double(window.images)) : 0
             if let summary {
                 $0.avgFrameTime = Float(summary.averageInterval * 1000)
                 $0.framePacingScore = Float(summary.score)
@@ -393,8 +403,6 @@ final class RenderPipeline: @unchecked Sendable {
             $0.screenRefreshRate = displayRate.maximum
             $0.isProMotion = displayRate.isVariable
         }
-        windowPresents = 0
-        windowGenerated = 0
         windowStart = now
     }
 }

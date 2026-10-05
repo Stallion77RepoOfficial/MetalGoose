@@ -8,7 +8,7 @@ import os
 final class EngineShared: @unchecked Sendable {
     let gpu: GPUContext
     let ring = FrameRing()
-    let errors = ErrorLog()
+    let errors: ErrorLog
     let stats = OSAllocatedUnfairLock(initialState: PipelineStats())
     let config = OSAllocatedUnfairLock(initialState: EngineConfig())
 
@@ -51,6 +51,7 @@ final class EngineShared: @unchecked Sendable {
 
     init(gpu: GPUContext) {
         self.gpu = gpu
+        errors = gpu.errors
         neural = NeuralInterpolator(gpu: gpu, errors: errors, latency: neuralLatency, images: images)
         metalFX = MetalFXInterpolator(gpu: gpu, errors: errors, latency: metalFXLatency, images: images)
     }

@@ -13,6 +13,7 @@ struct FrameHistory: TimedFrame {
     /// stands for, on the display's refresh grid, without the wander of its delivery. The render clock plans on this.
     let presentationTime: CFTimeInterval
     let isSceneCut: Bool
+    let validity = WorkValidity()
 }
 
 /// The most recent captures, oldest first.
@@ -33,7 +34,7 @@ final class FrameRing: @unchecked Sendable {
     }
 
     func snapshot() -> [FrameHistory] {
-        frames.withLockUnchecked { $0 }
+        frames.withLockUnchecked { $0.filter { $0.validity.isValid } }
     }
 
     func clear() {

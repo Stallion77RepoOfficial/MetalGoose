@@ -41,6 +41,12 @@ enum UpdateState {
         if case .done = self { return true }
         return false
     }
+
+    /// Every non-idle state presents an alert or a sheet in the settings window.
+    var blocksScalingStart: Bool {
+        if case .idle = self { return false }
+        return true
+    }
 }
 
 private enum UpdateError: LocalizedError {
@@ -53,12 +59,12 @@ private enum UpdateError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .http(let code):        return "GitHub answered with status \(code)."
-        case .noAsset:               return "No downloadable .zip asset found in release."
-        case .untrustedSource:       return "Release asset is not served from GitHub over HTTPS; refusing to install it."
-        case .checksumMismatch:      return "The downloaded update does not match the checksum GitHub published for it; refusing to install it."
-        case .extractionFailed(let status): return "Extracting the update failed (status \(status))."
-        case .noAppInArchive:        return "No .app bundle found in the update."
+        case .http(let code):        return String(localized: "GitHub answered with status \(code).")
+        case .noAsset:               return String(localized: "No downloadable .zip asset found in release.")
+        case .untrustedSource:       return String(localized: "Release asset is not served from GitHub over HTTPS; refusing to install it.")
+        case .checksumMismatch:      return String(localized: "The downloaded update does not match the checksum GitHub published for it; refusing to install it.")
+        case .extractionFailed(let status): return String(localized: "Extracting the update failed (status \(status)).")
+        case .noAppInArchive:        return String(localized: "No .app bundle found in the update.")
         }
     }
 }
@@ -115,10 +121,8 @@ final class AutoUpdater: ObservableObject {
             guard let asset = release.assets.first(where: { $0.name.hasSuffix(".zip") }),
                   let url = URL(string: asset.browserDownloadURL) else { throw UpdateError.noAsset }
 
-            // The installer replaces the running bundle and strips quarantine, so the download has to
-            // come from GitHub over TLS and nowhere else. A free Apple ID Personal Team cannot issue a
-            // Developer ID certificate, so this and the published checksum are the only verification
-            // available.
+            // The installer replaces the running bundle. Accept only GitHub HTTPS
+            // assets and verify the published checksum when available.
             guard Self.isGitHubHTTPS(url) else { throw UpdateError.untrustedSource }
 
             state = .downloading(progress: 0)

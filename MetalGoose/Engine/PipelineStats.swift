@@ -14,9 +14,8 @@ struct PipelineStats: Sendable, Equatable {
 
     var frameTime: Float = 0
     var gpuTime: Float = 0
-    /// Share of the last second the pipeline kept the GPU busy, in percent. Under contention with the
-    /// captured app each command buffer's measured time includes waiting its turn, so this reads high
-    /// there; as a comparison between settings on one machine it is what to watch.
+    /// Completed command-buffer duration / wall time: a workload budget estimate,
+    /// not hardware utilisation. Preemption and overlap can inflate it.
     var gpuLoad: Float = 0
     var captureGPUTime: Float = 0
     var captureLatency: Float = 0
@@ -30,6 +29,7 @@ struct PipelineStats: Sendable, Equatable {
     var droppedFrames: UInt64 = 0
     var generatedFrameCount: UInt64 = 0
     var passthroughFrameCount: UInt64 = 0
+    var counterEpoch = 0
 
     var gpuMemoryUsed: UInt64 = 0
     var gpuMemoryTotal: UInt64 = 0
@@ -46,6 +46,7 @@ struct PipelineStats: Sendable, Equatable {
     /// mixes two schedules into one set of totals, and the generated/passthrough split stops
     /// meaning anything.
     mutating func resetCumulativeCounters() {
+        counterEpoch &+= 1
         droppedFrames = 0
         outputFrameCount = 0
         generatedFrameCount = 0

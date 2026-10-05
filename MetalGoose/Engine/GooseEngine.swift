@@ -99,10 +99,12 @@ final class GooseEngine: @unchecked Sendable {
         shared.captureInterval.withLock { $0.reset() }
         shared.captureSpread.withLock { $0.reset() }
         shared.stats.withLock { stats in
-            // The panel does not change between sessions.
+            // Preserve the latest display information across a session restart.
             let refresh = stats.screenRefreshRate
             let variable = stats.isProMotion
+            let epoch = stats.counterEpoch
             stats = PipelineStats()
+            stats.counterEpoch = epoch &+ 1
             stats.screenRefreshRate = refresh
             stats.isProMotion = variable
         }
@@ -137,6 +139,22 @@ final class GooseEngine: @unchecked Sendable {
         let driver = RenderDriver(shared: shared, pipeline: pipeline, displayRate: displayRate)
         presentation = Presentation(pipeline: pipeline, driver: driver, layer: layer)
         driver.start(layer: layer)
+    }
+
+    @MainActor
+    func updateDisplayRate(_ displayRate: DisplayRate) {
+        let changed = shared.stats.withLock { stats -> Bool in
+            let changed = stats.screenRefreshRate != displayRate.maximum || stats.isProMotion != displayRate.isVariable
+            stats.screenRefreshRate = displayRate.maximum
+            stats.isProMotion = displayRate.isVariable
+            return changed
+        }
+        presentation?.driver.updateDisplayRate(displayRate)
+        if changed {
+            shared.captureInterval.withLock { $0.reset() }
+            shared.captureSpread.withLock { $0.reset() }
+            capture.resetTiming()
+        }
     }
 
     @MainActor

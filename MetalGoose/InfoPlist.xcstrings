@@ -1,0 +1,218 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "CFBundleDisplayName" : {
+      "comment" : "Bundle display name",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        }
+      }
+    },
+    "CFBundleName" : {
+      "comment" : "Bundle name",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose"
+          }
+        }
+      }
+    },
+    "NSAccessibilityUsageDescription" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose benötigt Zugriff auf die Bedienungshilfen, um den Mauszeiger anzupassen, damit Klicks mit dem hochskalierten Overlay übereinstimmen."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose needs accessibility access to remap the mouse cursor so clicks align with the upscaled overlay."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose necesita acceso a Accesibilidad para ajustar el puntero del ratón y que los clics coincidan con la imagen reescalada de la superposición."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A MetalGoose-nak kisegítő lehetőségekhez való hozzáférésre van szüksége az egérmutató helyzetének módosításához, hogy a kattintások a felskálázott átfedő kép megfelelő pontjára essenek."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose には、マウスポインタの位置を調整し、クリック位置を拡大したオーバーレイ画像に合わせるためにアクセシビリティへのアクセスが必要です。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose нужен доступ к универсальному доступу, чтобы корректировать положение указателя мыши и совмещать щелчки с увеличенным изображением в наложенном окне."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose, fare imlecini yeniden konumlandırıp tıklamaları büyütülen görüntüyle hizalamak için erişilebilirlik iznine ihtiyaç duyar."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose 需要辅助功能权限来调整鼠标指针位置，使点击位置与放大后的叠加图像保持一致。"
+          }
+        }
+      }
+    },
+    "NSScreenCaptureUsageDescription" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose benötigt Zugriff auf die Bildschirmaufnahme, um das ausgewählte Fenster aufzunehmen und mit Hochskalierung und Frame-Generierung zu verbessern."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose needs screen recording to capture the window you choose and enhance it with upscaling and frame generation."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose necesita permiso de grabación de pantalla para capturar la ventana que elijas y mejorarla mediante reescalado y generación de fotogramas."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A MetalGoose-nak képernyőfelvételi engedélyre van szüksége a kiválasztott ablak rögzítéséhez, valamint a kép felskálázással és képkockagenerálással történő javításához."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose には、選択したウインドウをキャプチャし、アップスケーリングとフレーム生成で画質を向上させるために画面収録の許可が必要です。"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose нужно разрешение на запись экрана, чтобы захватывать выбранное окно и улучшать изображение с помощью повышения разрешения и генерации кадров."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose, seçtiğiniz pencereyi yakalayıp çözünürlük artırma ve kare üretimiyle iyileştirmek için ekran kaydı iznine ihtiyaç duyar."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MetalGoose 需要屏幕录制权限来捕获您选择的窗口，并通过分辨率提升和帧生成改善画面。"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

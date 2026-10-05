@@ -36,6 +36,7 @@ final class OverlayWindowManager {
     /// The captured window changed size or moved to a screen of a different density, so the stream
     /// has to be asked for it again.
     var onTargetResized: ((CaptureTarget) -> Void)?
+    var onDisplayChanged: ((NSScreen, DisplayRate) -> Void)?
 
     private var window: NonActivatingWindow?
     private var view: OverlayView?
@@ -43,6 +44,8 @@ final class OverlayWindowManager {
     private var targetPID: pid_t = 0
     private var targetFrame: CGRect = .zero
     private var targetPixelSize: CGSize = .zero
+    private var targetDisplayID: CGDirectDisplayID?
+    private var targetDisplayRate: DisplayRate?
     private var targetIsFrontmost = true
     private var isPresenting = false
 
@@ -102,6 +105,8 @@ final class OverlayWindowManager {
         outputScale = max(1.0, configuration.outputScale)
         fillsScreen = configuration.fillsScreen
         targetFrame = configuration.windowFrame
+        targetDisplayID = ScreenGeometry.displayID(of: configuration.screen)
+        targetDisplayRate = ScreenGeometry.displayRate(of: configuration.screen)
 
         let frame = outputFrame(forWindow: configuration.windowFrame, on: configuration.screen)
         // `frame` is in global coordinates. Given a screen, the window would take it as relative to that screen's origin
@@ -143,6 +148,8 @@ final class OverlayWindowManager {
         view = nil
         targetWindowID = 0
         targetPID = 0
+        targetDisplayID = nil
+        targetDisplayRate = nil
     }
 
     /// Starts following the captured window and the app that owns it.
@@ -217,6 +224,12 @@ final class OverlayWindowManager {
 
         let cgFrame = CGRect(x: x, y: y, width: width, height: height)
         guard let screen = ScreenGeometry.screen(containing: cgFrame) else { return }
+        let id = ScreenGeometry.displayID(of: screen)
+        if let rate = ScreenGeometry.displayRate(of: screen), id != targetDisplayID || rate != targetDisplayRate {
+            targetDisplayID = id
+            targetDisplayRate = rate
+            onDisplayChanged?(screen, rate)
+        }
 
         let pixelSize = CGSize(width: cgFrame.width * screen.backingScaleFactor,
                                height: cgFrame.height * screen.backingScaleFactor)

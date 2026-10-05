@@ -7,16 +7,15 @@ import os
 ///
 /// Both engines publish here and the render thread reads here, so a pair that one engine was still on when the other
 /// took over is shown all the same, and an image is blended with the tolerance of the engine that made it, not the one
-/// that is current. Each engine's images are kept for as many pairs as the render clock can still ask for, and its pool of
-/// textures is larger than that by the images it can have in flight, so a texture is never written while it can still be
-/// read.
+/// that is current. Stored ANE frames retain their buffer leases; the presentation pass
+/// retains the same lease until its GPU read finishes.
 final class GeneratedImages: @unchecked Sendable {
 
     /// What an image is kept as: the colour MetalFX made, or the planes the Neural Engine wrote, which are turned into
     /// colour as the image is shown (`blendTowardCapturesFromYUV`).
     enum Source {
         case colour(MTLTexture)
-        case planes(luma: MTLTexture, chroma: MTLTexture)
+        case planes(YUVFrame)
     }
 
     struct Image {

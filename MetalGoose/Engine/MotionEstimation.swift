@@ -12,6 +12,7 @@ struct MotionField {
     let vectors: MTLTexture
     /// Timestamp of the newer frame of the pair this was measured from.
     let timestamp: CFTimeInterval
+    let validity = WorkValidity()
 }
 
 // MARK: - Media engine
@@ -340,7 +341,7 @@ final class MotionPipeline: @unchecked Sendable {
     ///
     /// - Parameter interval: the time between captures, which decides how finely the media engine can
     ///   afford to search the frame. 0 while it is not known yet.
-    func submit(frame: MTLTexture, timestamp: CFTimeInterval, interval: CFTimeInterval) {
+    func submit(frame: MTLTexture, timestamp: CFTimeInterval, interval: CFTimeInterval, sourceValidity: WorkValidity? = nil) {
         guard let prepared = mediaEngine.prepare(width: frame.width, height: frame.height, interval: interval),
               let commandBuffer = gpu.makeCommandBuffer("MetalGoose motion luma"),
               let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -360,7 +361,8 @@ final class MotionPipeline: @unchecked Sendable {
         if let pending = prepared.pending {
             nonisolated(unsafe) let pending = pending
             let width = frame.width
-            commandBuffer.addCompletedHandler { [self] _ in
+            commandBuffer.addCompletedHandler { [self] buffer in
+                guard buffer.status == .completed, sourceValidity?.isValid != false else { return }
                 estimate(pending, frameWidth: width, timestamp: timestamp)
             }
         }
@@ -377,7 +379,7 @@ final class MotionPipeline: @unchecked Sendable {
                 nonisolated(unsafe) let vectors = vectors
                 self.queue.async {
                     guard let field = self.mediaEngine.texture(for: vectors) else { return }
-                    self.store(field, analysis: analysis, frameWidth: frameWidth, timestamp: timestamp)
+                    self.store(field, retaining: vectors, analysis: analysis, frameWidth: frameWidth, timestamp: timestamp)
                 }
             }
         }
@@ -398,7 +400,7 @@ final class MotionPipeline: @unchecked Sendable {
     /// The vectors are measured on the averaged-down image the media engine searched, so they are carried
     /// into the units of the frame MetalFX works on; and the field is cut to the vectors that cover the
     /// frame, because what the media engine pads it with is not the image.
-    private func store(_ field: MTLTexture, analysis: MotionAnalysis, frameWidth: Int,
+    private func store(_ field: MTLTexture, retaining buffer: CVPixelBuffer, analysis: MotionAnalysis, frameWidth: Int,
                        timestamp: CFTimeInterval) {
         let width = min(field.width, analysis.vectorWidth)
         let height = min(field.height, analysis.vectorHeight)
@@ -439,8 +441,14 @@ final class MotionPipeline: @unchecked Sendable {
         encoder.setBytes(&frame, length: MemoryLayout<Float>.size, index: 1)
         gpu.dispatch(gpu.pipelines.despeckle, on: encoder, width: width, height: height)
         encoder.endEncoding()
+        let stored = MotionField(vectors: vectors, timestamp: timestamp)
+        nonisolated(unsafe) let retained = buffer
+        commandBuffer.addCompletedHandler { completed in
+            withExtendedLifetime(retained) {}
+            if completed.status != .completed { stored.validity.invalidate() }
+        }
         commandBuffer.commit()
 
-        onField?(MotionField(vectors: vectors, timestamp: timestamp))
+        onField?(stored)
     }
 }

@@ -1,8 +1,9 @@
 import Foundation
 import IOSurface
+import Darwin
 
-/// A cheap fingerprint of a captured surface: a hash that tells whether the compositor
-/// delivered a frame identical to the previous one, and a coarse luma grid that tells how
+/// A cheap fingerprint of a captured surface: a hash that selects candidates for exact
+/// duplicate verification, and a coarse luma grid that tells how
 /// far the picture moved.
 ///
 /// Generic by construction: ScreenCaptureKit's own dirty rectangles are not used, because
@@ -18,9 +19,8 @@ enum FrameSampler {
 
     /// A fixed sample budget, deliberately not derived from the frame size: this runs on the
     /// capture thread for every frame, so its cost must stay flat as resolution rises. A
-    /// frame whose signature matches the previous one is dropped, so the budget is spent on
-    /// density — fine detail falling between samples makes a genuinely new frame look like a
-    /// duplicate.
+    /// frame whose signature matches is verified against the retained preceding surface;
+    /// detail between grid points must not be discarded as a duplicate.
     ///
     /// The two outputs want opposite things from the same walk. The hash wants the sharpest
     /// sample it can get, so it reads the grid point itself. The luma statistic feeds a
@@ -37,6 +37,26 @@ enum FrameSampler {
     /// per frame; 2x2 resolves the same pixel-scale structure for a quarter of that, since
     /// anything finer than two pixels is what the aliasing was.
     private static let blockSpan = 2
+
+    /// Verify equal fingerprints against retained BGRA pixels without an image copy.
+    /// Padding is excluded and different strides are supported.
+    static func isIdentical(_ surface: IOSurfaceRef, to previous: IOSurfaceRef) -> Bool {
+        let width = IOSurfaceGetWidth(surface), height = IOSurfaceGetHeight(surface)
+        guard width == IOSurfaceGetWidth(previous), height == IOSurfaceGetHeight(previous),
+              width > 0, height > 0 else { return false }
+        if IOSurfaceGetID(surface) == IOSurfaceGetID(previous) { return true }
+        guard IOSurfaceLock(surface, .readOnly, nil) == 0 else { return false }
+        defer { IOSurfaceUnlock(surface, .readOnly, nil) }
+        guard IOSurfaceLock(previous, .readOnly, nil) == 0 else { return false }
+        defer { IOSurfaceUnlock(previous, .readOnly, nil) }
+        let stride = IOSurfaceGetBytesPerRow(surface), oldStride = IOSurfaceGetBytesPerRow(previous)
+        let bytes = width * 4
+        guard stride >= bytes, oldStride >= bytes else { return false }
+        let current = IOSurfaceGetBaseAddress(surface), old = IOSurfaceGetBaseAddress(previous)
+        if stride == bytes, oldStride == bytes { return memcmp(current, old, bytes * height) == 0 }
+        for y in 0..<height where memcmp(current + y * stride, old + y * oldStride, bytes) != 0 { return false }
+        return true
+    }
 
     static func sample(_ surface: IOSurfaceRef) -> FrameSample? {
         IOSurfaceLock(surface, .readOnly, nil)

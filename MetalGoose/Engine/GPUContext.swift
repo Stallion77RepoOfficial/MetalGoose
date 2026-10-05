@@ -29,8 +29,11 @@ final class GPUContext: @unchecked Sendable {
     let device: MTLDevice
     let queue: MTLCommandQueue
     let pipelines: Pipelines
+    let errors = ErrorLog()
 
     private let busy = OSAllocatedUnfairLock(initialState: 0.0)
+    private let failures = OSAllocatedUnfairLock(initialState: 0)
+    var failureGeneration: Int { failures.withLock { $0 } }
 
     private init(device: MTLDevice, queue: MTLCommandQueue, pipelines: Pipelines) {
         self.device = device
@@ -105,7 +108,12 @@ final class GPUContext: @unchecked Sendable {
     func makeCommandBuffer(_ label: String) -> MTLCommandBuffer? {
         guard let buffer = queue.makeCommandBuffer() else { return nil }
         buffer.label = label
-        buffer.addCompletedHandler { [busy] finished in
+        buffer.addCompletedHandler { [busy, failures, errors] finished in
+            guard finished.status == .completed else {
+                failures.withLock { $0 &+= 1 }
+                errors.report(.gpuExecutionFailed(stage: label, detail: finished.error?.localizedDescription ?? String(localized: "Unknown error")))
+                return
+            }
             let elapsed = finished.gpuEndTime - finished.gpuStartTime
             if elapsed > 0 { busy.withLock { $0 += elapsed } }
         }

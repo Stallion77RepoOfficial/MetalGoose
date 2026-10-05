@@ -81,7 +81,8 @@ engine back and forth. With Render Scale below 100%, generation works on the red
 treats captured and generated frames alike; only the Neural Engine takes the window's own size, when that fits it,
 which measured closer to the real image. Scene-cut detection avoids generating across hard cuts.
 
-An image is never presented twice, so **Generated + Passthrough = Presented** in the HUD.
+Resize and reappearance may redraw an existing image. The HUD counts new images when the drawable
+reports an actual presentation, so **Generated + Passthrough = Presented** remains true.
 
 ### Anti-Aliasing
 Post-process anti-aliasing that runs on the final captured image, with no need
@@ -93,8 +94,12 @@ for depth buffers or motion vectors:
 A HUD overlay reports, live:
 - **Capture / Output / Generated** frame rates, the **Target** output (capture rate × the multiplier
   in use, which Output is coloured against), and the panel's refresh rate
-- Capture time, GPU time, **GPU load** (the pipeline's own share of the GPU), latency, present
-  latency, end-to-end latency, and a frame-pacing score
+- Capture interval, total completed GPU command-buffer time per new presented image,
+  **GPU Budget** (command-buffer duration divided by elapsed wall time), capture latency,
+  presentation latency, end-to-end latency, and a frame-pacing score. GPU Budget includes
+  capture, motion, interpolation, and render work; overlap and preemption can inflate it.
+  It is a workload estimate, not a hardware utilization percentage. End-to-end latency uses
+  the presented image's source compositor timestamp; it is not input-to-photon latency.
 - VRAM, process memory, and CPU
 - Cumulative counters: Captured, Presented, Generated, Passthrough, Dropped
 
@@ -114,7 +119,7 @@ A HUD overlay reports, live:
 1. Download the latest release from [Releases](https://github.com/Stallion77RepoOfficial/MetalGoose/releases)
 2. Move `MetalGoose.app` to `/Applications`
 3. Open `Terminal` and type `xattr -dr com.apple.quarantine /Applications/MetalGoose.app`
-4. Grant Screen Recording (and Accessibility, for Align Pointer while the picture is scaled up) when prompted
+4. Grant Screen Recording and Accessibility before starting scaling
 
 ### Build from Source
 ```bash
@@ -123,9 +128,46 @@ cd MetalGoose
 open MetalGoose.xcodeproj
 ```
 
+The shared project uses **Sign to Run Locally** (ad hoc signing), with no development team
+required. Build and run the MetalGoose scheme on My Mac. Metal, MetalFX, and VideoToolbox
+features use the same hardware and OS support with either signing method. Screen Recording
+and Accessibility both require user permission before scaling; ad hoc rebuilds or a change
+of signing identity can require granting those permissions again.
+
+For a stable development identity, select your own team and **Apple Development** in Xcode,
+or override the build settings locally without changing the shared project:
+
+```bash
+xcodebuild -project MetalGoose.xcodeproj -scheme MetalGoose -configuration Release \
+  DEVELOPMENT_TEAM=YOUR_TEAM_ID CODE_SIGN_IDENTITY="Apple Development" build
+```
+
+Distributing a notarized app outside the Mac App Store requires **Developer ID Application**
+signing, which is separate from Apple Development and local signing. Keep private keys,
+`.p12` exports, and account credentials out of the repository. A Team ID is an identifier,
+not a signing credential. See Apple's [code-signing certificates](https://developer.apple.com/documentation/technotes/tn3161-inside-code-signing-certificates),
+[code identity and privacy permissions](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements),
+and [Developer ID distribution](https://developer.apple.com/developer-id/) documentation.
+
+### Tests
+
+Run `swift test` from the repository root for the scheduling, ownership, async transaction,
+presentation counter, and localization regression tests. This pure-logic package supports
+macOS 15 or later; building the app still requires the macOS 27 SDK. CI runs the Core tests
+and checks the SDK before building and analyzing the app. GPU and VideoToolbox validation
+requires supported hardware and is separate from the Core tests.
+
+### Languages
+
+English is the source and fallback language. The app follows macOS language preferences and
+supports English, Turkish, German, Spanish, Russian, Simplified Chinese, Japanese, and Hungarian.
+Translations include the settings, HUD, update messages, errors, and privacy descriptions.
+User-facing text belongs in `Localizable.xcstrings` or `InfoPlist.xcstrings`; persisted setting
+identifiers and error codes remain stable when the display language changes.
+
 ## Usage
 
-1. Launch MetalGoose and grant Screen Recording access (and Accessibility, for Align Pointer while the picture is scaled up).
+1. Launch MetalGoose and grant Screen Recording and Accessibility access.
 2. Configure upscaling (MGUP-1), frame generation (MGFG-1), and anti-aliasing. Changes apply
    to a running session.
 3. Switch to the window you want to capture — it has to be frontmost, since
@@ -179,6 +221,7 @@ All error codes are shown as an in-app alert.
 - MG-ENG-007: CAS pipeline unavailable.
 - MG-ENG-008: IOSurface texture creation failed.
 - MG-ENG-010: MetalFX Frame Interpolator creation failed.
+- MG-ENG-011: GPU command execution failed; the alert includes the stage and provider detail.
 
 Codes are identifiers and are not renumbered when one is retired, so the lists have gaps.
 

@@ -53,13 +53,16 @@ kernel void fxaa(
     half rcpDirMin = 1.0h / (min(abs(dir.x), abs(dir.y)) + dirReduce);
     dir = min(half2(FXAA_SPAN_MAX), max(half2(-FXAA_SPAN_MAX), dir * rcpDirMin));
 
-    uint2 pos1 = clampCoord(int2(half2(gid) + dir * (1.0h / 3.0h - 0.5h)), width, height);
-    uint2 pos2 = clampCoord(int2(half2(gid) + dir * (2.0h / 3.0h - 0.5h)), width, height);
+    // Half is sufficient for colour, but loses large pixel addresses and small offsets.
+    float2 position = float2(gid);
+    float2 direction = float2(dir);
+    uint2 pos1 = clampCoord(int2(position + direction * (1.0f / 3.0f - 0.5f)), width, height);
+    uint2 pos2 = clampCoord(int2(position + direction * (2.0f / 3.0f - 0.5f)), width, height);
 
     half3 rgbA = (input.read(pos1).rgb + input.read(pos2).rgb) * 0.5h;
 
-    uint2 pos3 = clampCoord(int2(half2(gid) + dir * -0.5h), width, height);
-    uint2 pos4 = clampCoord(int2(half2(gid) + dir * 0.5h), width, height);
+    uint2 pos3 = clampCoord(int2(position + direction * -0.5f), width, height);
+    uint2 pos4 = clampCoord(int2(position + direction * 0.5f), width, height);
 
     half3 rgbB = rgbA * 0.5h + (input.read(pos3).rgb + input.read(pos4).rgb) * 0.25h;
     half lumaB = rgb2luma(rgbB);

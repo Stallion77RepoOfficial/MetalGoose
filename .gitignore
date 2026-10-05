@@ -16,5 +16,5 @@ DEVLOG.md
 # SwiftPM
 .build/
 .swiftpm/
+/Audit
 /Tests
-/Package.swift

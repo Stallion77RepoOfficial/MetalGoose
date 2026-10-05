@@ -41,12 +41,14 @@ final class StabilityBlender {
             pipeline = gpu.pipelines.stabilityBlend
             encoder.setTexture(image, index: 0)
             captures = 1
-        case .planes(let luma, let chroma):
+        case .planes(let frame):
+            let (luma, chroma) = (frame.luma, frame.chroma)
             pipeline = luma.width == width && luma.height == height
                 ? gpu.pipelines.stabilityBlendFromYUV : gpu.pipelines.stabilityBlendFromYUVResampled
             encoder.setTexture(luma, index: 0)
             encoder.setTexture(chroma, index: 1)
             captures = 2
+            commandBuffer.addCompletedHandler { _ in withExtendedLifetime(frame) {} }
         }
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(previous, index: captures)

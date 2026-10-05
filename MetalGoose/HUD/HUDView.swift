@@ -2,16 +2,17 @@ import SwiftUI
 
 /// What the HUD says about the session that does not change from frame to frame.
 struct HUDInfo: Equatable {
-    var deviceName = "Unknown GPU"
+    var deviceName = String(localized: "Unknown GPU")
     var pid: Int32 = 0
     var captureResolution = "-"
-    var upscale = "Off"
+    var upscale = String(localized: "Off")
     var renderScale = "-"
-    var frameGeneration = "Off"
+    var frameGeneration = String(localized: "Off")
+    var generatesFrames = false
     /// The engine making the generated images, or why none is.
     var generationEngine = "-"
-    var antiAliasing = "Off"
-    var vsync = "On"
+    var antiAliasing = String(localized: "Off")
+    var vsync = String(localized: "On")
 }
 
 @MainActor
@@ -64,13 +65,13 @@ struct HUDView: View {
             // Images the screen was given per second. The panel repeats whatever it last showed, so
             // its refresh rate is not a measure of this — new images are.
             HUDRow(label: "Output", value: "\(Int(stats.outputFPS)) FPS", color: fpsColor(stats.outputFPS, target: target))
-            if info.frameGeneration != "Off" || stats.generatedFPS > 0 {
+            if info.generatesFrames || stats.generatedFPS > 0 {
                 HUDRow(label: "Generated", value: "\(Int(stats.generatedFPS)) FPS", color: .cyan)
             }
             // What Output should be: the capture rate times the multiplier in use, not the panel's rate.
             HUDRow(label: "Target", value: "\(stats.targetOutputFPS) FPS")
             HUDRow(label: "Screen Refresh", value: "\(stats.screenRefreshRate) Hz")
-            HUDRow(label: "ProMotion", value: stats.isProMotion ? "On" : "Off")
+            HUDRow(label: "ProMotion", value: stats.isProMotion ? String(localized: "On") : String(localized: "Off"))
         }
     }
 
@@ -79,9 +80,9 @@ struct HUDView: View {
             : stats.framePacingScore >= 70 ? .yellow
             : stats.framePacingScore >= 40 ? .orange : .red
         return VStack(spacing: 3) {
-            HUDRow(label: "Capture Time", value: String(format: "%.2f ms", stats.frameTime))
-            HUDRow(label: "GPU Time", value: String(format: "%.2f ms", stats.gpuTime))
-            HUDRow(label: "GPU Load", value: String(format: "%.1f%%", stats.gpuLoad), color: loadColor(Double(stats.gpuLoad)))
+            HUDRow(label: "Capture Interval", value: String(format: "%.2f ms", stats.frameTime))
+            HUDRow(label: "GPU / Image", value: String(format: "%.2f ms", stats.gpuTime))
+            HUDRow(label: "GPU Budget", value: String(format: "%.1f%%", stats.gpuLoad), color: loadColor(Double(stats.gpuLoad)))
             HUDRow(label: "Latency", value: String(format: "%.1f ms", stats.captureLatency))
             HUDRow(label: "Output Frame Time", value: String(format: "%.2f ms", stats.avgFrameTime))
             HUDRow(label: "Present", value: String(format: "%.1f ms", stats.presentLatency))
@@ -122,7 +123,7 @@ struct HUDView: View {
             HUDRow(label: "Upscale", value: info.upscale)
             HUDRow(label: "Render Scale", value: info.renderScale)
             HUDRow(label: "Frame Gen", value: info.frameGeneration)
-            if info.frameGeneration != "Off" {
+            if info.generatesFrames {
                 HUDRow(label: "Engine", value: info.generationEngine)
             }
             HUDRow(label: "AA", value: info.antiAliasing)
@@ -161,13 +162,13 @@ struct HUDView: View {
 }
 
 struct HUDRow: View {
-    let label: String
+    let label: LocalizedStringKey
     let value: String
     var color: Color = .white
 
     var body: some View {
         HStack {
-            Text(verbatim: label)
+            Text(label)
                 .font(.system(size: 10, weight: .regular, design: .monospaced))
                 .foregroundColor(.gray)
             Spacer()

@@ -14,6 +14,19 @@ import CoreGraphics
 /// density, and nothing crashes to say so.
 enum ScreenGeometry {
 
+    static func displayID(of screen: NSScreen) -> CGDirectDisplayID? {
+        screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+    }
+
+    static func displayRate(of screen: NSScreen) -> DisplayRate? {
+        guard let id = displayID(of: screen) else { return nil }
+        let modeRate = CGDisplayCopyDisplayMode(id)?.refreshRate ?? 0
+        let maximum = max(screen.maximumFramesPerSecond, Int(modeRate.rounded()))
+        guard maximum > 0 else { return nil }
+        let interval = screen.maximumRefreshInterval
+        return DisplayRate(maximum: maximum, minimum: interval > 0 ? Int((1 / interval).rounded()) : maximum)
+    }
+
     /// The display the global coordinate origin belongs to. `NSScreen.screens`
     /// is an ordered list, not an anchored one, so the origin display is
     /// identified by sitting at the origin rather than by coming first.
@@ -57,8 +70,6 @@ enum ScreenGeometry {
 
     /// Every display, in CoreGraphics coordinates: where the cursor can be.
     static var displayBounds: [CGRect] {
-        NSScreen.screens.compactMap {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID).map(CGDisplayBounds)
-        }
+        NSScreen.screens.compactMap { displayID(of: $0).map(CGDisplayBounds) }
     }
 }

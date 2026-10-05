@@ -16,10 +16,6 @@ struct ContentView: View {
         return "macOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
     }
 
-    /// Screen Recording is what everything waits for. Accessibility is only the pointer's (`pointerNeedsAccessibility`), and
-    /// without it the settings still have to be open: turning Align Pointer off, or the scale down, is a way on, and only
-    /// starting is held.
-    private var screenRecordingGranted: Bool { permissions.screenRecordingGranted }
     private var permissionsGranted: Bool { controller.permissionsAllowScaling }
 
     var body: some View {
@@ -40,11 +36,12 @@ struct ContentView: View {
         .onDisappear { permissions.stopMonitoring() }
         .alert("MetalGoose", isPresented: Binding(
             get: { controller.alertMessage != nil },
-            set: { if !$0 { controller.alertMessage = nil } })
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(verbatim: controller.alertMessage ?? "")
+            set: { if !$0 { controller.alertMessage = nil } }),
+               presenting: controller.alertMessage
+        ) { _ in
+            Button("OK", role: .cancel) { controller.alertMessage = nil }
+        } message: { message in
+            Text(verbatim: message)
         }
         .modifier(UpdateAlerts(updater: updater))
     }
@@ -77,7 +74,7 @@ struct ContentView: View {
             .padding()
         }
         .frame(minWidth: 200)
-        .disabled(!screenRecordingGranted)
+        .disabled(!permissionsGranted || controller.isTransitioning)
         .navigationTitle("MetalGoose")
     }
 
@@ -87,7 +84,7 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if !permissionsGranted {
-                    PermissionBanner(permissions: permissions, needsAccessibility: controller.pointerNeedsAccessibility)
+                    PermissionBanner(permissions: permissions)
                         .padding(.bottom, 8)
                 }
 
@@ -97,8 +94,8 @@ struct ContentView: View {
                     leftColumn
                     rightColumn
                 }
-                .disabled(!screenRecordingGranted)
-                .opacity(screenRecordingGranted ? 1.0 : 0.5)
+                .disabled(!permissionsGranted || controller.isTransitioning)
+                .opacity(permissionsGranted ? 1.0 : 0.5)
             }
             .padding(24)
         }
@@ -120,7 +117,7 @@ struct ContentView: View {
                 Button("Start Scaling") { controller.startCountdown() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(!permissionsGranted)
+                    .disabled(!permissionsGranted || controller.isTransitioning)
             }
         }
         .padding(.bottom, 10)

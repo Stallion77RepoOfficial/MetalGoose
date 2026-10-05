@@ -1,6 +1,7 @@
 import Foundation
 @preconcurrency import Metal
 import QuartzCore
+import os
 
 /// Calls the render pipeline once per display refresh, from a thread of its own.
 ///
@@ -16,7 +17,7 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
 
     private let shared: EngineShared
     private let pipeline: RenderPipeline
-    private let displayRate: DisplayRate
+    private let displayRate: OSAllocatedUnfairLock<DisplayRate>
     private let thread = RenderThread()
 
     // Render thread only.
@@ -25,7 +26,7 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     init(shared: EngineShared, pipeline: RenderPipeline, displayRate: DisplayRate) {
         self.shared = shared
         self.pipeline = pipeline
-        self.displayRate = displayRate
+        self.displayRate = OSAllocatedUnfairLock(initialState: displayRate)
         super.init()
     }
 
@@ -44,7 +45,8 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             let link = CAMetalDisplayLink(metalLayer: layer)
             link.delegate = self
             self.link = link
-            let rate = Float(displayRate.maximum)
+            link.preferredFrameLatency = Self.frameLatency(for: shared.config.withLock { $0 })
+            let rate = Float(displayRate.withLock { $0.maximum })
             link.preferredFrameRateRange = CAFrameRateRange(minimum: rate, maximum: rate, preferred: rate)
             link.add(to: .current, forMode: .default)
         }
@@ -85,11 +87,12 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         // it with whatever is behind.
         layer.isOpaque = true
         layer.displaySyncEnabled = config.vsync
-        layer.maximumDrawableCount = min(max(2, config.bufferDepth), GooseEngine.maxInFlight)
+        // CAMetalDisplayLink manages the drawable queue. Setting maximumDrawableCount
+        // after a link is attached raises CAMetalLayerInvalidOperation on macOS 27.
 
         // One frame of latency for double buffering, two for triple: the toggle is a latency
         // choice, and this is where it takes effect.
-        let latency = Float(min(max(2, config.bufferDepth), GooseEngine.maxInFlight) - 1)
+        let latency = Self.frameLatency(for: config)
         if let runLoop = thread.runLoop {
             runLoop.perform { [self] in link?.preferredFrameLatency = latency }
             CFRunLoopWakeUp(runLoop.getCFRunLoop())
@@ -98,8 +101,27 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
 
     // MARK: - Callback (render thread)
 
+    private static func frameLatency(for config: EngineConfig) -> Float {
+        Float(min(max(2, config.bufferDepth), GooseEngine.maxInFlight) - 1)
+    }
+
+    func updateDisplayRate(_ rate: DisplayRate) {
+        let changed = displayRate.withLock { current -> Bool in
+            guard current != rate else { return false }
+            current = rate
+            return true
+        }
+        guard changed, let runLoop = thread.runLoop else { return }
+        runLoop.perform { [self] in
+            let maximum = Float(rate.maximum)
+            link?.preferredFrameRateRange = CAFrameRateRange(minimum: maximum, maximum: maximum, preferred: maximum)
+            pipeline.reset()
+        }
+        CFRunLoopWakeUp(runLoop.getCFRunLoop())
+    }
+
     func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
-        pipeline.render(into: update.drawable, displayRate: displayRate, targetTime: update.targetPresentationTimestamp)
+        pipeline.render(into: update.drawable, displayRate: displayRate.withLock { $0 }, targetTime: update.targetPresentationTimestamp)
     }
 }
 

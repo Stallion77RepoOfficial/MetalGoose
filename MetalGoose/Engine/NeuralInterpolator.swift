@@ -15,6 +15,7 @@ struct YUVFrame: @unchecked Sendable {
     /// The session this buffer belongs to. A frame from a session that has been replaced is not the same size as the
     /// ones after it and must not be paired with them.
     let session: Int
+    var lease: BufferLease? = nil
 }
 
 /// Frame interpolation on the Neural Engine, through VideoToolbox's low-latency frame interpolator.
@@ -101,21 +102,21 @@ final class NeuralInterpolator: @unchecked Sendable {
         let id: Int
         let size: NeuralSizes.Size
 
-        /// What the capture queue converts into, in turn. Taken under a lock and not through the Neural Engine's queue,
+        /// Conversion buffers leased under a lock, independently of the Neural Engine's queue,
         /// which can be busy for seconds — ending a session waits for the engine's service to let go of its model, which
         /// took that long while another size was being compiled, and a capture queue that waited on it stopped taking
         /// frames.
         private let inputs: [YUVFrame]
-        private let nextInput = OSAllocatedUnfairLock(initialState: 0)
+        private let inputLeases: BufferLeasePool
 
-        /// What the processor writes into, in turn, which the images are shown from as they are: the planes are turned into
-        /// colour by the blend that shows them. The pool outnumbers the images the store keeps by the images a pair has, so
-        /// that a buffer is never written while it can still be read.
+        /// Output buffers remain leased through inference, storage, and GPU reads. Their
+        /// planes are converted to colour by the presentation blend. Pool exhaustion skips
+        /// new work instead of overwriting an image that still has a reader.
         let outputs: [YUVFrame]
+        private let outputLeases: BufferLeasePool
 
         // Queue-confined, but for the times.
         var processor: VTFrameProcessor?
-        var outputIndex = 0
         var previous: (frame: YUVFrame, timestamp: CFTimeInterval)?
         var busy = false
         var isRetired = false
@@ -132,17 +133,24 @@ final class NeuralInterpolator: @unchecked Sendable {
             self.size = size
             self.inputs = inputs
             self.outputs = outputs
+            inputLeases = BufferLeasePool(capacity: inputs.count)
+            outputLeases = BufferLeasePool(capacity: outputs.count)
         }
 
         /// Two captures' buffers and one for the image, for the call that tries the session.
         var probeFrames: (previous: YUVFrame, current: YUVFrame, destination: YUVFrame) { (inputs[0], inputs[1], outputs[0]) }
 
-        func takeInput() -> YUVFrame {
-            let index = nextInput.withLock { value -> Int in
-                defer { value += 1 }
-                return value
-            }
-            return inputs[index % inputs.count]
+        func takeInput() -> YUVFrame? {
+            guard let lease = inputLeases.acquire() else { return nil }
+            var frame = inputs[lease.index]
+            frame.lease = lease
+            return frame
+        }
+        func takeOutput() -> YUVFrame? {
+            guard let lease = outputLeases.acquire() else { return nil }
+            var frame = outputs[lease.index]
+            frame.lease = lease
+            return frame
         }
     }
 
@@ -218,6 +226,8 @@ final class NeuralInterpolator: @unchecked Sendable {
     private func retire(_ rig: Rig?) {
         guard let rig else { return }
         rig.isRetired = true
+        rig.previous = nil
+        rig.pending = nil
         endIfIdle(rig)
     }
 
@@ -258,8 +268,8 @@ final class NeuralInterpolator: @unchecked Sendable {
     /// on the capture pipeline's queue, and never waits for this object's.
     func encodeConversion(of frame: MTLTexture, commandBuffer: MTLCommandBuffer) -> YUVFrame? {
         guard let rig = published.withLockUnchecked({ $0.active }),
+              let target = rig.takeInput(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
-        let target = rig.takeInput()
 
         let resamples = frame.width != rig.size.width || frame.height != rig.size.height
         let pipeline = resamples ? gpu.pipelines.convertTo420Resampled : gpu.pipelines.convertTo420
@@ -270,6 +280,7 @@ final class NeuralInterpolator: @unchecked Sendable {
         // One thread per 2x2 block.
         gpu.dispatch(pipeline, on: encoder, width: rig.size.width / 2, height: rig.size.height / 2)
         encoder.endEncoding()
+        commandBuffer.addCompletedHandler { _ in withExtendedLifetime(target) {} }
         return target
     }
 
@@ -332,9 +343,8 @@ final class NeuralInterpolator: @unchecked Sendable {
         var made: [Image] = []
         var outputFrames: [VTFrameProcessorFrame] = []
         for phase in phases {
-            let destination = rig.outputs[rig.outputIndex % rig.outputs.count]
-            rig.outputIndex += 1
-            guard let output = frame(destination, previous.timestamp + phase * duration) else {
+            guard let destination = rig.takeOutput(),
+                  let output = frame(destination, previous.timestamp + phase * duration) else {
                 rig.busy = false
                 return
             }
@@ -355,6 +365,8 @@ final class NeuralInterpolator: @unchecked Sendable {
         let images = made
         let started = CACurrentMediaTime()
         processor.process(parameters: request) { [self] _, error in
+            // The lease prevents our capture writer from reusing the ANE's inputs.
+            withExtendedLifetime((previous.frame, current.frame)) {}
             let spent = CACurrentMediaTime() - started
             queue.async { [self] in
                 rig.busy = false
@@ -388,7 +400,7 @@ final class NeuralInterpolator: @unchecked Sendable {
     private func publish(_ made: [Image], previous: CFTimeInterval, next: CFTimeInterval, measuresLatency: Bool) {
         images.publish(made.map {
             GeneratedImages.Image(previous: previous, next: next, phase: $0.phase,
-                                  source: .planes(luma: $0.destination.luma, chroma: $0.destination.chroma), engine: .neuralEngine)
+                                  source: .planes($0.destination), engine: .neuralEngine)
         })
         if measuresLatency { latency.record(previous: previous, next: next) }
     }

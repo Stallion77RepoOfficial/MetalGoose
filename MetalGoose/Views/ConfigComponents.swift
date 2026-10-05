@@ -69,7 +69,7 @@ struct SliderRow: View {
                     step: 1)
                 .frame(minWidth: 110, maxWidth: 160)
             }
-            Text(verbatim: "\(values[index])x")
+            Text(String(localized: "Frame multiplier", defaultValue: "\(values[index])×"))
                 .font(.system(.caption, design: .monospaced))
                 .frame(width: 28, alignment: .trailing)
         }

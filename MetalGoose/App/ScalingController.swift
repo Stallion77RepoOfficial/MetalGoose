@@ -17,7 +17,14 @@ final class ScalingController: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
     /// A message for the user, shown as an alert until dismissed.
-    @Published var alertMessage: String?
+    @Published var alertMessage: String? {
+        didSet {
+            // Opening an alert ends target selection. A timer must never start a
+            // capture behind the dialog or replace its message before acknowledgement.
+            if alertMessage != nil { cancelCountdown() }
+        }
+    }
+    @Published private(set) var isTransitioning = false
 
     private let settings: CaptureSettings
     private let permissions: PermissionManager
@@ -28,13 +35,13 @@ final class ScalingController: ObservableObject {
     private let hud = HUDWindowController()
 
     private var engineCreationFailed = false
-    private var isTransitioning = false
     private var activeScreen: NSScreen?
     private var targetPID: pid_t = 0
 
     private var statsTimer: Timer?
     private var countdownTimer: Timer?
     private var settingsObserver: AnyCancellable?
+    private var updateObserver: AnyCancellable?
 
     private var lastHotkeyTime: CFTimeInterval = 0
     private var lastCursorHotkeyTime: CFTimeInterval = 0
@@ -55,6 +62,9 @@ final class ScalingController: ObservableObject {
         settingsObserver = settings.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.settingsChanged() }
+        updateObserver = AutoUpdater.shared.$state.sink { [weak self] state in
+            if state.blocksScalingStart { self?.cancelCountdown() }
+        }
 
         // Both hotkeys are global and deliberately outlive the window. Closing it with Cmd+W leaves
         // the overlay and the capture running, and tearing the hotkeys down with the window left no
@@ -92,6 +102,13 @@ final class ScalingController: ObservableObject {
         capture.onStop = { [weak self] error in
             Task { @MainActor in self?.captureEnded(error) }
         }
+        overlay.onDisplayChanged = { [weak self] screen, rate in
+            guard let self, let engine = self.engine else { return }
+            self.activeScreen = screen
+            engine.updateDisplayRate(rate)
+            Task { await self.capture.reconfigure(maxFPS: rate.maximum) }
+            if self.settings.showMGHUD { self.showHUD(on: screen, engine: engine) }
+        }
     }
 
     var isActive: Bool { phase == .active }
@@ -108,7 +125,7 @@ final class ScalingController: ObservableObject {
             created.apply(settings.engineConfig)
             return created
         case .failure(let error):
-            if !engineCreationFailed { alertMessage = error.message }
+            if !engineCreationFailed { fail(error) }
             engineCreationFailed = true
             return nil
         }
@@ -131,35 +148,35 @@ final class ScalingController: ObservableObject {
     }
 
     func toggle() {
-        guard permissionsAllowScaling, !isTransitioning else { return }
+        // A dialog or a revoked permission blocks starting, but the global
+        // shortcut must still be able to stop an existing session.
+        guard !isTransitioning else { return }
         if isActive { stop() } else { start() }
     }
 
-    /// Whether the pointer is to be taken to a picture that is not where its window is, which is what Accessibility is
-    /// for: without it the event tap cannot be made, and the overlay would show a window that its pointer is not on.
-    var pointerNeedsAccessibility: Bool {
-        settings.alignPointer && settings.isUpscaling && settings.scaleFactor.magnifies
+    /// Both permissions are required before a session starts.
+    var permissionsAllowScaling: Bool {
+        permissions.screenRecordingGranted && permissions.accessibilityGranted
     }
 
-    /// Screen Recording is always needed. Accessibility is only where the pointer needs it.
-    var permissionsAllowScaling: Bool {
-        permissions.screenRecordingGranted && (permissions.accessibilityGranted || !pointerNeedsAccessibility)
+    private var hasBlockingPresentation: Bool {
+        alertMessage != nil || AutoUpdater.shared.state.blocksScalingStart
+            || NSApp.modalWindow != nil || mainWindow?.attachedSheet != nil
     }
 
     func startCountdown() {
-        guard phase == .idle else { return }
+        guard phase == .idle, permissionsAllowScaling, !isTransitioning, !hasBlockingPresentation else { return }
         phase = .countingDown(5)
-        countdownTimer?.invalidate()
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, case .countingDown(let remaining) = self.phase else { return }
+                guard !self.hasBlockingPresentation else {
+                    self.cancelCountdown()
+                    return
+                }
                 if remaining > 1 {
                     self.phase = .countingDown(remaining - 1)
                 } else {
-                    self.countdownTimer?.invalidate()
-                    self.countdownTimer = nil
-                    self.phase = .idle
-                    self.mainWindow?.orderOut(nil)
                     self.start()
                 }
             }
@@ -173,7 +190,8 @@ final class ScalingController: ObservableObject {
     }
 
     private func start() {
-        guard !isTransitioning else { return }
+        cancelCountdown()
+        guard !isActive, permissionsAllowScaling, !isTransitioning, !hasBlockingPresentation else { return }
         isTransitioning = true
         Task {
             defer { isTransitioning = false }
@@ -182,10 +200,14 @@ final class ScalingController: ObservableObject {
     }
 
     private func fail(_ error: MGError) {
+        bringToFront()
         alertMessage = error.message
     }
 
     private func startSession() async {
+        guard permissionsAllowScaling, !hasBlockingPresentation else { return }
+        // Resolve the target before hiding our window. Ordering it out first can
+        // activate an unrelated app and make it look like the user's chosen target.
         guard let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
             fail(.frontmostIsSelf)
@@ -200,25 +222,17 @@ final class ScalingController: ObservableObject {
             fail(.noDisplay)
             return
         }
-        guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+        guard ScreenGeometry.displayID(of: screen) != nil else {
             fail(.displayIDUnavailable)
             return
         }
 
-        // Two independent readings of the same panel rather than a hardcoded fallback: AppKit reports
-        // the mode's rate, CoreGraphics reports the active display mode. Some virtual and captured
-        // displays leave one of the two at zero, and no real display leaves both there.
-        let modeRate = CGDisplayCopyDisplayMode(displayID)?.refreshRate ?? 0
-        let maximumRate = max(screen.maximumFramesPerSecond, Int(modeRate.rounded()))
-        guard maximumRate > 0 else {
+        // Read the active panel's ceiling and variable-refresh floor through the same
+        // helper used when the target moves to another display.
+        guard let displayRate = ScreenGeometry.displayRate(of: screen) else {
             fail(.refreshRateUnavailable)
             return
         }
-        // The panel's own floor. On a fixed-refresh display it equals the ceiling, which is what tells
-        // the engine there is no variable range.
-        let longestInterval = screen.maximumRefreshInterval
-        let minimumRate = longestInterval > 0 ? Int((1.0 / longestInterval).rounded()) : maximumRate
-        let displayRate = DisplayRate(maximum: maximumRate, minimum: minimumRate)
 
         let upscaling = settings.isUpscaling
         let captureTarget = CaptureTarget(windowID: target.id, size: target.frame.size,
@@ -229,15 +243,18 @@ final class ScalingController: ObservableObject {
         // Wired before the stream starts: frames arrive the moment it does.
         capture.onFrame = { [engine] frame in engine.receive(frame) }
 
-        guard await capture.startCapture(target: captureTarget, maxFPS: maximumRate, showsCursor: false,
+        guard await capture.startCapture(target: captureTarget, maxFPS: displayRate.maximum, showsCursor: false,
                                          renderScale: upscaling ? settings.renderScale.multiplier : 1.0,
                                          queueDepth: settings.bufferCount) else {
-            alertMessage = (capture.lastError ?? MGError("MG-CAP-002", "Unknown capture error.")).message
+            let error = capture.lastError ?? MGError("MG-CAP-002", String(localized: "Unknown capture error."))
             await capture.stopCapture()
             capture.onFrame = nil
+            engine.endSession()
+            fail(error)
             return
         }
 
+        mainWindow?.orderOut(nil)
         let configuration = OverlayWindowManager.Configuration(
             screen: screen, windowFrame: target.frame, alignsPointer: settings.alignPointer,
             outputScale: upscaling ? CGFloat(settings.scaleFactor.value) : 1.0,
@@ -336,7 +353,8 @@ final class ScalingController: ObservableObject {
     private func tick() {
         guard isActive, let engine else { return }
         pushHUD(engine: engine)
-        if let error = engine.takeError() { alertMessage = error.message }
+        // Leave queued engine errors pending while a user-facing alert is open.
+        if alertMessage == nil, let error = engine.takeError() { alertMessage = error.message }
 
         // Fullscreen gets a Space of its own, which the overlay cannot join; the target is then
         // frontmost but the overlay is nowhere to be seen. Checked a few times in a row because a
@@ -371,18 +389,20 @@ final class ScalingController: ObservableObject {
         return HUDInfo(deviceName: engine.deviceName,
                        pid: targetPID,
                        captureResolution: size == .zero ? "-" : "\(Int(size.width))x\(Int(size.height))",
-                       upscale: "\(String(localized: settings.scalingMethod.title)) \(settings.scaleFactor.rawValue)",
+                       upscale: "\(String(localized: settings.scalingMethod.title)) \(String(localized: settings.scaleFactor.title))",
                        renderScale: String(localized: settings.renderScale.title),
-                       frameGeneration: off ? "Off" : Self.describeMode(settings.frameGenMode, choice),
+                       frameGeneration: off ? String(localized: "Off") : Self.describeMode(settings.frameGenMode, choice),
+                       generatesFrames: !off,
                        generationEngine: off ? "-" : Self.describeEngine(choice),
                        antiAliasing: String(localized: settings.aaMode.title),
-                       vsync: settings.vsync ? "On" : "Off")
+                       vsync: settings.vsync ? String(localized: "On") : String(localized: "Off"))
     }
 
     /// What the Frame Gen row says: the mode, and how many images it delivers a capture where an engine is making them.
     private static func describeMode(_ mode: FrameGenMode, _ choice: GenerationChoice) -> String {
         let name = String(localized: mode.title)
-        return choice.engine == nil ? name : "\(name) \(choice.multiplier)x"
+        let multiplier = String(localized: "Frame multiplier", defaultValue: "\(choice.multiplier)×")
+        return choice.engine == nil ? name : "\(name) \(multiplier)"
     }
 
     /// What the Engine row says: the engine making the images, and the size the Neural Engine works at where that is not the

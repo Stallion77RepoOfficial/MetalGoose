@@ -20,6 +20,7 @@ final class CapturePipeline: @unchecked Sendable {
 
     private let shared: EngineShared
     private let gpu: GPUContext
+    private var lastGPUFailure = 0
 
     // MARK: Back-pressure
 
@@ -193,7 +194,7 @@ final class CapturePipeline: @unchecked Sendable {
         }
     }
 
-    private func resetState() {
+    private func resetState(resetCounters: Bool = true) {
         restoreTexture = nil
         restoreScaler = nil
         cropTexture = nil
@@ -212,7 +213,7 @@ final class CapturePipeline: @unchecked Sendable {
         shared.metalFXLatency.reset()
         shared.renderResetRequested.withLock { $0 = true }
         shared.ring.clear()
-        shared.stats.withLock { $0.resetCumulativeCounters() }
+        if resetCounters { shared.stats.withLock { $0.resetCumulativeCounters() } }
         selector.reset()
         lastChoice = .nothing
         lastMotionTimestamp = nil
@@ -224,6 +225,11 @@ final class CapturePipeline: @unchecked Sendable {
     // MARK: - One frame
 
     private func process(_ frame: CapturedFrame) {
+        let failed = gpu.failureGeneration
+        if failed != lastGPUFailure {
+            lastGPUFailure = failed
+            resetState(resetCounters: false)
+        }
         enter("waiting for the GPU to finish earlier frames")
         inFlight.wait()
         enter("encoding a capture")
@@ -395,8 +401,16 @@ final class CapturePipeline: @unchecked Sendable {
         // for it and still be shown.
         let scheduleDelay = FramePlanner.interpolationDelay(captureInterval: shared.captureInterval.withLock { $0.value },
                                                             generationLatency: choice.latency, steps: neuralSteps)
+        let captured = FrameHistory(texture: history, timestamp: now, presentationTime: presentationTime(of: frame, arrival: now),
+                                    isSceneCut: frame.isSceneCut)
 
         commandBuffer.addCompletedHandler { [shared] buffer in
+            guard buffer.status == .completed else {
+                captured.validity.invalidate()
+                shared.renderResetRequested.withLock { $0 = true }
+                shared.stats.withLock { $0.droppedFrames += 1 }
+                return
+            }
             let gpuTime = Float((buffer.gpuEndTime - buffer.gpuStartTime) * 1000)
             shared.stats.withLock { $0.captureGPUTime = gpuTime }
             if let yuv { shared.neural.frameConverted(yuv, timestamp: now, previous: partner, steps: neuralSteps, delay: scheduleDelay) }
@@ -409,11 +423,10 @@ final class CapturePipeline: @unchecked Sendable {
         if runsMetalFX {
             if lastMotionTimestamp != previousCapture?.timestamp { motion.breakSequence() }
             lastMotionTimestamp = now
-            motion.submit(frame: history, timestamp: now, interval: shared.captureInterval.withLock { $0.value })
+            motion.submit(frame: history, timestamp: now, interval: shared.captureInterval.withLock { $0.value }, sourceValidity: captured.validity)
         }
 
-        shared.ring.push(FrameHistory(texture: history, timestamp: now, presentationTime: presentationTime(of: frame, arrival: now),
-                                      isSceneCut: frame.isSceneCut))
+        shared.ring.push(captured)
     }
 
     /// When the compositor showed `frame`: ScreenCaptureKit's time for it, where that is one — not in the future, not from

@@ -93,7 +93,8 @@ final class MetalFXInterpolator: @unchecked Sendable {
     func feed(previous: FrameHistory, next: FrameHistory, field: MotionField) {
         let width = next.texture.width
         let height = next.texture.height
-        guard pending.withLock({ $0 < Self.maximumPending }),
+        guard previous.validity.isValid, next.validity.isValid, field.validity.isValid,
+              pending.withLock({ $0 < Self.maximumPending }),
               previous.texture.width == width, previous.texture.height == height,
               let interpolator = ensureInterpolator(width: width, height: height),
               let depth = ensureFlatDepth(width: width, height: height),
@@ -145,9 +146,10 @@ final class MetalFXInterpolator: @unchecked Sendable {
         let issued = epoch.withLock { $0 }
         let made = GeneratedImages.Image(previous: pair.previous, next: pair.next, phase: 0.5, source: .colour(output), engine: .metalFX)
         pending.withLock { $0 += 1 }
-        commandBuffer.addCompletedHandler { [epoch, images, latency, pending] _ in
+        commandBuffer.addCompletedHandler { [epoch, images, latency, pending] buffer in
             pending.withLock { $0 -= 1 }
-            guard producesImage, epoch.withLock({ $0 }) == issued else { return }
+            guard buffer.status == .completed, previous.validity.isValid, next.validity.isValid, field.validity.isValid,
+                  producesImage, epoch.withLock({ $0 }) == issued else { return }
             images.publish([made])
             latency.record(previous: pair.previous, next: pair.next)
         }

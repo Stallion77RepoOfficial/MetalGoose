@@ -9,6 +9,7 @@ import os
 final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
 
     private let captureQueue = DispatchQueue(label: "com.metalgoose.capture", qos: .userInteractive)
+    private let configurationGate = AsyncSerialGate()
 
     /// Everything written by the `async` start/stop/reconfigure methods, which run on the
     /// cooperative pool, and read from the main thread (the HUD) and the capture queue (every
@@ -30,6 +31,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
     /// Touched only from `captureQueue`, which is where every frame arrives.
     private var lastSignature: UInt64?
     private var lastLuma: [UInt8]?
+    private var lastPixelBuffer: CVPixelBuffer?
     private var sceneCuts = SceneCutDetector()
 
     var lastError: MGError? { state.withLockUnchecked { $0.lastError } }
@@ -88,7 +90,14 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
 
     func startCapture(target: CaptureTarget, maxFPS: Int, showsCursor: Bool,
                       renderScale: Float, queueDepth: Int) async -> Bool {
-        await stopCapture()
+        await configurationGate.perform { [self] in
+            await startSerially(target: target, maxFPS: maxFPS, showsCursor: showsCursor, renderScale: renderScale, queueDepth: queueDepth)
+        }
+    }
+
+    private func startSerially(target: CaptureTarget, maxFPS: Int, showsCursor: Bool,
+                               renderScale: Float, queueDepth: Int) async -> Bool {
+        await stopSerially()
 
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -115,22 +124,28 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
             captureQueue.async { [self] in
                 lastSignature = nil
                 lastLuma = nil
+                lastPixelBuffer = nil
                 sceneCuts.reset()
             }
 
             let stream = SCStream(filter: SCContentFilter(desktopIndependentWindow: window),
                                   configuration: makeConfiguration(snapshot), delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
-            try await stream.startCapture()
             state.withLockUnchecked { $0.stream = stream }
-            return true
+            try await stream.startCapture()
+            return state.withLockUnchecked { $0.stream === stream }
         } catch {
-            state.withLockUnchecked { $0.lastError = .captureStartFailed(error) }
+            state.withLockUnchecked { $0.stream = nil; $0.lastError = .captureStartFailed(error) }
             return false
         }
     }
 
     func stopCapture() async {
+        await configurationGate.perform { [self] in await stopSerially() }
+    }
+
+    private func stopSerially() async {
+        captureQueue.async { [self] in lastPixelBuffer = nil }
         guard let stream = state.withLockUnchecked({ state -> SCStream? in
             defer { state.stream = nil }
             return state.stream
@@ -150,25 +165,44 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
     /// Applies render scale and the window's size at the source, without restarting the
     /// stream. The frames arrive already reduced, so the GPU never encodes a downscale pass
     /// and every later stage works on proportionally fewer pixels.
-    func reconfigure(renderScale: Float? = nil, window: CaptureTarget? = nil) async {
+    func reconfigure(renderScale: Float? = nil, window: CaptureTarget? = nil, maxFPS: Int? = nil) async {
+        await configurationGate.perform { [self] in
+            await reconfigureSerially(renderScale: renderScale, window: window, maxFPS: maxFPS)
+        }
+    }
+
+    private func reconfigureSerially(renderScale: Float?, window: CaptureTarget?, maxFPS: Int?) async {
         let update = state.withLockUnchecked { state -> (SCStream, State)? in
             guard let stream = state.stream else { return nil }
-            let native = window?.pixelSize ?? state.windowPixelSize
-            let scale = renderScale ?? state.renderScale
-            let capture = Self.scaledSize(native, by: scale)
-            guard capture != state.capturePixelSize else { return nil }
-
-            state.windowPixelSize = native
-            state.renderScale = scale
-            state.capturePixelSize = capture
-            return (stream, state)
+            var requested = state
+            requested.windowPixelSize = window?.pixelSize ?? state.windowPixelSize
+            requested.renderScale = renderScale ?? state.renderScale
+            requested.maxFPS = maxFPS.map { max(1, $0) } ?? state.maxFPS
+            requested.capturePixelSize = Self.scaledSize(requested.windowPixelSize, by: requested.renderScale)
+            guard requested.capturePixelSize != state.capturePixelSize || requested.maxFPS != state.maxFPS else {
+                state.windowPixelSize = requested.windowPixelSize
+                state.renderScale = requested.renderScale
+                return nil
+            }
+            return (stream, requested)
         }
         guard let (stream, snapshot) = update else { return }
 
         do {
             try await stream.updateConfiguration(makeConfiguration(snapshot))
+            state.withLockUnchecked {
+                guard $0.stream === stream else { return }
+                $0.windowPixelSize = snapshot.windowPixelSize
+                $0.renderScale = snapshot.renderScale
+                $0.capturePixelSize = snapshot.capturePixelSize
+                $0.maxFPS = snapshot.maxFPS
+                $0.lastError = nil
+            }
         } catch {
-            state.withLockUnchecked { $0.lastError = .captureReconfigurationFailed(error) }
+            state.withLockUnchecked {
+                guard $0.stream === stream else { return }
+                $0.lastError = .captureReconfigurationFailed(error)
+            }
         }
     }
 
@@ -183,6 +217,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
         let failure: MGError? = benign ? nil : .captureStreamStopped(error)
 
         let callback = state.withLockUnchecked { state -> (@Sendable (MGError?) -> Void)? in
+            guard state.stream === stream else { return nil }
             state.stream = nil
             if let failure { state.lastError = failure }
             return state.onStop
@@ -202,18 +237,31 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
               let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue() else { return }
 
-        let (callback, native, maxFPS) = state.withLockUnchecked { ($0.onFrame, $0.windowPixelSize, $0.maxFPS) }
+        let snapshot = state.withLockUnchecked { state -> ((@Sendable (CapturedFrame) -> Void)?, CGSize, Int)? in
+            guard state.stream === stream else { return nil }
+            return (state.onFrame, state.windowPixelSize, state.maxFPS)
+        }
+        guard let (callback, native, maxFPS) = snapshot else { return }
 
         // A frame whose pixels match the previous one's carries nothing new. A surface that
         // cannot be sampled is passed through rather than guessed at.
         var isSceneCut = false
         if let sample = FrameSampler.sample(surface) {
-            if sample.signature == lastSignature { return }
+            if sample.signature == lastSignature, let previous = lastPixelBuffer,
+               let previousSurface = CVPixelBufferGetIOSurface(previous)?.takeUnretainedValue(),
+               FrameSampler.isIdentical(surface, to: previousSurface) {
+                lastPixelBuffer = pixelBuffer
+                return
+            }
             lastSignature = sample.signature
             isSceneCut = sceneCuts.isCut(previous: lastLuma, current: sample.luma,
                                          alpha: SceneCutDetector.alpha(forFrameRate: maxFPS))
             lastLuma = sample.luma
+        } else {
+            lastSignature = nil
+            lastLuma = nil
         }
+        lastPixelBuffer = pixelBuffer
 
         callback?(CapturedFrame(pixelBuffer: pixelBuffer, surface: surface,
                                 captureTime: CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)),

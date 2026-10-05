@@ -7,6 +7,14 @@ on:
     branches: [ "main" ]
 
 jobs:
+  core-tests:
+    name: Core regression tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: swift test
+
   build:
     name: Build and analyze
     runs-on: macos-latest
@@ -17,6 +25,11 @@ jobs:
       - name: Build
         run: |
           set -o pipefail
+          sdk_version="$(xcrun --sdk macosx --show-sdk-version)"
+          if [ "${sdk_version%%.*}" -lt 27 ]; then
+            echo "::error::The app build requires the macOS 27 SDK; this runner has $sdk_version."
+            exit 1
+          fi
           xcodebuild clean build analyze \
             -scheme MetalGoose \
             -project MetalGoose.xcodeproj \
