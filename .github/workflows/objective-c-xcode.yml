@@ -15,6 +15,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      - name: Metal toolchain
+        # The Metal compiler is a component Xcode downloads separately; a fresh runner may not have it.
+        run: |
+          if ! xcodebuild -showComponent MetalToolchain 2>/dev/null | grep -q "Status: installed"; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
       - name: Build
         run: |
           set -o pipefail
