@@ -45,7 +45,7 @@ struct YUVFrame: @unchecked Sendable {
 /// A session — a `Rig` here — is for one size. Moving to another size builds the new one beside the old, which goes on
 /// serving until the new one has started, so that the images do not stop while a model is compiled.
 ///
-/// Concurrency: the capture pipeline calls `prepare`, `isReady`, `encodeConversion` and the readers of the times on
+/// Concurrency: the capture pipeline calls `prepare`, `encodeConversion` and the readers of the times on
 /// its own queue, and none of them waits for this object's. Everything else — session set-up, submission, the
 /// results — happens on this object's queue; the render thread reads the results from `GeneratedImages`.
 final class NeuralInterpolator: @unchecked Sendable {
@@ -167,7 +167,17 @@ final class NeuralInterpolator: @unchecked Sendable {
     }
     private let published = OSAllocatedUnfairLock(uncheckedState: Published())
 
-    private let failure = OSAllocatedUnfairLock(initialState: false)
+    /// Until when the Neural Engine is left alone after a session would not start or a call failed, and how many failures
+    /// came in a row. A failure is not the end of it: the Neural Engine is shared with the rest of the system, and one failed
+    /// call used to leave MetalFX making the images until the window changed size. The wait doubles with every failure in a
+    /// row, from `firstRetry` to `longestRetry`, and a call that succeeds ends the streak.
+    private struct Failure {
+        var until: CFTimeInterval = 0
+        var streak = 0
+    }
+    private let failure = OSAllocatedUnfairLock(initialState: Failure())
+    private static let firstRetry: CFTimeInterval = 30
+    private static let longestRetry: CFTimeInterval = 300
 
     /// Sizes whose session started and then refused a call, until when. The processor reports the largest size it takes, but
     /// takes only the shapes its network was built for: 1874x1106 starts a session and fails every call with "Processor is not
@@ -195,8 +205,8 @@ final class NeuralInterpolator: @unchecked Sendable {
         self.images = images
     }
 
-    /// The processor failed at run time, and the caller should use another engine from now on.
-    var hasFailed: Bool { failure.withLock { $0 } }
+    /// The processor failed a little while ago, and the caller should use another engine until it is tried again.
+    var hasFailed: Bool { failure.withLock { CACurrentMediaTime() < $0.until } }
 
     /// Whether a session at this size was found to refuse calls.
     func isRejected(_ size: NeuralSizes.Size) -> Bool {
@@ -218,8 +228,18 @@ final class NeuralInterpolator: @unchecked Sendable {
             active = nil
             building = nil
             published.withLockUnchecked { $0 = Published() }
-            failure.withLock { $0 = false }
+            failure.withLock { $0 = Failure() }
         }
+    }
+
+    /// A session that would not start at `size`, or a call on it that failed: the Neural Engine is left alone for a while,
+    /// and the size is asked for afresh when it is used again. On this object's queue.
+    private func noteFailure(at size: NeuralSizes.Size) {
+        failure.withLock {
+            $0.streak += 1
+            $0.until = CACurrentMediaTime() + min(Self.longestRetry, Self.firstRetry * pow(2, Double($0.streak - 1)))
+        }
+        published.withLockUnchecked { if $0.wanted == size { $0.wanted = nil } }
     }
 
     /// Lets go of a session. Its processor is ended off to the side once no call is on it (`endIfIdle`).
@@ -256,11 +276,6 @@ final class NeuralInterpolator: @unchecked Sendable {
             guard let wanted = published.withLockUnchecked({ $0.wanted }) else { return }
             startSession(for: wanted)
         }
-    }
-
-    /// Whether the session that is serving is at this size.
-    func isReady(_ size: NeuralSizes.Size) -> Bool {
-        !hasFailed && activeSize == size
     }
 
     /// Encodes the conversion of one captured frame to 4:2:0 into the next buffer of the serving session, shrinking it on
@@ -377,10 +392,16 @@ final class NeuralInterpolator: @unchecked Sendable {
                 }
                 if error != nil {
                     // Not worth an alert: the capture path switches to MetalFX, which is slower on the GPU
-                    // but always there. What would be worth knowing is that this happened.
-                    failure.withLock { $0 = true }
+                    // but always there. The session is let go of, so that the Neural Engine comes back on a new one.
+                    noteFailure(at: rig.size)
+                    if active === rig {
+                        active = nil
+                        published.withLockUnchecked { $0.active = nil }
+                    }
+                    retire(rig)
                     return
                 }
+                failure.withLock { $0.streak = 0 }
                 (images.count > 1 ? rig.quarterTimes : rig.midpointTimes).withLock {
                     $0.add(spent, window: EngineShared.measurementWindow, elapsed: duration)
                 }
@@ -425,7 +446,7 @@ final class NeuralInterpolator: @unchecked Sendable {
         // so that going from two steps to four does not mean a new session.
         guard let configuration = VTLowLatencyFrameInterpolationConfiguration(frameWidth: size.width, frameHeight: size.height,
                                                                                numberOfInterpolatedFrames: 2) else {
-            failure.withLock { $0 = true }
+            noteFailure(at: size)
             return
         }
 
@@ -436,7 +457,7 @@ final class NeuralInterpolator: @unchecked Sendable {
                                        attributes: configuration.sourcePixelBufferAttributes),
               let outputs = makeBuffers(count: GeneratedImages.capacity(of: .neuralEngine) + Self.maximumImages, size: size,
                                         session: id, attributes: configuration.destinationPixelBufferAttributes) else {
-            failure.withLock { $0 = true }
+            noteFailure(at: size)
             return
         }
 
@@ -447,7 +468,9 @@ final class NeuralInterpolator: @unchecked Sendable {
             let session = VTFrameProcessor()
             do { try session.startSession(configuration: configuration) } catch {
                 queue.async { [self] in
-                    if building === rig { failure.withLock { $0 = true } }
+                    guard building === rig else { return }
+                    building = nil
+                    noteFailure(at: size)
                 }
                 return
             }

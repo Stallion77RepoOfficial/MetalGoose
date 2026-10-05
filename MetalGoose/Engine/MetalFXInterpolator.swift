@@ -58,9 +58,12 @@ final class MetalFXInterpolator: @unchecked Sendable {
     /// depth is the honest answer rather than a workaround. Cleared once per size change.
     private var flatDepth: MTLTexture?
     private var flatDepthIsCleared = false
-    /// The images are written round-robin. One more than the results held, so the slot being written is
-    /// never one the render thread can still ask for.
+    /// The images are written round-robin, into as many slots as there can be images the render thread may still read:
+    /// the results held, the ones still on the GPU behind the one being written, and one a presentation pass may have
+    /// looked up just before it was let go of. With only one more than the results held, a slot could be written while the
+    /// image in it was still being offered.
     private var outputs: [MTLTexture] = []
+    private static let outputCount = resultCapacity + maximumPending + 1
     private var outputIndex = 0
 
     private let pending = OSAllocatedUnfairLock(initialState: 0)
@@ -232,8 +235,8 @@ final class MetalFXInterpolator: @unchecked Sendable {
             // MetalFX writes it, and the presentation step reads it.
             descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
             descriptor.storageMode = .private
-            let made = (0...Self.resultCapacity).compactMap { _ in gpu.device.makeTexture(descriptor: descriptor) }
-            guard made.count == Self.resultCapacity + 1 else { return nil }
+            let made = (0..<Self.outputCount).compactMap { _ in gpu.device.makeTexture(descriptor: descriptor) }
+            guard made.count == Self.outputCount else { return nil }
             outputs = made
             outputIndex = 0
         }

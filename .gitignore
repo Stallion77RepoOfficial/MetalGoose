@@ -18,3 +18,4 @@ DEVLOG.md
 .swiftpm/
 /Audit
 /Tests
+/Benchmarks

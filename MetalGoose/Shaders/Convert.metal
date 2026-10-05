@@ -46,9 +46,28 @@ kernel void bgraTo420(
     writeBlock(rgb, luma, chroma, gid);
 }
 
-/// The same from a frame of another size: each of the planes' pixels is sampled from the frame where it falls, bilinearly,
-/// which is a 2x2 box where the frame is twice the planes' size on a side and a little softer at other ratios. This is how a
-/// frame the Neural Engine does not take whole is shrunk to what it takes, in the one pass that converts it.
+/// The mean of the frame over the area one of the planes' pixels covers, `pixel`, from `taps` bilinear fetches a side spread
+/// evenly across it. A bilinear fetch between two pixels is their mean, so one fetch at the centre covers the whole area
+/// where the frame is up to twice the planes' size on a side. Past that one fetch skips most of the area, and detail finer
+/// than the planes aliases (stripes three pixels apart shrunk by three came out as no stripes at all, a black plane), so
+/// there is a fetch for every two pixels of the area a side: an exact box at 4x, within a few percent of one in between.
+inline half3 footprintMean(texture2d<half, access::sample> input, float2 pixel, float2 ratio, uint2 taps) {
+    constexpr sampler linearSampler(filter::linear, address::clamp_to_edge, coord::normalized);
+    const float2 inputSize = float2(input.get_width(), input.get_height());
+    const float2 spacing = ratio / float2(taps);
+    float3 sum = 0.0f;
+    for (uint y = 0; y < taps.y; ++y) {
+        for (uint x = 0; x < taps.x; ++x) {
+            const float2 position = pixel * ratio + (float2(x, y) + 0.5f) * spacing;
+            sum += float3(input.sample(linearSampler, position / inputSize).rgb);
+        }
+    }
+    return half3(sum / float(taps.x * taps.y));
+}
+
+/// The same from a frame of another size: each of the planes' pixels is the mean of the frame over the area it covers
+/// (`footprintMean`). This is how a frame the Neural Engine does not take whole is shrunk to what it takes, in the one pass
+/// that converts it.
 kernel void bgraTo420Resampled(
     texture2d<half, access::sample> input [[texture(0)]],
     texture2d<half, access::write> luma [[texture(1)]],
@@ -57,12 +76,12 @@ kernel void bgraTo420Resampled(
 ) {
     if (gid.x >= chroma.get_width() || gid.y >= chroma.get_height()) return;
 
-    constexpr sampler linearSampler(filter::linear, address::clamp_to_edge, coord::normalized);
-    const float2 size = float2(luma.get_width(), luma.get_height());
+    const float2 ratio = float2(input.get_width(), input.get_height()) / float2(luma.get_width(), luma.get_height());
+    const uint2 taps = uint2(max(ceil(ratio * 0.5f), float2(1.0f)));
     const uint2 base = gid * 2;
     half3 rgb[4];
     for (uint k = 0; k < 4; ++k) {
-        rgb[k] = input.sample(linearSampler, (float2(base + uint2(k & 1, k >> 1)) + 0.5f) / size).rgb;
+        rgb[k] = footprintMean(input, float2(base + uint2(k & 1, k >> 1)), ratio, taps);
     }
     writeBlock(rgb, luma, chroma, gid);
 }

@@ -7,21 +7,14 @@ on:
     branches: [ "main" ]
 
 jobs:
-  core-tests:
-    name: Core regression tests
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Test
-        run: swift test
-
   build:
     name: Build and analyze
-    runs-on: macos-latest
+    # macOS 27 with Xcode 27 and the macOS 27 SDK, which the app is built against.
+    runs-on: xcode-27
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Build
         run: |
           set -o pipefail

@@ -97,7 +97,7 @@ final class CapturePipeline: @unchecked Sendable {
     private var fpsWindowStart: CFTimeInterval = 0
     private var fpsWindowFrames = 0
     private var lastResourceSample: CFTimeInterval = 0
-    private var lastCPUNanos: UInt64 = 0
+    private var lastCPUTicks: UInt64 = 0
 
     init(shared: EngineShared) {
         self.shared = shared
@@ -190,7 +190,7 @@ final class CapturePipeline: @unchecked Sendable {
             fpsWindowStart = CACurrentMediaTime()
             fpsWindowFrames = 0
             lastResourceSample = 0
-            lastCPUNanos = 0
+            lastCPUTicks = 0
         }
     }
 
@@ -328,7 +328,10 @@ final class CapturePipeline: @unchecked Sendable {
         var working = input
 
         if crops {
-            guard let cropped = gpu.ensureTexture(&cropTexture, width: width, height: height, usage: targetUsage),
+            // With nothing after the crop, the crop is the copy into the ring.
+            let destination = sharpens || antiAliases
+                ? gpu.ensureTexture(&cropTexture, width: width, height: height, usage: targetUsage) : history
+            guard let cropped = destination,
                   let blit = commandBuffer.makeBlitCommandEncoder() else {
                 drop(commandBuffer)
                 return
@@ -659,12 +662,12 @@ final class CapturePipeline: @unchecked Sendable {
             }
         }
         if result == 0 {
-            let nanos = usage.ri_user_time + usage.ri_system_time
+            let ticks = usage.ri_user_time + usage.ri_system_time
             let wall = now - lastResourceSample
-            if lastResourceSample > 0, wall > 0, nanos >= lastCPUNanos {
-                cpu = Float(Double(nanos - lastCPUNanos) / 1_000_000_000.0 / wall * 100.0)
+            if lastResourceSample > 0, wall > 0, ticks >= lastCPUTicks {
+                cpu = Float(Double(ticks - lastCPUTicks) * Self.nanosecondsPerTick / 1_000_000_000.0 / wall * 100.0)
             }
-            lastCPUNanos = nanos
+            lastCPUTicks = ticks
         }
         lastResourceSample = now
 
@@ -673,6 +676,14 @@ final class CapturePipeline: @unchecked Sendable {
                               processMemory: Self.processMemoryFootprint(),
                               cpuUsage: cpu)
     }
+
+    /// `proc_pid_rusage` reports CPU time in Mach absolute-time ticks, not nanoseconds: on Apple silicon a tick is
+    /// 125/3 ns, and reading the ticks as nanoseconds showed the CPU about 42 times lower than it was.
+    private static let nanosecondsPerTick: Double = {
+        var timebase = mach_timebase_info_data_t()
+        guard mach_timebase_info(&timebase) == KERN_SUCCESS, timebase.denom > 0 else { return 1 }
+        return Double(timebase.numer) / Double(timebase.denom)
+    }()
 
     private static func processMemoryFootprint() -> UInt64 {
         var info = task_vm_info_data_t()

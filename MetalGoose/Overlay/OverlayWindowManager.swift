@@ -33,9 +33,9 @@ final class OverlayWindowManager {
     var onPresentingChange: ((Bool) -> Void)?
     /// The overlay's size or position changed, so what it holds has to be drawn again.
     var onGeometryChange: (() -> Void)?
-    /// The captured window changed size or moved to a screen of a different density, so the stream
-    /// has to be asked for it again.
-    var onTargetResized: ((CaptureTarget) -> Void)?
+    /// The captured window moved, changed size or moved to a screen of a different density, or the app put windows of its
+    /// own in front of it or took them away (`coversTarget`), so the stream has to be asked for it again.
+    var onTargetChanged: ((CaptureTarget, _ coveredByAppWindows: Bool) -> Void)?
     var onDisplayChanged: ((NSScreen, DisplayRate) -> Void)?
 
     private var window: NonActivatingWindow?
@@ -43,7 +43,9 @@ final class OverlayWindowManager {
     private var targetWindowID: CGWindowID = 0
     private var targetPID: pid_t = 0
     private var targetFrame: CGRect = .zero
-    private var targetPixelSize: CGSize = .zero
+    private var targetBackingScale: CGFloat = 1
+    /// What the stream was last told about the window.
+    private var followed: (target: CaptureTarget, covered: Bool)?
     private var targetDisplayID: CGDirectDisplayID?
     private var targetDisplayRate: DisplayRate?
     private var targetIsFrontmost = true
@@ -105,6 +107,7 @@ final class OverlayWindowManager {
         outputScale = max(1.0, configuration.outputScale)
         fillsScreen = configuration.fillsScreen
         targetFrame = configuration.windowFrame
+        targetBackingScale = configuration.screen.backingScaleFactor
         targetDisplayID = ScreenGeometry.displayID(of: configuration.screen)
         targetDisplayRate = ScreenGeometry.displayRate(of: configuration.screen)
 
@@ -148,6 +151,7 @@ final class OverlayWindowManager {
         view = nil
         targetWindowID = 0
         targetPID = 0
+        followed = nil
         targetDisplayID = nil
         targetDisplayRate = nil
     }
@@ -156,6 +160,8 @@ final class OverlayWindowManager {
     func setTarget(windowID: CGWindowID, pid: pid_t) {
         targetWindowID = windowID
         targetPID = pid
+        // What the stream was started with: the window alone, where the overlay was created.
+        followed = (CaptureTarget(windowID: windowID, frame: targetFrame, backingScale: targetBackingScale), false)
         // Seeded from the world rather than assumed, so the overlay does not show itself over an app
         // the user never left MetalGoose for. The observer only fires on a change, and starting a
         // capture from MetalGoose's own window means the first change is the one that brings the
@@ -196,6 +202,29 @@ final class OverlayWindowManager {
         (windowInfo()?[kCGWindowIsOnscreen as String] as? Bool) == true
     }
 
+    /// Whether the app has a window of its own over the captured one at a higher layer: a menu, a popup, a tooltip, a panel
+    /// or a dialog. Each is a window of its own, which a capture of the window alone does not show, and the overlay would hide
+    /// it. The windows in front of it at its own layer are its child windows — sheets, popovers, and the indicator macOS puts
+    /// on a window that is being captured — which the window's capture shows already (measured: a sheet and a child window
+    /// were in it, a popup-level window was not).
+    private func coversTarget(_ cgFrame: CGRect, layer: Int) -> Bool {
+        guard targetWindowID != 0,
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], targetWindowID) as? [[String: Any]] else {
+            return false
+        }
+        return list.contains { info in
+            guard (info[kCGWindowOwnerPID as String] as? Int32) == targetPID,
+                  ((info[kCGWindowLayer as String] as? Int) ?? 0) > layer,
+                  ((info[kCGWindowAlpha as String] as? Double) ?? 1) > 0.01,
+                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = bounds["X"], let y = bounds["Y"], let width = bounds["Width"], let height = bounds["Height"] else {
+                return false
+            }
+            let overlap = cgFrame.intersection(CGRect(x: x, y: y, width: width, height: height))
+            return !overlap.isNull && overlap.width >= 1 && overlap.height >= 1
+        }
+    }
+
     /// Hides or shows the overlay, and with it the pointer constraint: both only make sense while
     /// the user is actually in the captured window.
     private func applyPresenting(_ presenting: Bool) {
@@ -231,16 +260,14 @@ final class OverlayWindowManager {
             onDisplayChanged?(screen, rate)
         }
 
-        let pixelSize = CGSize(width: cgFrame.width * screen.backingScaleFactor,
-                               height: cgFrame.height * screen.backingScaleFactor)
-        if pixelSize != targetPixelSize {
-            if targetPixelSize != .zero {
-                onTargetResized?(CaptureTarget(windowID: targetWindowID, size: cgFrame.size,
-                                               backingScale: screen.backingScaleFactor))
-            }
-            targetPixelSize = pixelSize
+        let target = CaptureTarget(windowID: targetWindowID, frame: cgFrame, backingScale: screen.backingScaleFactor)
+        let covered = coversTarget(cgFrame, layer: (info[kCGWindowLayer as String] as? Int) ?? 0)
+        if let followed, followed.target != target || followed.covered != covered {
+            onTargetChanged?(target, covered)
         }
+        followed = (target, covered)
         targetFrame = cgFrame
+        targetBackingScale = screen.backingScaleFactor
 
         let frame = outputFrame(forWindow: cgFrame, on: screen)
         if window.frame != frame {

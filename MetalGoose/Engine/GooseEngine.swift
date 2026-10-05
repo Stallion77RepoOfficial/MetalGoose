@@ -30,8 +30,8 @@ final class GooseEngine: @unchecked Sendable {
 
     // MARK: - Creation
 
-    static func make(libraryURL: URL? = nil) -> Result<GooseEngine, MGError> {
-        GPUContext.make(libraryURL: libraryURL).map(GooseEngine.init)
+    static func make() -> Result<GooseEngine, MGError> {
+        GPUContext.make().map(GooseEngine.init)
     }
 
     private init(gpu: GPUContext) {

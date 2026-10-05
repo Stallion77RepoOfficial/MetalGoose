@@ -20,7 +20,9 @@
 MetalGoose captures a window with ScreenCaptureKit, runs MetalFX spatial
 upscaling and frame generation over the captured frames, and presents the result
 in a borderless overlay pinned to the source window. It works on any window, not
-only games — anything that renders faster than it is being watched.
+only games — anything that renders faster than it is being watched. Menus, popups,
+tooltips and dialogs the app opens over its window are captured with it while they
+are open, so they stay visible on the overlay.
 
 ## Features
 
@@ -110,6 +112,7 @@ A HUD overlay reports, live:
 | **macOS** | 27.0 or later |
 | **Chip** | Apple Silicon (M1/M2/M3/M4) |
 | **Xcode** | 27 or later (macOS 27 SDK) |
+| **Metal** | Metal 4.1, shaders built as Metal Shading Language 4.1 |
 | **Swift** | 6.4 toolchain, Swift 6 language mode |
 | **RAM** | 8 GB minimum, 16 GB recommended |
 
@@ -128,19 +131,26 @@ cd MetalGoose
 open MetalGoose.xcodeproj
 ```
 
-The shared project uses **Sign to Run Locally** (ad hoc signing), with no development team
-required. Build and run the MetalGoose scheme on My Mac. Metal, MetalFX, and VideoToolbox
-features use the same hardware and OS support with either signing method. Screen Recording
-and Accessibility both require user permission before scaling; ad hoc rebuilds or a change
-of signing identity can require granting those permissions again.
-
-For a stable development identity, select your own team and **Apple Development** in Xcode,
-or override the build settings locally without changing the shared project:
+The project uses **Apple Development** signing to keep its identity stable across rebuilds.
+Select your own development team and certificate in Xcode, then build and run the MetalGoose
+scheme on My Mac. Screen Recording and Accessibility both require user permission before
+scaling. You can also select your team locally without changing the shared project:
 
 ```bash
 xcodebuild -project MetalGoose.xcodeproj -scheme MetalGoose -configuration Release \
   DEVELOPMENT_TEAM=YOUR_TEAM_ID CODE_SIGN_IDENTITY="Apple Development" build
 ```
+
+To build without a development certificate, choose **Sign to Run Locally**, or use:
+
+```bash
+xcodebuild -project MetalGoose.xcodeproj -scheme MetalGoose -configuration Release \
+  DEVELOPMENT_TEAM= CODE_SIGN_IDENTITY="-" build
+```
+
+Metal, MetalFX, and VideoToolbox use the same hardware and OS support with either signing
+method. Ad hoc rebuilds or a change of signing identity can require granting privacy
+permissions again.
 
 Distributing a notarized app outside the Mac App Store requires **Developer ID Application**
 signing, which is separate from Apple Development and local signing. Keep private keys,
@@ -149,13 +159,7 @@ not a signing credential. See Apple's [code-signing certificates](https://develo
 [code identity and privacy permissions](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements),
 and [Developer ID distribution](https://developer.apple.com/developer-id/) documentation.
 
-### Tests
-
-Run `swift test` from the repository root for the scheduling, ownership, async transaction,
-presentation counter, and localization regression tests. This pure-logic package supports
-macOS 15 or later; building the app still requires the macOS 27 SDK. CI runs the Core tests
-and checks the SDK before building and analyzing the app. GPU and VideoToolbox validation
-requires supported hardware and is separate from the Core tests.
+CI builds and analyzes the app on macOS 27 with Xcode 27 and the macOS 27 SDK.
 
 ### Languages
 

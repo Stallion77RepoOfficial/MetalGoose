@@ -2,7 +2,7 @@ import Foundation
 
 /// What the planner needs to know about a captured frame. The engine's frames carry
 /// textures too, but scheduling is decided by arrival time and scene cuts alone — which
-/// is what keeps this logic free of Metal and testable.
+/// is what keeps this logic free of Metal.
 protocol TimedFrame {
     /// Arrival time of the capture, on the `CACurrentMediaTime()` clock.
     var timestamp: CFTimeInterval { get }

@@ -59,7 +59,7 @@ enum FrameSampler {
     }
 
     static func sample(_ surface: IOSurfaceRef) -> FrameSample? {
-        IOSurfaceLock(surface, .readOnly, nil)
+        guard IOSurfaceLock(surface, .readOnly, nil) == kIOReturnSuccess else { return nil }
         defer { IOSurfaceUnlock(surface, .readOnly, nil) }
 
         let width = IOSurfaceGetWidth(surface)

@@ -18,12 +18,12 @@ struct CapturedFrame: @unchecked Sendable {
 
 /// The window being captured, resolved by the caller. Screens are an AppKit matter, so the
 /// pixel density is decided on the main thread rather than here.
-struct CaptureTarget: Sendable {
+struct CaptureTarget: Sendable, Equatable {
     let windowID: CGWindowID
-    /// The window's size in points.
-    let size: CGSize
+    /// The window's frame in CoreGraphics coordinates: points, origin at the top-left of the primary display.
+    let frame: CGRect
     /// Pixels per point on the display the window sits on.
     let backingScale: CGFloat
 
-    var pixelSize: CGSize { CGSize(width: size.width * backingScale, height: size.height * backingScale) }
+    var pixelSize: CGSize { CGSize(width: frame.width * backingScale, height: frame.height * backingScale) }
 }

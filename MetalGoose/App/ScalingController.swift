@@ -95,9 +95,8 @@ final class ScalingController: ObservableObject {
 
         overlay.onPresentingChange = { [weak self] presenting in self?.engine?.setPresenting(presenting) }
         overlay.onGeometryChange = { [weak self] in self?.engine?.requestRedraw() }
-        overlay.onTargetResized = { [weak self] target in
-            guard let self else { return }
-            Task { await self.capture.reconfigure(window: target) }
+        overlay.onTargetChanged = { [weak self] target, covered in
+            self?.capture.follow(target, includesAppWindows: covered)
         }
         capture.onStop = { [weak self] error in
             Task { @MainActor in self?.captureEnded(error) }
@@ -235,7 +234,7 @@ final class ScalingController: ObservableObject {
         }
 
         let upscaling = settings.isUpscaling
-        let captureTarget = CaptureTarget(windowID: target.id, size: target.frame.size,
+        let captureTarget = CaptureTarget(windowID: target.id, frame: target.frame,
                                           backingScale: screen.backingScaleFactor)
 
         engine.apply(settings.engineConfig)
@@ -245,7 +244,7 @@ final class ScalingController: ObservableObject {
 
         guard await capture.startCapture(target: captureTarget, maxFPS: displayRate.maximum, showsCursor: false,
                                          renderScale: upscaling ? settings.renderScale.multiplier : 1.0,
-                                         queueDepth: settings.bufferCount) else {
+                                         pipelineDepth: settings.bufferCount) else {
             let error = capture.lastError ?? MGError("MG-CAP-002", String(localized: "Unknown capture error."))
             await capture.stopCapture()
             capture.onFrame = nil

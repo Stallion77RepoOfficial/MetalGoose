@@ -41,20 +41,10 @@ final class GPUContext: @unchecked Sendable {
         self.pipelines = pipelines
     }
 
-    /// `libraryURL` names a compiled shader library to use instead of the app bundle's default one,
-    /// which is how the pipelines are built outside an app — by the benchmark and the tests.
-    static func make(libraryURL: URL? = nil) -> Result<GPUContext, MGError> {
+    static func make() -> Result<GPUContext, MGError> {
         guard let device = MTLCreateSystemDefaultDevice() else { return .failure(.metalDeviceUnavailable) }
         guard let queue = device.makeCommandQueue() else { return .failure(.commandQueueUnavailable) }
-        let library: MTLLibrary
-        do {
-            guard let loaded = try libraryURL.map({ try device.makeLibrary(URL: $0) }) ?? device.makeDefaultLibrary() else {
-                return .failure(.pipelineSetupFailed())
-            }
-            library = loaded
-        } catch {
-            return .failure(.pipelineSetupFailed("\(error)"))
-        }
+        guard let library = device.makeDefaultLibrary() else { return .failure(.pipelineSetupFailed()) }
 
         do {
             func compute(_ name: String) throws -> MTLComputePipelineState {

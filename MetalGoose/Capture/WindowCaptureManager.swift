@@ -16,12 +16,25 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
     /// frame). One lock, one snapshot per use.
     private struct State {
         var stream: SCStream?
+        /// The window alone, which the stream captures unless the app has windows over it.
+        var windowFilter: SCContentFilter?
+        var application: SCRunningApplication?
+        var windowFrame: CGRect = .zero
         var windowPixelSize: CGSize = .zero
         var capturePixelSize: CGSize = .zero
         var renderScale: Float = 1
         var maxFPS = 0
         var showsCursor = false
-        var queueDepth = 0
+        var pipelineDepth = 0
+        /// The display, in CoreGraphics coordinates, whose part under the window is captured with the app's other windows
+        /// on it (`follow`); nil while the window alone is.
+        var appWindowsDisplay: CGRect?
+        /// The latest of what `follow` was asked for, which the serialised update applies whatever order it runs in.
+        var followed: (target: CaptureTarget, includesAppWindows: Bool)?
+        /// While the stream changes what it captures, the frames it delivers are of neither one nor the other.
+        var isSwitching = false
+        /// The first frame after a switch is not a neighbour of the one before it.
+        var cutsNext = false
         var lastError: MGError?
         var onFrame: (@Sendable (CapturedFrame) -> Void)?
         var onStop: (@Sendable (MGError?) -> Void)?
@@ -63,6 +76,15 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                height: max(minimumCaptureDimension, (native.height * CGFloat(renderScale)).rounded()))
     }
 
+    /// Surfaces ScreenCaptureKit keeps in its pool. The pipeline holds a frame for as long as the GPU works on it, up to its
+    /// buffer depth of them at once; one more waits for a permit, one in the mailbox, and the last one delivered is kept to
+    /// tell a repeat; and the compositor needs one free to draw the next into. A pool of the buffer depth alone ran dry
+    /// whenever the GPU was busy: with each frame held for 30 ms, a pool of 3 delivered 83 frames a second and one of 2
+    /// delivered 56, where 7 and 6 delivered 111. ScreenCaptureKit takes at most eight.
+    private static func queueDepth(pipelineDepth: Int) -> Int {
+        min(8, max(3, pipelineDepth + 4))
+    }
+
     private func makeConfiguration(_ snapshot: State) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.width = Int(snapshot.capturePixelSize.width)
@@ -76,12 +98,11 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
         // the shadow and the window into a surface sized for the window alone, so the content
         // lands smaller than the window it is drawn over.
         config.ignoreShadowsSingleWindow = true
-
-        // ScreenCaptureKit's queue and the render pipeline's buffer depth are the same
-        // decision — a deeper capture queue than the pipeline will drain only adds latency.
-        if snapshot.queueDepth > 0 {
-            config.queueDepth = snapshot.queueDepth
+        // Where the app's windows on the display are captured, only the window's own rectangle is.
+        if let display = snapshot.appWindowsDisplay {
+            config.sourceRect = snapshot.windowFrame.offsetBy(dx: -display.minX, dy: -display.minY)
         }
+        config.queueDepth = Self.queueDepth(pipelineDepth: snapshot.pipelineDepth)
         config.captureResolution = .best
         config.shouldBeOpaque = false
         config.backgroundColor = .clear
@@ -89,14 +110,15 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
     }
 
     func startCapture(target: CaptureTarget, maxFPS: Int, showsCursor: Bool,
-                      renderScale: Float, queueDepth: Int) async -> Bool {
+                      renderScale: Float, pipelineDepth: Int) async -> Bool {
         await configurationGate.perform { [self] in
-            await startSerially(target: target, maxFPS: maxFPS, showsCursor: showsCursor, renderScale: renderScale, queueDepth: queueDepth)
+            await startSerially(target: target, maxFPS: maxFPS, showsCursor: showsCursor, renderScale: renderScale,
+                                pipelineDepth: pipelineDepth)
         }
     }
 
     private func startSerially(target: CaptureTarget, maxFPS: Int, showsCursor: Bool,
-                               renderScale: Float, queueDepth: Int) async -> Bool {
+                               renderScale: Float, pipelineDepth: Int) async -> Bool {
         await stopSerially()
 
         do {
@@ -106,14 +128,21 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 return false
             }
 
-            let native = target.pixelSize
+            let filter = SCContentFilter(desktopIndependentWindow: window)
             let snapshot = state.withLockUnchecked { state -> State in
-                state.windowPixelSize = native
-                state.capturePixelSize = Self.scaledSize(native, by: renderScale)
+                state.windowFilter = filter
+                state.application = window.owningApplication
+                state.windowFrame = target.frame
+                state.windowPixelSize = target.pixelSize
+                state.capturePixelSize = Self.scaledSize(target.pixelSize, by: renderScale)
                 state.renderScale = renderScale
                 state.maxFPS = maxFPS
                 state.showsCursor = showsCursor
-                state.queueDepth = queueDepth
+                state.pipelineDepth = pipelineDepth
+                state.appWindowsDisplay = nil
+                state.followed = nil
+                state.isSwitching = false
+                state.cutsNext = false
                 state.lastError = nil
                 return state
             }
@@ -128,8 +157,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 sceneCuts.reset()
             }
 
-            let stream = SCStream(filter: SCContentFilter(desktopIndependentWindow: window),
-                                  configuration: makeConfiguration(snapshot), delegate: self)
+            let stream = SCStream(filter: filter, configuration: makeConfiguration(snapshot), delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
             state.withLockUnchecked { $0.stream = stream }
             try await stream.startCapture()
@@ -147,7 +175,11 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
     private func stopSerially() async {
         captureQueue.async { [self] in lastPixelBuffer = nil }
         guard let stream = state.withLockUnchecked({ state -> SCStream? in
-            defer { state.stream = nil }
+            defer {
+                state.stream = nil
+                state.followed = nil
+                state.isSwitching = false
+            }
             return state.stream
         }) else { return }
 
@@ -162,25 +194,23 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
         }
     }
 
-    /// Applies render scale and the window's size at the source, without restarting the
+    /// Applies render scale or a new frame-rate ceiling at the source, without restarting the
     /// stream. The frames arrive already reduced, so the GPU never encodes a downscale pass
     /// and every later stage works on proportionally fewer pixels.
-    func reconfigure(renderScale: Float? = nil, window: CaptureTarget? = nil, maxFPS: Int? = nil) async {
+    func reconfigure(renderScale: Float? = nil, maxFPS: Int? = nil) async {
         await configurationGate.perform { [self] in
-            await reconfigureSerially(renderScale: renderScale, window: window, maxFPS: maxFPS)
+            await reconfigureSerially(renderScale: renderScale, maxFPS: maxFPS)
         }
     }
 
-    private func reconfigureSerially(renderScale: Float?, window: CaptureTarget?, maxFPS: Int?) async {
+    private func reconfigureSerially(renderScale: Float?, maxFPS: Int?) async {
         let update = state.withLockUnchecked { state -> (SCStream, State)? in
             guard let stream = state.stream else { return nil }
             var requested = state
-            requested.windowPixelSize = window?.pixelSize ?? state.windowPixelSize
             requested.renderScale = renderScale ?? state.renderScale
             requested.maxFPS = maxFPS.map { max(1, $0) } ?? state.maxFPS
             requested.capturePixelSize = Self.scaledSize(requested.windowPixelSize, by: requested.renderScale)
             guard requested.capturePixelSize != state.capturePixelSize || requested.maxFPS != state.maxFPS else {
-                state.windowPixelSize = requested.windowPixelSize
                 state.renderScale = requested.renderScale
                 return nil
             }
@@ -192,7 +222,6 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
             try await stream.updateConfiguration(makeConfiguration(snapshot))
             state.withLockUnchecked {
                 guard $0.stream === stream else { return }
-                $0.windowPixelSize = snapshot.windowPixelSize
                 $0.renderScale = snapshot.renderScale
                 $0.capturePixelSize = snapshot.capturePixelSize
                 $0.maxFPS = snapshot.maxFPS
@@ -204,6 +233,104 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 $0.lastError = .captureReconfigurationFailed(error)
             }
         }
+    }
+
+    // MARK: - Following the window
+
+    /// The window moved or changed size, or the app put windows of its own over it or took them away: menus, popups,
+    /// tooltips, panels and dialogs, which are windows of their own and not part of the window's capture (its sheets and
+    /// popovers are). While there are any, the stream takes in the app's windows on the display, cut to the window's
+    /// rectangle, so that they are shown as they would be; otherwise the window alone, which follows the window by itself
+    /// and delivered more frames for the same content (118 a second against 112 for a window drawn 60 times a second).
+    /// Measured on one stream, switching took about 0.1 s either way, and the frames meanwhile are dropped.
+    ///
+    /// Called from the main thread; the latest call is what is applied, whatever order the updates run in.
+    func follow(_ target: CaptureTarget, includesAppWindows: Bool) {
+        state.withLockUnchecked { $0.followed = (target, includesAppWindows) }
+        Task { await configurationGate.perform { [self] in await followSerially() } }
+    }
+
+    private func followSerially() async {
+        guard let (stream, current, wanted) = state.withLockUnchecked({ state -> (SCStream, State, (target: CaptureTarget, includesAppWindows: Bool))? in
+            guard let stream = state.stream, let followed = state.followed else { return nil }
+            return (stream, state, followed)
+        }) else { return }
+
+        var next = current
+        next.windowFrame = wanted.target.frame
+        next.windowPixelSize = wanted.target.pixelSize
+        next.capturePixelSize = Self.scaledSize(wanted.target.pixelSize, by: current.renderScale)
+
+        // A new filter where the app's windows come or go, or the window has left the display they are captured on.
+        var filter: SCContentFilter?
+        if wanted.includesAppWindows {
+            let center = CGPoint(x: wanted.target.frame.midX, y: wanted.target.frame.midY)
+            if current.appWindowsDisplay.map({ !$0.contains(center) }) ?? true {
+                guard let application = current.application,
+                      let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+                      let display = Self.display(holding: wanted.target.frame, among: content.displays) else { return }
+                let appWindows = SCContentFilter(display: display, including: [application], exceptingWindows: [])
+                appWindows.includeMenuBar = false
+                filter = appWindows
+                next.appWindowsDisplay = display.frame
+            }
+        } else if current.appWindowsDisplay != nil {
+            filter = current.windowFilter
+            next.appWindowsDisplay = nil
+        }
+
+        // A move alone changes nothing for the window's own capture, which follows it.
+        let movesRectangle = next.appWindowsDisplay != nil && next.windowFrame != current.windowFrame
+        guard filter != nil || movesRectangle || next.capturePixelSize != current.capturePixelSize else {
+            state.withLockUnchecked {
+                guard $0.stream === stream else { return }
+                $0.windowFrame = next.windowFrame
+                $0.windowPixelSize = next.windowPixelSize
+            }
+            return
+        }
+
+        if filter != nil { state.withLockUnchecked { if $0.stream === stream { $0.isSwitching = true } } }
+        do {
+            if let filter { try await stream.updateContentFilter(filter) }
+            try await stream.updateConfiguration(makeConfiguration(next))
+            state.withLockUnchecked {
+                guard $0.stream === stream else { return }
+                $0.windowFrame = next.windowFrame
+                $0.windowPixelSize = next.windowPixelSize
+                $0.capturePixelSize = next.capturePixelSize
+                $0.appWindowsDisplay = next.appWindowsDisplay
+                if filter != nil { $0.cutsNext = true }
+                $0.lastError = nil
+            }
+        } catch {
+            // Back to the window alone, which is what the stream was started with, rather than half of a switch.
+            var fallback = next
+            fallback.appWindowsDisplay = nil
+            if filter != nil, let windowFilter = current.windowFilter {
+                try? await stream.updateContentFilter(windowFilter)
+                try? await stream.updateConfiguration(makeConfiguration(fallback))
+            }
+            state.withLockUnchecked {
+                guard $0.stream === stream else { return }
+                if filter != nil {
+                    $0.appWindowsDisplay = nil
+                    $0.cutsNext = true
+                }
+                $0.lastError = .captureReconfigurationFailed(error)
+            }
+        }
+        if filter != nil { state.withLockUnchecked { if $0.stream === stream { $0.isSwitching = false } } }
+    }
+
+    /// The display holding most of `frame`, as AppKit decides a window's screen.
+    private static func display(holding frame: CGRect, among displays: [SCDisplay]) -> SCDisplay? {
+        func area(_ display: SCDisplay) -> CGFloat {
+            let shared = display.frame.intersection(frame)
+            return shared.isNull ? 0 : shared.width * shared.height
+        }
+        guard let best = displays.max(by: { area($0) < area($1) }), area(best) > 0 else { return nil }
+        return best
     }
 
     // MARK: - SCStreamDelegate
@@ -237,25 +364,27 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
               let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue() else { return }
 
-        let snapshot = state.withLockUnchecked { state -> ((@Sendable (CapturedFrame) -> Void)?, CGSize, Int)? in
-            guard state.stream === stream else { return nil }
-            return (state.onFrame, state.windowPixelSize, state.maxFPS)
+        let snapshot = state.withLockUnchecked { state -> ((@Sendable (CapturedFrame) -> Void)?, CGSize, Int, Bool)? in
+            guard state.stream === stream, !state.isSwitching else { return nil }
+            defer { state.cutsNext = false }
+            return (state.onFrame, state.windowPixelSize, state.maxFPS, state.cutsNext)
         }
-        guard let (callback, native, maxFPS) = snapshot else { return }
+        guard let (callback, native, maxFPS, cutsHere) = snapshot else { return }
 
         // A frame whose pixels match the previous one's carries nothing new. A surface that
         // cannot be sampled is passed through rather than guessed at.
-        var isSceneCut = false
+        var isSceneCut = cutsHere
         if let sample = FrameSampler.sample(surface) {
-            if sample.signature == lastSignature, let previous = lastPixelBuffer,
+            if !cutsHere, sample.signature == lastSignature, let previous = lastPixelBuffer,
                let previousSurface = CVPixelBufferGetIOSurface(previous)?.takeUnretainedValue(),
                FrameSampler.isIdentical(surface, to: previousSurface) {
                 lastPixelBuffer = pixelBuffer
                 return
             }
             lastSignature = sample.signature
-            isSceneCut = sceneCuts.isCut(previous: lastLuma, current: sample.luma,
-                                         alpha: SceneCutDetector.alpha(forFrameRate: maxFPS))
+            let detected = sceneCuts.isCut(previous: lastLuma, current: sample.luma,
+                                           alpha: SceneCutDetector.alpha(forFrameRate: maxFPS))
+            isSceneCut = isSceneCut || detected
             lastLuma = sample.luma
         } else {
             lastSignature = nil

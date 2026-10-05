@@ -16,8 +16,7 @@ import Foundation
 /// texture in motion from a still one with noise: it gained 4 dB on slow video and lost 0.3 to 0.7 on a scene turning at
 /// 60 captures a second, and cost MetalFX up to 0.7 dB there.
 ///
-/// The blend is the shaders `blendTowardCaptures...`; this is the numbers they take and the rule they apply, which is kept
-/// here so that it can be tested.
+/// The blend is the shaders `blendTowardCaptures...` (`Stability.metal`, where the rule is); this is the numbers they take.
 enum StabilityBlend {
 
     /// How far, by that ratio, the content may have moved for the Neural Engine's image to stand alone. Chosen against the
@@ -33,29 +32,11 @@ enum StabilityBlend {
     /// A change of this share of the full range is noise: 4 levels of 255.
     static let noiseFloor: Float = 4.0 / 255.0
 
-    /// Where the captures are the same, to within this, over the three pixels around, they are the picture whatever the
-    /// contrast around: an interface drawn the same, and the edge of one against a moving scene.
-    static let exactChange: Float = 1.0 / 255.0
-
     /// How far the content may have moved for an engine's image to stand alone.
     static func motion(for engine: GenerationEngine) -> Float {
         switch engine {
         case .neuralEngine: return neuralEngineMotion
         case .metalFX:      return metalFXMotion
         }
-    }
-
-    /// The share of the captures' mix to put in at a pixel.
-    ///
-    /// - Parameters:
-    ///   - largestChange: the largest difference of any channel between the captures within two pixels, as a share of
-    ///     the full range.
-    ///   - nearestChange: the same within one pixel.
-    ///   - contrast: the largest difference of any channel to a neighbour, in either capture, within two pixels.
-    static func weight(largestChange: Float, nearestChange: Float, contrast: Float, motion: Float,
-                       noiseFloor: Float = StabilityBlend.noiseFloor) -> Float {
-        if nearestChange <= exactChange { return 1 }
-        let remaining = min(max(1 - (largestChange / (contrast + noiseFloor)) / motion, 0), 1)
-        return remaining * remaining
     }
 }
