@@ -5,7 +5,12 @@ import os
 /// A capture that has been through the capture path and is waiting to be shown or used to
 /// generate something.
 struct FrameHistory: TimedFrame {
-    let texture: MTLTexture
+    let texture: any MTLTexture
+    /// The ring slot the texture is, held by the ring and by every command buffer that reads it until that has run, so
+    /// that the capture path never writes a slot another lane may still be reading (`GPULane`).
+    let lease: BufferLease
+    /// Where on the capture lane the texture is written (`GPULane.submitted`): a reader on another lane waits for it.
+    let written: UInt64
     /// When the capture reached the pipeline. It names the capture: the engines publish its pair's images under it, and
     /// measure their latency from it.
     let timestamp: CFTimeInterval
@@ -13,7 +18,7 @@ struct FrameHistory: TimedFrame {
     /// stands for, on the display's refresh grid, without the wander of its delivery. The render clock plans on this.
     let presentationTime: CFTimeInterval
     let isSceneCut: Bool
-    let validity = WorkValidity()
+    let validity: WorkValidity
 }
 
 /// The most recent captures, oldest first.

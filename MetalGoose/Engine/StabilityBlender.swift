@@ -9,7 +9,7 @@ final class StabilityBlender {
 
     /// The blended images. One is read by the presentation pass of the command buffer that follows its blend, and
     /// the next callback's blend must not overwrite it before that has run, which three slots in turn guarantee.
-    private var textures: [MTLTexture?] = Array(repeating: nil, count: 3)
+    private var textures: [(any MTLTexture)?] = Array(repeating: nil, count: 3)
     private var turn = 0
 
     init(gpu: GPUContext) {
@@ -22,25 +22,27 @@ final class StabilityBlender {
     }
 
     /// `generated`, blended with the captures `previous` and `next` it sits between at `phase` (0 at `previous`, 1 at
-    /// `next`), encoded on `commandBuffer`, at the captures' size: an image the Neural Engine made at another size is
+    /// `next`), encoded on `command`, at the captures' size: an image the Neural Engine made at another size is
     /// enlarged as it is blended, and one it made in planes is turned into colour. Nil when the two captures do not have one
     /// size, which no pair of one session does; the caller shows the capture.
-    func blend(_ generated: GeneratedImages.Source, previous: MTLTexture, next: MTLTexture, phase: Double, motion: Float,
-               commandBuffer: MTLCommandBuffer) -> MTLTexture? {
+    func blend(_ generated: GeneratedImages.Source, previous: any MTLTexture, next: any MTLTexture, phase: Double,
+               motion: Float, command: GPUCommand) -> (any MTLTexture)? {
         let (width, height) = (previous.width, previous.height)
         guard next.width == width, next.height == height,
               let output = gpu.ensureTexture(&textures[turn], width: width, height: height),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+              let encoder = command.makeComputePass() else { return nil }
         turn = (turn + 1) % textures.count
 
         var parameters = StabilityBlendParams(phase: Float(phase), motion: motion, noiseFloor: StabilityBlend.noiseFloor)
-        let pipeline: MTLComputePipelineState
+        let pipeline: any MTLComputePipelineState
         let captures: Int
         switch generated {
-        case .colour(let image):
+        case .colour(let image, let lease, let lane, let written):
             pipeline = gpu.pipelines.stabilityBlend
             encoder.setTexture(image, index: 0)
             captures = 1
+            command.wait(for: lane, value: written)
+            command.retain(lease)
         case .planes(let frame):
             let (luma, chroma) = (frame.luma, frame.chroma)
             pipeline = luma.width == width && luma.height == height
@@ -48,7 +50,8 @@ final class StabilityBlender {
             encoder.setTexture(luma, index: 0)
             encoder.setTexture(chroma, index: 1)
             captures = 2
-            commandBuffer.addCompletedHandler { _ in withExtendedLifetime(frame) {} }
+            if let lease = frame.lease { command.retain(lease) }
+            command.retain(frame.buffer)
         }
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(previous, index: captures)

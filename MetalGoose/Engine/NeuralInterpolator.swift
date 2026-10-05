@@ -10,8 +10,8 @@ import os
 /// can convert to and from it without a copy.
 struct YUVFrame: @unchecked Sendable {
     let buffer: CVPixelBuffer
-    let luma: MTLTexture
-    let chroma: MTLTexture
+    let luma: any MTLTexture
+    let chroma: any MTLTexture
     /// The session this buffer belongs to. A frame from a session that has been replaced is not the same size as the
     /// ones after it and must not be paired with them.
     let session: Int
@@ -281,10 +281,10 @@ final class NeuralInterpolator: @unchecked Sendable {
     /// Encodes the conversion of one captured frame to 4:2:0 into the next buffer of the serving session, shrinking it on
     /// the way where it is larger than the session's size, and returns that buffer; nil where no session is serving. Called
     /// on the capture pipeline's queue, and never waits for this object's.
-    func encodeConversion(of frame: MTLTexture, commandBuffer: MTLCommandBuffer) -> YUVFrame? {
+    func encodeConversion(of frame: any MTLTexture, command: GPUCommand) -> YUVFrame? {
         guard let rig = published.withLockUnchecked({ $0.active }),
               let target = rig.takeInput(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+              let encoder = command.makeComputePass() else { return nil }
 
         let resamples = frame.width != rig.size.width || frame.height != rig.size.height
         let pipeline = resamples ? gpu.pipelines.convertTo420Resampled : gpu.pipelines.convertTo420
@@ -295,7 +295,8 @@ final class NeuralInterpolator: @unchecked Sendable {
         // One thread per 2x2 block.
         gpu.dispatch(pipeline, on: encoder, width: rig.size.width / 2, height: rig.size.height / 2)
         encoder.endEncoding()
-        commandBuffer.addCompletedHandler { _ in withExtendedLifetime(target) {} }
+        if let lease = target.lease { command.retain(lease) }
+        command.retain(target.buffer)
         return target
     }
 

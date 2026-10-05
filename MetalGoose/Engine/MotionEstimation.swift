@@ -9,10 +9,14 @@ import os
 /// The motion between two consecutive captures, one vector per block of the frame.
 struct MotionField {
     /// Backward motion against the previous capture, in pixels of the frame MetalFX works on.
-    let vectors: MTLTexture
+    let vectors: any MTLTexture
     /// Timestamp of the newer frame of the pair this was measured from.
     let timestamp: CFTimeInterval
-    let validity = WorkValidity()
+    /// The slot the field is in, held by every command buffer that reads it until that has run.
+    let lease: BufferLease
+    /// Where on the capture lane the field is written (`GPULane.submitted`).
+    let written: UInt64
+    let validity: WorkValidity
 }
 
 // MARK: - Media engine
@@ -294,21 +298,22 @@ final class MotionPipeline: @unchecked Sendable {
     private struct Slot {
         /// The field as measured, scaled into the units of the frame MetalFX works on. Everything downstream reads
         /// `vectors`, which is this with its outliers removed.
-        var raw: MTLTexture?
-        var vectors: MTLTexture?
+        var raw: (any MTLTexture)?
+        var vectors: (any MTLTexture)?
         /// What the frame as a whole is doing, which the wild vectors are judged against.
-        var global: MTLBuffer?
+        var global: (any MTLBuffer)?
     }
 
     /// Fields are replaced as new ones arrive, so only the latest and the few still referenced by
-    /// in-flight command buffers need to stay distinct.
+    /// in-flight command buffers need to stay distinct. A slot is leased (`MotionField.lease`): MetalFX reads a field on a
+    /// lane of its own, and the slot is not written again until it has. A field that finds no free slot is not stored.
     private static let slotCount = 4
 
     private let gpu: GPUContext
     private let queue: DispatchQueue
     private let mediaEngine: MediaEngineEstimator
     private var slots = [Slot](repeating: Slot(), count: MotionPipeline.slotCount)
-    private var slotIndex = 0
+    private var slotLeases = BufferLeasePool(capacity: MotionPipeline.slotCount)
 
     /// Called on the processing queue each time a field has been stored, so that the pair it belongs to is fed to
     /// MetalFX the moment its motion exists.
@@ -328,7 +333,7 @@ final class MotionPipeline: @unchecked Sendable {
 
     func reset() {
         slots = [Slot](repeating: Slot(), count: Self.slotCount)
-        slotIndex = 0
+        slotLeases = BufferLeasePool(capacity: Self.slotCount)
         mediaEngine.reset()
     }
 
@@ -341,18 +346,20 @@ final class MotionPipeline: @unchecked Sendable {
     ///
     /// - Parameter interval: the time between captures, which decides how finely the media engine can
     ///   afford to search the frame. 0 while it is not known yet.
-    func submit(frame: MTLTexture, timestamp: CFTimeInterval, interval: CFTimeInterval, sourceValidity: WorkValidity? = nil) {
-        guard let prepared = mediaEngine.prepare(width: frame.width, height: frame.height, interval: interval),
-              let commandBuffer = gpu.makeCommandBuffer("MetalGoose motion luma"),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+    func submit(frame: FrameHistory, interval: CFTimeInterval) {
+        let texture = frame.texture
+        guard let prepared = mediaEngine.prepare(width: texture.width, height: texture.height, interval: interval),
+              let command = gpu.capture.makeCommand("MetalGoose motion luma"),
+              let encoder = command.makeComputePass() else { return }
 
         var divisor = UInt32(prepared.analysis.divisor)
         encoder.setComputePipelineState(gpu.pipelines.luma)
-        encoder.setTexture(frame, index: 0)
+        encoder.setTexture(texture, index: 0)
         encoder.setTexture(prepared.texture, index: 1)
         encoder.setBytes(&divisor, length: MemoryLayout<UInt32>.size, index: 0)
         gpu.dispatch(gpu.pipelines.luma, on: encoder, width: prepared.texture.width, height: prepared.texture.height)
         encoder.endEncoding()
+        command.retain(frame.lease)
 
         // VideoToolbox reads the IOSurface outside Metal's ordering, so the estimate has to follow
         // the write — but nothing waits for it. It is submitted from the completion handler and the
@@ -360,13 +367,13 @@ final class MotionPipeline: @unchecked Sendable {
         // update rather than a stalled capture queue.
         if let pending = prepared.pending {
             nonisolated(unsafe) let pending = pending
-            let width = frame.width
-            commandBuffer.addCompletedHandler { [self] buffer in
-                guard buffer.status == .completed, sourceValidity?.isValid != false else { return }
+            let (width, timestamp, validity) = (texture.width, frame.timestamp, frame.validity)
+            command.onCompleted { [self] completion in
+                guard completion.succeeded, validity.isValid else { return }
                 estimate(pending, frameWidth: width, timestamp: timestamp)
             }
         }
-        commandBuffer.commit()
+        command.commit()
     }
 
     /// Estimator state belongs to the processing queue; the completion handler that gets here runs
@@ -387,7 +394,7 @@ final class MotionPipeline: @unchecked Sendable {
 
     // MARK: Field post-processing
 
-    private func ensureGlobalBuffer(_ buffer: inout MTLBuffer?) -> MTLBuffer? {
+    private func ensureGlobalBuffer(_ buffer: inout (any MTLBuffer)?) -> (any MTLBuffer)? {
         if buffer == nil {
             buffer = gpu.device.makeBuffer(length: MemoryLayout<SIMD2<Float>>.stride, options: .storageModePrivate)
         }
@@ -400,18 +407,18 @@ final class MotionPipeline: @unchecked Sendable {
     /// The vectors are measured on the averaged-down image the media engine searched, so they are carried
     /// into the units of the frame MetalFX works on; and the field is cut to the vectors that cover the
     /// frame, because what the media engine pads it with is not the image.
-    private func store(_ field: MTLTexture, retaining buffer: CVPixelBuffer, analysis: MotionAnalysis, frameWidth: Int,
+    private func store(_ field: any MTLTexture, retaining buffer: CVPixelBuffer, analysis: MotionAnalysis, frameWidth: Int,
                        timestamp: CFTimeInterval) {
         let width = min(field.width, analysis.vectorWidth)
         let height = min(field.height, analysis.vectorHeight)
-        let index = slotIndex % slots.count
-        slotIndex += 1
+        guard let lease = slotLeases.acquire() else { return }
+        let index = lease.index
         guard let raw = gpu.ensureTexture(&slots[index].raw, width: width, height: height, pixelFormat: .rg16Float),
               let vectors = gpu.ensureTexture(&slots[index].vectors, width: width, height: height,
                                               pixelFormat: .rg16Float),
               let global = ensureGlobalBuffer(&slots[index].global),
-              let commandBuffer = gpu.makeCommandBuffer("MetalGoose motion field"),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+              let command = gpu.capture.makeCommand("MetalGoose motion field"),
+              let encoder = command.makeComputePass() else { return }
 
         // A compute copy rather than a blit, because the field has to be scaled on the way in and a
         // blit cannot touch the values it moves.
@@ -428,7 +435,7 @@ final class MotionPipeline: @unchecked Sendable {
         // few wild blocks do not move it — and is what the wild blocks are judged against.
         encoder.setComputePipelineState(gpu.pipelines.globalMotion)
         encoder.setTexture(raw, index: 0)
-        encoder.setBuffer(global, offset: 0, index: 0)
+        encoder.setBuffer(global, index: 0)
         encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: Int(MG_MOTION_GRID * MG_MOTION_GRID),
                                                                     height: 1, depth: 1))
@@ -437,18 +444,18 @@ final class MotionPipeline: @unchecked Sendable {
         encoder.setComputePipelineState(gpu.pipelines.despeckle)
         encoder.setTexture(raw, index: 0)
         encoder.setTexture(vectors, index: 1)
-        encoder.setBuffer(global, offset: 0, index: 0)
+        encoder.setBuffer(global, index: 0)
         encoder.setBytes(&frame, length: MemoryLayout<Float>.size, index: 1)
         gpu.dispatch(gpu.pipelines.despeckle, on: encoder, width: width, height: height)
         encoder.endEncoding()
-        let stored = MotionField(vectors: vectors, timestamp: timestamp)
-        nonisolated(unsafe) let retained = buffer
-        commandBuffer.addCompletedHandler { completed in
-            withExtendedLifetime(retained) {}
-            if completed.status != .completed { stored.validity.invalidate() }
+        command.retain(buffer)
+        command.retain(lease)
+        let validity = WorkValidity()
+        command.onCompleted { completion in
+            if !completion.succeeded { validity.invalidate() }
         }
-        commandBuffer.commit()
+        let written = command.commit()
 
-        onField?(stored)
+        onField?(MotionField(vectors: vectors, timestamp: timestamp, lease: lease, written: written, validity: validity))
     }
 }

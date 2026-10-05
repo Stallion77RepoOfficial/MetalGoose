@@ -51,17 +51,18 @@ final class CapturePipeline: @unchecked Sendable {
 
     // MARK: Textures (processing queue only)
 
-    /// A slot must not be rewritten while the ring still hands it out, so the pool holds everything
-    /// the ring can reference plus everything the pipeline can have in flight behind it.
+    /// A slot must not be rewritten while the ring still hands it out or a command buffer on another lane still reads
+    /// it, so slots are leased (`FrameHistory.lease`); the pool holds everything the ring can reference plus everything
+    /// the pipeline can have in flight behind it. A capture that finds no free slot is dropped.
     private static let poolDepth = FrameRing.capacity + GooseEngine.maxInFlight
-    private var historyTextures = [MTLTexture?](repeating: nil, count: CapturePipeline.poolDepth)
-    private var historyIndex = 0
-    private var restoreTexture: MTLTexture?
-    private var restoreScaler: MTLFXSpatialScaler?
-    private var cropTexture: MTLTexture?
-    private var sharpenTexture: MTLTexture?
-    private var smaaEdges: MTLTexture?
-    private var smaaWeights: MTLTexture?
+    private var historyTextures = [(any MTLTexture)?](repeating: nil, count: CapturePipeline.poolDepth)
+    private var historySlots = BufferLeasePool(capacity: CapturePipeline.poolDepth)
+    private var restoreTexture: (any MTLTexture)?
+    private var restoreScaler: (any MTL4FXSpatialScaler)?
+    private var cropTexture: (any MTLTexture)?
+    private var sharpenTexture: (any MTLTexture)?
+    private var smaaEdges: (any MTLTexture)?
+    private var smaaWeights: (any MTLTexture)?
     private var processedSize: CGSize = .zero
     private var generating = false
 
@@ -85,7 +86,7 @@ final class CapturePipeline: @unchecked Sendable {
     /// ScreenCaptureKit recycles a small pool of surfaces, so the same few come back frame after
     /// frame. Wrapping each in a texture again for every capture allocated for surfaces that were
     /// already wrapped.
-    private var surfaceTextures: [IOSurfaceID: MTLTexture] = [:]
+    private var surfaceTextures: [IOSurfaceID: any MTLTexture] = [:]
     private static let surfaceCacheLimit = 16
 
     // MARK: Timing (processing queue only)
@@ -201,8 +202,8 @@ final class CapturePipeline: @unchecked Sendable {
         sharpenTexture = nil
         smaaEdges = nil
         smaaWeights = nil
-        historyTextures = [MTLTexture?](repeating: nil, count: Self.poolDepth)
-        historyIndex = 0
+        historyTextures = [(any MTLTexture)?](repeating: nil, count: Self.poolDepth)
+        historySlots = BufferLeasePool(capacity: Self.poolDepth)
         surfaceTextures.removeAll()
         processedSize = .zero
         motion.reset()
@@ -236,22 +237,19 @@ final class CapturePipeline: @unchecked Sendable {
         let now = CACurrentMediaTime()
         recordArrival(now: now, captureTime: frame.captureTime)
 
-        guard let commandBuffer = gpu.makeCommandBuffer("MetalGoose capture") else {
+        guard let command = gpu.capture.makeCommand("MetalGoose capture") else {
             inFlight.signal()
             return
         }
 
         // Keeps ScreenCaptureKit's buffer out of its pool until the GPU has finished reading it,
         // and returns the in-flight permit whichever way this frame ends.
-        nonisolated(unsafe) let retained = frame.pixelBuffer
-        commandBuffer.addCompletedHandler { [inFlight] _ in
-            _ = retained
-            inFlight.signal()
-        }
+        command.retain(frame.pixelBuffer)
+        command.onCompleted { [inFlight] _ in inFlight.signal() }
 
         guard let input = surfaceTexture(for: frame.surface) else {
             shared.errors.report(.surfaceTextureFailed)
-            drop(commandBuffer)
+            drop(command)
             return
         }
 
@@ -315,13 +313,13 @@ final class CapturePipeline: @unchecked Sendable {
 
         // Every scratch texture is reused next frame, so the LAST active stage writes straight into
         // the ring slot; a passthrough configuration needs a copy.
-        let slot = historyIndex % Self.poolDepth
-        historyIndex += 1
         let targetUsage: MTLTextureUsage = [.shaderRead, .shaderWrite, .renderTarget]
-        guard let history = gpu.ensureTexture(&historyTextures[slot], width: width, height: height, usage: targetUsage) else {
-            drop(commandBuffer)
+        guard let lease = historySlots.acquire(),
+              let history = gpu.ensureTexture(&historyTextures[lease.index], width: width, height: height, usage: targetUsage) else {
+            drop(command)
             return
         }
+        command.retain(lease)
 
         let sharpens = config.sharpness > 0.01
         let antiAliases = config.antiAliasing != .off
@@ -331,15 +329,12 @@ final class CapturePipeline: @unchecked Sendable {
             // With nothing after the crop, the crop is the copy into the ring.
             let destination = sharpens || antiAliases
                 ? gpu.ensureTexture(&cropTexture, width: width, height: height, usage: targetUsage) : history
-            guard let cropped = destination,
-                  let blit = commandBuffer.makeBlitCommandEncoder() else {
-                drop(commandBuffer)
+            guard let cropped = destination, let pass = command.makeComputePass() else {
+                drop(command)
                 return
             }
-            blit.copy(from: input, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                      sourceSize: MTLSize(width: width, height: height, depth: 1),
-                      to: cropped, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-            blit.endEncoding()
+            pass.copy(from: input, size: MTLSize(width: width, height: height, depth: 1), to: cropped)
+            pass.endEncoding()
             working = cropped
         }
 
@@ -354,12 +349,10 @@ final class CapturePipeline: @unchecked Sendable {
                   let scaler = gpu.ensureSpatialScaler(&restoreScaler, inputWidth: input.width, inputHeight: input.height,
                                                        outputWidth: width, outputHeight: height) else {
                 shared.errors.report(.spatialScalerFailed)
-                drop(commandBuffer)
+                drop(command)
                 return
             }
-            scaler.colorTexture = input
-            scaler.outputTexture = destination
-            scaler.encode(commandBuffer: commandBuffer)
+            gpu.encodeUpscale(scaler, from: input, to: destination, on: command)
             working = destination
         }
 
@@ -371,54 +364,55 @@ final class CapturePipeline: @unchecked Sendable {
                 destination = history
             }
             guard let destination, encodeSharpen(working, to: destination, strength: config.sharpness,
-                                                 commandBuffer: commandBuffer) else {
+                                                 command: command) else {
                 shared.errors.report(.sharpeningUnavailable)
-                drop(commandBuffer)
+                drop(command)
                 return
             }
             working = destination
         }
 
         if antiAliases {
-            guard encodeAntiAliasing(working, to: history, config: config, commandBuffer: commandBuffer) else {
-                drop(commandBuffer)
+            guard encodeAntiAliasing(working, to: history, config: config, command: command) else {
+                drop(command)
                 return
             }
         } else if working !== history {
-            guard let blit = commandBuffer.makeBlitCommandEncoder() else {
-                drop(commandBuffer)
+            guard let pass = command.makeComputePass() else {
+                drop(command)
                 return
             }
-            blit.copy(from: working, to: history)
-            blit.endEncoding()
+            pass.copy(from: working, to: history)
+            pass.endEncoding()
         }
 
         // The Neural Engine takes the capture in 4:2:0, converted here and handed over once the GPU has written it. It is
         // paired with the capture before it, which is the one the render clock will bracket it with.
         let previousCapture = shared.ring.snapshot().last
         enter("handing the capture to the Neural Engine")
-        let yuv = runsNeuralEngine ? shared.neural.encodeConversion(of: history, commandBuffer: commandBuffer) : nil
+        let yuv = runsNeuralEngine ? shared.neural.encodeConversion(of: history, command: command) : nil
         let partner = frame.isSceneCut ? nil : previousCapture?.timestamp
 
         // How far behind real time the render clock runs for this pair, which tells the Neural Engine how long a pair may wait
         // for it and still be shown.
         let scheduleDelay = FramePlanner.interpolationDelay(captureInterval: shared.captureInterval.withLock { $0.value },
                                                             generationLatency: choice.latency, steps: neuralSteps)
-        let captured = FrameHistory(texture: history, timestamp: now, presentationTime: presentationTime(of: frame, arrival: now),
-                                    isSceneCut: frame.isSceneCut)
-
-        commandBuffer.addCompletedHandler { [shared] buffer in
-            guard buffer.status == .completed else {
-                captured.validity.invalidate()
+        let validity = WorkValidity()
+        command.onCompleted { [shared] completion in
+            guard completion.succeeded else {
+                validity.invalidate()
                 shared.renderResetRequested.withLock { $0 = true }
                 shared.stats.withLock { $0.droppedFrames += 1 }
                 return
             }
-            let gpuTime = Float((buffer.gpuEndTime - buffer.gpuStartTime) * 1000)
+            let gpuTime = Float(completion.gpuTime * 1000)
             shared.stats.withLock { $0.captureGPUTime = gpuTime }
             if let yuv { shared.neural.frameConverted(yuv, timestamp: now, previous: partner, steps: neuralSteps, delay: scheduleDelay) }
         }
-        commandBuffer.commit()
+        let written = command.commit()
+        let captured = FrameHistory(texture: history, lease: lease, written: written, timestamp: now,
+                                    presentationTime: presentationTime(of: frame, arrival: now), isSceneCut: frame.isSceneCut,
+                                    validity: validity)
 
         // MetalFX takes the motion between the pair as an input; the Neural Engine needs none. The motion of a pair is
         // measured between two captures that followed one another, so after a stretch in which the media engine was given
@@ -426,7 +420,7 @@ final class CapturePipeline: @unchecked Sendable {
         if runsMetalFX {
             if lastMotionTimestamp != previousCapture?.timestamp { motion.breakSequence() }
             lastMotionTimestamp = now
-            motion.submit(frame: history, timestamp: now, interval: shared.captureInterval.withLock { $0.value }, sourceValidity: captured.validity)
+            motion.submit(frame: captured, interval: shared.captureInterval.withLock { $0.value })
         }
 
         shared.ring.push(captured)
@@ -513,12 +507,12 @@ final class CapturePipeline: @unchecked Sendable {
     /// The single way a captured frame is abandoned. Going through one function makes the accounting
     /// uniform by construction: the HUD's Dropped row must read non-zero through exactly the failures
     /// someone would be looking at it to diagnose — a scaler that will not rebuild drops every frame.
-    private func drop(_ commandBuffer: MTLCommandBuffer) {
+    private func drop(_ command: GPUCommand) {
         shared.stats.withLock { $0.droppedFrames += 1 }
-        commandBuffer.commit()
+        command.commit()
     }
 
-    private func surfaceTexture(for surface: IOSurfaceRef) -> MTLTexture? {
+    private func surfaceTexture(for surface: IOSurfaceRef) -> (any MTLTexture)? {
         let id = IOSurfaceGetID(surface)
         if let cached = surfaceTextures[id] { return cached }
 
@@ -537,9 +531,9 @@ final class CapturePipeline: @unchecked Sendable {
 
     // MARK: - Stages
 
-    private func encodeSharpen(_ input: MTLTexture, to output: MTLTexture, strength: Float,
-                               commandBuffer: MTLCommandBuffer) -> Bool {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+    private func encodeSharpen(_ input: any MTLTexture, to output: any MTLTexture, strength: Float,
+                               command: GPUCommand) -> Bool {
+        guard let encoder = command.makeComputePass() else { return false }
         var params = SharpenParams(sharpness: strength)
         encoder.setComputePipelineState(gpu.pipelines.sharpen)
         encoder.setTexture(input, index: 0)
@@ -550,8 +544,8 @@ final class CapturePipeline: @unchecked Sendable {
         return true
     }
 
-    private func encodeAntiAliasing(_ input: MTLTexture, to output: MTLTexture, config: EngineConfig,
-                                    commandBuffer: MTLCommandBuffer) -> Bool {
+    private func encodeAntiAliasing(_ input: any MTLTexture, to output: any MTLTexture, config: EngineConfig,
+                                    command: GPUCommand) -> Bool {
         let width = output.width
         let height = output.height
 
@@ -560,7 +554,7 @@ final class CapturePipeline: @unchecked Sendable {
             return true
 
         case .fxaa:
-            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            guard let encoder = command.makeComputePass() else {
                 shared.errors.report(.antiAliasingUnavailable("FXAA"))
                 return false
             }
@@ -577,7 +571,7 @@ final class CapturePipeline: @unchecked Sendable {
             // Edges carry two channels and need no more; weights carry four.
             guard let edges = gpu.ensureTexture(&smaaEdges, width: width, height: height, pixelFormat: .rg8Unorm),
                   let weights = gpu.ensureTexture(&smaaWeights, width: width, height: height),
-                  let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                  let encoder = command.makeComputePass() else {
                 shared.errors.report(.antiAliasingUnavailable("SMAA"))
                 return false
             }

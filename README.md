@@ -19,7 +19,9 @@
 
 MetalGoose captures a window with ScreenCaptureKit, runs MetalFX spatial
 upscaling and frame generation over the captured frames, and presents the result
-in a borderless overlay pinned to the source window. It works on any window, not
+in a borderless overlay pinned to the source window. The GPU work runs on Metal 4
+command queues, one each for the captures, MetalFX interpolation and presentation,
+so an interpolation never holds up a capture or the image a refresh is waiting for. It works on any window, not
 only games — anything that renders faster than it is being watched. Menus, popups,
 tooltips and dialogs the app opens over its window are captured with it while they
 are open, so they stay visible on the overlay.
@@ -112,7 +114,7 @@ A HUD overlay reports, live:
 | **macOS** | 27.0 or later |
 | **Chip** | Apple Silicon (M1/M2/M3/M4) |
 | **Xcode** | 27 or later (macOS 27 SDK) |
-| **Metal** | Metal 4.1, shaders built as Metal Shading Language 4.1 |
+| **Metal** | Metal 4.1: Metal 4 command queues and MetalFX, shaders built as Metal Shading Language 4.1 |
 | **Swift** | 6.4 toolchain, Swift 6 language mode |
 | **RAM** | 8 GB minimum, 16 GB recommended |
 

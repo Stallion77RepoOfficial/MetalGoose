@@ -10,12 +10,3 @@ build/
 DerivedData/
 package.sh
 DEVLOG.md
-/MetalGoose-old
-/Tools
-
-# SwiftPM
-.build/
-.swiftpm/
-/Audit
-/Tests
-/Benchmarks

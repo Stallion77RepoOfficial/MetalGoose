@@ -20,8 +20,9 @@ import os
 /// interpolator guesses the motion itself (an image 30 dB from the real one against 50 dB with it). A
 /// pair whose motion has not arrived is not interpolated; the capture is shown instead.
 ///
-/// Concurrency: everything runs on the capture pipeline's queue; the render thread reads the images from
-/// `GeneratedImages`.
+/// Concurrency: everything is encoded on the capture pipeline's queue, onto a Metal 4 lane of its own (`GPULane`), so
+/// that an interpolation that takes much of a capture interval holds up neither the captures nor the display; the
+/// render thread reads the images from `GeneratedImages`.
 final class MetalFXInterpolator: @unchecked Sendable {
 
     /// Bumped on every reset, so the completion of a command buffer from before it cannot publish into what follows.
@@ -47,24 +48,23 @@ final class MetalFXInterpolator: @unchecked Sendable {
     private let images: GeneratedImages
 
     // Processing queue only.
-    private var interpolator: MTLFXFrameInterpolator?
+    private var interpolator: (any MTL4FXFrameInterpolator)?
     private var warmUpCalls = 0
     private var lastFedNext: CFTimeInterval?
     /// The motion field at the interpolator's resolution: one vector per pixel, expanded from the block
     /// field the media engine measures.
-    private var denseMotion: MTLTexture?
+    private var denseMotion: (any MTLTexture)?
     /// MetalFX rejects a nil depth texture — its validation layer asserts with "Input content width
     /// exceed input texture dimension". Captured content is a flat 2D plane, so a constant far-plane
     /// depth is the honest answer rather than a workaround. Cleared once per size change.
-    private var flatDepth: MTLTexture?
+    private var flatDepth: (any MTLTexture)?
     private var flatDepthIsCleared = false
-    /// The images are written round-robin, into as many slots as there can be images the render thread may still read:
-    /// the results held, the ones still on the GPU behind the one being written, and one a presentation pass may have
-    /// looked up just before it was let go of. With only one more than the results held, a slot could be written while the
-    /// image in it was still being offered.
-    private var outputs: [MTLTexture] = []
+    /// The images, each in a leased slot: held by `GeneratedImages` while it offers the image and by every presentation
+    /// pass that reads it until that has run, so a slot is never written while its image can still be shown. As many as
+    /// can be in use at once: the results held, the ones still on the GPU, and one a presentation pass has looked up.
+    private var outputs: [any MTLTexture] = []
+    private var outputLeases = BufferLeasePool(capacity: MetalFXInterpolator.outputCount)
     private static let outputCount = resultCapacity + maximumPending + 1
-    private var outputIndex = 0
 
     private let pending = OSAllocatedUnfairLock(initialState: 0)
 
@@ -85,7 +85,7 @@ final class MetalFXInterpolator: @unchecked Sendable {
         flatDepth = nil
         flatDepthIsCleared = false
         outputs.removeAll()
-        outputIndex = 0
+        outputLeases = BufferLeasePool(capacity: Self.outputCount)
         epoch.withLock { $0 &+= 1 }
     }
 
@@ -102,15 +102,19 @@ final class MetalFXInterpolator: @unchecked Sendable {
               let interpolator = ensureInterpolator(width: width, height: height),
               let depth = ensureFlatDepth(width: width, height: height),
               let motion = gpu.ensureTexture(&denseMotion, width: width, height: height, pixelFormat: .rg16Float),
-              let output = nextOutput(width: width, height: height),
-              let commandBuffer = gpu.makeCommandBuffer("MetalGoose interpolation") else { return }
+              let (output, lease) = nextOutput(width: width, height: height),
+              let command = gpu.interpolation.makeCommand("MetalGoose interpolation") else { return }
 
-        if !flatDepthIsCleared {
-            encodeClear(of: depth, commandBuffer: commandBuffer)
+        // The captures and the field are written on the capture lane.
+        command.wait(for: gpu.capture, value: max(previous.written, next.written, field.written))
+        for held in [previous.lease, next.lease, field.lease, lease] { command.retain(held) }
+
+        if !flatDepthIsCleared, let pass = command.makeRenderPass(target: depth, clearColor: MTLClearColor(red: 1, green: 0, blue: 0, alpha: 0)) {
+            pass.endEncoding()
             flatDepthIsCleared = true
         }
-        guard encodeExpansion(of: field, into: motion, commandBuffer: commandBuffer) else {
-            commandBuffer.commit()
+        guard encodeExpansion(of: field, into: motion, command: command) else {
+            command.commit()
             return
         }
 
@@ -123,6 +127,7 @@ final class MetalFXInterpolator: @unchecked Sendable {
             warmUpCalls = max(warmUpCalls, Self.warmUpAfterGap)
         }
 
+        for texture in [next.texture, previous.texture, output, depth, motion] { command.use(texture) }
         interpolator.colorTexture = next.texture
         interpolator.prevColorTexture = previous.texture
         interpolator.outputTexture = output
@@ -137,7 +142,7 @@ final class MetalFXInterpolator: @unchecked Sendable {
         interpolator.aspectRatio = Float(width) / Float(max(1, height))
         interpolator.deltaTime = Float(max(0.0001, next.timestamp - previous.timestamp))
         interpolator.shouldResetHistory = isFirstCall
-        interpolator.encode(commandBuffer: commandBuffer)
+        interpolator.encode(commandBuffer: command.commandBuffer)
         lastFedNext = next.timestamp
 
         // The call was made — the history cannot form without it — but what it produced is not an
@@ -147,23 +152,28 @@ final class MetalFXInterpolator: @unchecked Sendable {
 
         let pair = (previous: previous.timestamp, next: next.timestamp)
         let issued = epoch.withLock { $0 }
-        let made = GeneratedImages.Image(previous: pair.previous, next: pair.next, phase: 0.5, source: .colour(output), engine: .metalFX)
+        let validities = (previous.validity, next.validity, field.validity)
         pending.withLock { $0 += 1 }
-        commandBuffer.addCompletedHandler { [epoch, images, latency, pending] buffer in
+        let lane = gpu.interpolation
+        // The lane is encoded from this queue alone, so this command buffer's place on it is the next.
+        let written = lane.submitted + 1
+        command.onCompleted { [epoch, images, latency, pending] completion in
             pending.withLock { $0 -= 1 }
-            guard buffer.status == .completed, previous.validity.isValid, next.validity.isValid, field.validity.isValid,
+            guard completion.succeeded, validities.0.isValid, validities.1.isValid, validities.2.isValid,
                   producesImage, epoch.withLock({ $0 }) == issued else { return }
-            images.publish([made])
+            images.publish([GeneratedImages.Image(previous: pair.previous, next: pair.next, phase: 0.5,
+                                                  source: .colour(output, lease: lease, lane: lane, written: written),
+                                                  engine: .metalFX)])
             latency.record(previous: pair.previous, next: pair.next)
         }
-        commandBuffer.commit()
+        command.commit()
     }
 
     /// MetalFX wants one vector per pixel, pointing to where that pixel was in the previous frame —
     /// exactly the media engine's convention — but the field is one vector per block. The same
     /// kernel that copies a field into the pipeline's own slot resamples it bilinearly to any size.
-    private func encodeExpansion(of field: MotionField, into dense: MTLTexture, commandBuffer: MTLCommandBuffer) -> Bool {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+    private func encodeExpansion(of field: MotionField, into dense: any MTLTexture, command: GPUCommand) -> Bool {
+        guard let encoder = command.makeComputePass() else { return false }
         var scale: Float = 1
         var coverage = SIMD2<Float>(1, 1)
         encoder.setComputePipelineState(gpu.pipelines.copyMotion)
@@ -178,7 +188,7 @@ final class MetalFXInterpolator: @unchecked Sendable {
 
     // MARK: - Resources
 
-    private func ensureInterpolator(width: Int, height: Int) -> MTLFXFrameInterpolator? {
+    private func ensureInterpolator(width: Int, height: Int) -> (any MTL4FXFrameInterpolator)? {
         if let interpolator, interpolator.inputWidth == width, interpolator.inputHeight == height,
            interpolator.outputWidth == width, interpolator.outputHeight == height {
             return interpolator
@@ -194,7 +204,7 @@ final class MetalFXInterpolator: @unchecked Sendable {
         descriptor.outputWidth = width
         descriptor.outputHeight = height
 
-        guard let created = descriptor.makeFrameInterpolator(device: gpu.device) else {
+        guard let created = descriptor.makeFrameInterpolator(device: gpu.device, compiler: gpu.compiler) else {
             errors.report(.interpolatorFailed)
             return nil
         }
@@ -206,7 +216,7 @@ final class MetalFXInterpolator: @unchecked Sendable {
         return created
     }
 
-    private func ensureFlatDepth(width: Int, height: Int) -> MTLTexture? {
+    private func ensureFlatDepth(width: Int, height: Int) -> (any MTLTexture)? {
         if let flatDepth, flatDepth.width == width, flatDepth.height == height { return flatDepth }
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float,
@@ -218,17 +228,8 @@ final class MetalFXInterpolator: @unchecked Sendable {
         return flatDepth
     }
 
-    /// A clear-only render pass, encoded ahead of the interpolator in the same command buffer.
-    private func encodeClear(of texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 0, blue: 0, alpha: 0)
-        commandBuffer.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
-    }
-
-    private func nextOutput(width: Int, height: Int) -> MTLTexture? {
+    /// A free slot for the next image, and its lease; nil where every slot still holds an image that can be shown.
+    private func nextOutput(width: Int, height: Int) -> (any MTLTexture, BufferLease)? {
         if outputs.first.map({ $0.width != width || $0.height != height }) ?? true {
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
                                                                       width: width, height: height, mipmapped: false)
@@ -238,9 +239,9 @@ final class MetalFXInterpolator: @unchecked Sendable {
             let made = (0..<Self.outputCount).compactMap { _ in gpu.device.makeTexture(descriptor: descriptor) }
             guard made.count == Self.outputCount else { return nil }
             outputs = made
-            outputIndex = 0
+            outputLeases = BufferLeasePool(capacity: Self.outputCount)
         }
-        defer { outputIndex += 1 }
-        return outputs[outputIndex % outputs.count]
+        guard let lease = outputLeases.acquire() else { return nil }
+        return (outputs[lease.index], lease)
     }
 }

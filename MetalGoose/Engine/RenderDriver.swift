@@ -23,6 +23,9 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     // Render thread only.
     private var link: CAMetalDisplayLink?
 
+    /// The layer's drawables, made resident for the render lane while the link runs. Main thread only.
+    private var drawables: (any MTLResidencySet)?
+
     init(shared: EngineShared, pipeline: RenderPipeline, displayRate: DisplayRate) {
         self.shared = shared
         self.pipeline = pipeline
@@ -36,6 +39,9 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     @MainActor
     func start(layer: CAMetalLayer) {
         configure(layer: layer, config: shared.config.withLock { $0 })
+        let drawables = layer.residencySet
+        shared.gpu.render.queue.addResidencySet(drawables)
+        self.drawables = drawables
 
         thread.start()
         thread.waitUntilRunning()
@@ -56,7 +62,12 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
 
     /// Stops the callbacks and waits until the render thread is gone, so nothing is encoding when
     /// the caller goes on to release what the pipeline holds.
+    @MainActor
     func stop() {
+        defer {
+            if let drawables { shared.gpu.render.queue.removeResidencySet(drawables) }
+            drawables = nil
+        }
         guard let runLoop = thread.runLoop else { return }
         let done = DispatchSemaphore(value: 0)
         runLoop.perform { [self] in

@@ -7,14 +7,15 @@ import os
 ///
 /// Both engines publish here and the render thread reads here, so a pair that one engine was still on when the other
 /// took over is shown all the same, and an image is blended with the tolerance of the engine that made it, not the one
-/// that is current. Stored ANE frames retain their buffer leases; the presentation pass
-/// retains the same lease until its GPU read finishes.
+/// that is current. Stored images keep their leases, and so does every presentation pass that reads one until it
+/// has run.
 final class GeneratedImages: @unchecked Sendable {
 
-    /// What an image is kept as: the colour MetalFX made, or the planes the Neural Engine wrote, which are turned into
-    /// colour as the image is shown (`blendTowardCapturesFromYUV`).
+    /// What an image is kept as: the colour MetalFX made, in a leased slot written on the interpolation lane at `written`,
+    /// or the planes the Neural Engine wrote, which are turned into colour as the image is shown
+    /// (`blendTowardCapturesFromYUV`).
     enum Source {
-        case colour(MTLTexture)
+        case colour(any MTLTexture, lease: BufferLease, lane: GPULane, written: UInt64)
         case planes(YUVFrame)
     }
 

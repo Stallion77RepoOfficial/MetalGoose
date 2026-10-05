@@ -32,8 +32,8 @@ final class RenderPipeline: @unchecked Sendable {
     private var refreshInterval = IntervalFilter()
     private var lastTarget: CFTimeInterval = 0
 
-    private var spatialScaler: MTLFXSpatialScaler?
-    private var upscaled: MTLTexture?
+    private var spatialScaler: (any MTL4FXSpatialScaler)?
+    private var upscaled: (any MTLTexture)?
 
     /// What the screen is showing now. A callback whose image is the one already there does not
     /// draw at all: the layer keeps its contents, so presenting the same pixels again would cost a
@@ -98,19 +98,21 @@ final class RenderPipeline: @unchecked Sendable {
         let validity: WorkValidity
         let referenceValidity: WorkValidity?
         let isGenerated: Bool
+        /// The captures the image is made of, which the presentation waits for and holds.
+        let captures: [FrameHistory]
         var isValid: Bool { validity.isValid && referenceValidity?.isValid != false }
     }
 
     private enum Picture {
-        case capture(MTLTexture)
+        case capture(any MTLTexture)
         case generated(Blend)
     }
 
     /// An image an engine made, the two captures it sits between, where, and how far the image is trusted.
     private struct Blend {
         let image: GeneratedImages.Source
-        let previous: MTLTexture
-        let next: MTLTexture
+        let previous: any MTLTexture
+        let next: any MTLTexture
         let phase: Double
         let motion: Float
     }
@@ -167,22 +169,28 @@ final class RenderPipeline: @unchecked Sendable {
         // over and over would redraw what is already on screen, so only the realised image counts. The
         // command buffer is made only now: a callback that waits for an image used to commit an empty one.
         guard content.image != lastPresented || redraw,
-              let commandBuffer = gpu.makeCommandBuffer("MetalGoose present") else { return }
+              let command = gpu.render.makeCommand("MetalGoose present") else { return }
+
+        // The captures are written on the capture lane, and their slots are not written again until this has run.
+        for capture in content.captures {
+            command.wait(for: gpu.capture, value: capture.written)
+            command.retain(capture.lease)
+        }
 
         // Only now, with the image known to be shown: a pass for one that is not would be spent for nothing.
-        let shown: MTLTexture
+        let shown: any MTLTexture
         switch content.picture {
         case .capture(let texture):
             shown = texture
         case .generated(let blend):
             guard let blended = stability.blend(blend.image, previous: blend.previous, next: blend.next, phase: blend.phase,
-                                                motion: blend.motion, commandBuffer: commandBuffer) else {
-                commandBuffer.commit()
+                                                motion: blend.motion, command: command) else {
+                command.commit()
                 return
             }
             shown = blended
         }
-        encodePresent(shown, to: drawable.texture, upscaling: config.upscaling, commandBuffer: commandBuffer)
+        encodePresent(shown, to: drawable.texture, upscaling: config.upscaling, command: command)
 
         // A redraw of the image already on screen — the overlay changed shape — is not a new generated image.
         let isNewImage = content.image != lastPresented
@@ -217,11 +225,10 @@ final class RenderPipeline: @unchecked Sendable {
                 $0.endToEndLatency = Float((time - compositor) * 1000)
             }
         }
-        commandBuffer.addCompletedHandler { [shared] buffer in
-            if buffer.status != .completed { shared.renderResetRequested.withLock { $0 = true } }
+        command.onCompleted { [shared] completion in
+            if !completion.succeeded { shared.renderResetRequested.withLock { $0 = true } }
         }
-        commandBuffer.present(drawable)
-        commandBuffer.commit()
+        command.commit(presenting: drawable)
     }
 
     // MARK: - Realising a plan
@@ -284,7 +291,7 @@ final class RenderPipeline: @unchecked Sendable {
             let frame = frames[index]
             return Content(image: .captured(frame.presentationTime), picture: .capture(frame.texture),
                            sourceTimestamp: frame.timestamp, compositorTimestamp: frame.presentationTime,
-                           validity: frame.validity, referenceValidity: nil, isGenerated: false)
+                           validity: frame.validity, referenceValidity: nil, isGenerated: false, captures: [frame])
         }
 
         switch plan {
@@ -311,7 +318,8 @@ final class RenderPipeline: @unchecked Sendable {
                 return Content(image: .interpolated(previous: frames[previous].presentationTime,
                                                     next: frames[next].presentationTime, phase: phase),
                                picture: .generated(blend), sourceTimestamp: later, compositorTimestamp: frames[next].presentationTime,
-                               validity: frames[next].validity, referenceValidity: frames[previous].validity, isGenerated: true)
+                               validity: frames[next].validity, referenceValidity: frames[previous].validity, isGenerated: true,
+                               captures: [frames[previous], frames[next]])
             }
             return captured(previous)
         }
@@ -325,8 +333,8 @@ final class RenderPipeline: @unchecked Sendable {
     /// built in a texture of our own and then copied across. A blit does that at memory speed;
     /// the render pass is kept for the cases that need resampling — a drawable smaller than the
     /// capture, or scaling off with an overlay that is not the capture's size.
-    private func encodePresent(_ content: MTLTexture, to target: MTLTexture, upscaling: Bool,
-                               commandBuffer: MTLCommandBuffer) {
+    private func encodePresent(_ content: any MTLTexture, to target: any MTLTexture, upscaling: Bool,
+                               command: GPUCommand) {
         var source = content
         let growsInBothDimensions = target.width >= content.width && target.height >= content.height
         let sameSize = target.width == content.width && target.height == content.height
@@ -340,30 +348,25 @@ final class RenderPipeline: @unchecked Sendable {
                                               usage: [.shaderRead, .shaderWrite, .renderTarget]),
                let scaler = gpu.ensureSpatialScaler(&spatialScaler, inputWidth: content.width, inputHeight: content.height,
                                                     outputWidth: target.width, outputHeight: target.height) {
-                scaler.colorTexture = content
-                scaler.outputTexture = output
-                scaler.encode(commandBuffer: commandBuffer)
+                gpu.encodeUpscale(scaler, from: content, to: output, on: command)
                 source = output
             } else {
                 shared.errors.report(.spatialScalerFailed)
             }
         }
 
+        // The drawable is made resident by its layer's own residency set (`RenderDriver`), not by the command buffer.
         if source.width == target.width, source.height == target.height {
-            guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
-            blit.copy(from: source, to: target)
-            blit.endEncoding()
+            guard let pass = command.makeComputePass() else { return }
+            pass.copy(from: source, toDrawable: target)
+            pass.endEncoding()
         } else {
-            let pass = MTLRenderPassDescriptor()
-            pass.colorAttachments[0].texture = target
             // Every pixel is drawn, so what was there is not read back.
-            pass.colorAttachments[0].loadAction = .dontCare
-            pass.colorAttachments[0].storeAction = .store
-            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
-            encoder.setRenderPipelineState(gpu.pipelines.present)
-            encoder.setFragmentTexture(source, index: 0)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-            encoder.endEncoding()
+            guard let pass = command.makeRenderPass(target: target) else { return }
+            pass.setRenderPipelineState(gpu.pipelines.present)
+            pass.setFragmentTexture(source, index: 0)
+            pass.drawFullTarget()
+            pass.endEncoding()
         }
     }
 
