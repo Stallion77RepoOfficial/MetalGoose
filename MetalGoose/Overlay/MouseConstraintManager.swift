@@ -193,6 +193,10 @@ final class MouseConstraintManager: @unchecked Sendable {
         if let held, held != location { CGWarpMouseCursorPosition(held) }
     }
 
+    /// Where the pointer is drawn now, from any thread: for the engine, which draws it into the picture while images are
+    /// presented at their own times (`OverlayGraphics`).
+    var pointer: CGPoint? { pointerFraction() }
+
     /// Where the pointer is, as a fraction of the captured window, or `nil` when it is not drawn: while the app has taken the
     /// mouse for itself the cursor is put away, and the pointer would sit where the app has left it.
     private func pointerFraction() -> CGPoint? {

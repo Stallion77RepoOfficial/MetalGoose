@@ -50,6 +50,13 @@ final class RenderPipeline: @unchecked Sendable {
     private let presentations = PresentationCounter()
     private var windowBusyStart = 0.0
 
+    /// What was drawn over the image on screen (`OverlayGraphics`), and when the last image, and the last new one, were
+    /// committed.
+    private var drawnHUD: Int?
+    private var drawnPointer: CGPoint?
+    private var lastCommit: CFTimeInterval = 0
+    private var lastNewImageCommit: CFTimeInterval = 0
+
     init(shared: EngineShared) {
         self.shared = shared
         self.gpu = shared.gpu
@@ -80,6 +87,10 @@ final class RenderPipeline: @unchecked Sendable {
         presentations.reset()
         windowStart = 0
         windowBusyStart = gpu.busyTime
+        drawnHUD = nil
+        drawnPointer = nil
+        lastCommit = 0
+        lastNewImageCommit = 0
     }
 
     // MARK: - One display callback
@@ -123,9 +134,15 @@ final class RenderPipeline: @unchecked Sendable {
         let isSceneCut: Bool
     }
 
-    /// - Parameter targetTime: when the image this callback presents is to reach the screen, which is on the display's
-    ///   refresh grid.
-    func render(into drawable: CAMetalDrawable, displayRate: DisplayRate, targetTime: CFTimeInterval) {
+    /// - Parameters:
+    ///   - acquire: the drawable to present into, taken only once there is something new to show.
+    ///   - targetTime: when an image presented now would reach the screen: the display link's target time, which is on the
+    ///     display's refresh grid, or now plus the frame latency where each image is presented at its own time.
+    ///   - atImageTime: whether each new image is presented at the moment it is due (`present(at:)`) rather than on the link's
+    ///     refresh, which a panel that can vary its refresh (VRR) then shows it at. There is no refresh grid then to align
+    ///     the schedule to.
+    func render(drawable acquire: () -> CAMetalDrawable?, displayRate: DisplayRate, targetTime: CFTimeInterval,
+                atImageTime: Bool) {
         if shared.renderResetRequested.withLock({ requested -> Bool in
             defer { requested = false }
             return requested
@@ -140,24 +157,28 @@ final class RenderPipeline: @unchecked Sendable {
         // screen: that latency is the same for every image and drops out, where a clock that included it
         // would start every capture interval most of the way through.
         let now = CACurrentMediaTime()
-        if lastTarget > 0 { refreshInterval.add(targetTime - lastTarget, window: EngineShared.measurementWindow) }
-        lastTarget = targetTime
-        let refreshPeriod = refreshInterval.value > 0 ? refreshInterval.value
-            : displayRate.maximum > 0 ? 1 / Double(displayRate.maximum) : 0
-        note(frames, now: now, targetTime: targetTime, refreshPeriod: refreshPeriod)
+        var refreshPeriod: CFTimeInterval = 0
+        if !atImageTime {
+            if lastTarget > 0 { refreshInterval.add(targetTime - lastTarget, window: EngineShared.measurementWindow) }
+            lastTarget = targetTime
+            refreshPeriod = refreshInterval.value > 0 ? refreshInterval.value
+                : displayRate.maximum > 0 ? 1 / Double(displayRate.maximum) : 0
+            note(frames, now: now, targetTime: targetTime, refreshPeriod: refreshPeriod)
+        }
 
         // The schedule runs on the compositor's times for the captures, which are the content's own and on the display's
         // grid; their arrivals wander by how long each took to be delivered and reached.
         let timeline = frames.map { ScheduledCapture(timestamp: $0.presentationTime, isSceneCut: $0.isSceneCut) }
         let generation = config.generatesFrames ? shared.generation.withLock { $0 } : .nothing
-        let plan = FramePlanner.plan(timeline, PlanningInput(
-            multiplier: generation.multiplier, sampleTime: now,
-            delay: scheduleDelay(for: generation, frames: frames, now: now, refreshPeriod: refreshPeriod)))
+        let delay = scheduleDelay(for: generation, frames: frames, now: now, refreshPeriod: refreshPeriod)
+        let plan = FramePlanner.plan(timeline, PlanningInput(multiplier: generation.multiplier, sampleTime: now, delay: delay))
 
         publishRates(now: now, displayRate: displayRate)
 
         guard let planned = FramePlanner.image(of: plan, in: timeline) else { return }
-        let redraw = redrawRequested.withLock { $0 }
+        let graphics = shared.graphics.snapshot(includesPointer: config.variableRefresh)
+        let panelPeriod = displayRate.maximum > 0 ? 1 / Double(displayRate.maximum) : 1.0 / 60
+        let redraw = redrawRequested.withLock { $0 } || redrawsGraphics(graphics, now: now, period: panelPeriod)
         guard planned != lastPresented || redraw else { return }
 
         let content = realize(plan, frames: frames)
@@ -168,7 +189,7 @@ final class RenderPipeline: @unchecked Sendable {
         // *plan* as shown would never try again once the image arrives, and presenting the fallback
         // over and over would redraw what is already on screen, so only the realised image counts. The
         // command buffer is made only now: a callback that waits for an image used to commit an empty one.
-        guard content.image != lastPresented || redraw,
+        guard content.image != lastPresented || redraw, let drawable = acquire(),
               let command = gpu.render.makeCommand("MetalGoose present") else { return }
 
         // The captures are written on the capture lane, and their slots are not written again until this has run.
@@ -190,12 +211,21 @@ final class RenderPipeline: @unchecked Sendable {
             }
             shown = blended
         }
-        encodePresent(shown, to: drawable.texture, upscaling: config.upscaling, command: command)
+        guard encodePresent(shown, graphics: graphics, to: drawable.texture, upscaling: config.upscaling,
+                            magnification: content.captures.first?.magnification, command: command) else {
+            command.commit()
+            return
+        }
 
-        // A redraw of the image already on screen — the overlay changed shape — is not a new generated image.
+        // A redraw of the image already on screen — the overlay changed shape, or what is drawn over it — is not a new
+        // generated image.
         let isNewImage = content.image != lastPresented
         lastPresented = content.image
         redrawRequested.withLock { $0 = false }
+        drawnHUD = graphics.hudGeneration
+        drawnPointer = graphics.pointer?.fraction
+        lastCommit = now
+        if isNewImage { lastNewImageCommit = now }
 
         let source = content.sourceTimestamp
         let compositor = content.compositorTimestamp
@@ -225,11 +255,31 @@ final class RenderPipeline: @unchecked Sendable {
                 $0.endToEndLatency = Float((time - compositor) * 1000)
             }
         }
-        command.onCompleted { [shared] completion in
-            if !completion.succeeded { shared.renderResetRequested.withLock { $0 = true } }
+        command.onCompleted { [shared] succeeded in
+            if !succeeded { shared.renderResetRequested.withLock { $0 = true } }
         }
-        command.commit(presenting: drawable)
+        // Presented at its own time, a new image reaches the screen when its moment on the timeline comes round on the
+        // schedule — as long after now as the driver presents ahead, give or take where in its turn it was picked — rather
+        // than on the next refresh. Never before now, and never so far ahead that it holds a drawable for long; a redraw
+        // goes at once.
+        let due: CFTimeInterval? = atImageTime && isNewImage
+            ? min(max(content.image.time + delay + (targetTime - now), now), now + Self.longestHold) : nil
+        command.commit(presenting: drawable, at: due)
     }
+
+    /// The furthest ahead an image presented at its own time is given its moment.
+    private static let longestHold: CFTimeInterval = 0.1
+
+    /// Whether what is drawn over the picture is drawn again on its own, having changed since the image on screen was drawn.
+    /// Where new images keep coming, each carries it as it is when it is drawn, and a pass of its own would only crowd the
+    /// panel between them; where none has come for `stillAfter`, it is, once a refresh at the most.
+    private func redrawsGraphics(_ graphics: OverlayGraphics.Snapshot, now: CFTimeInterval, period: CFTimeInterval) -> Bool {
+        guard graphics.hudGeneration != drawnHUD || graphics.pointer?.fraction != drawnPointer else { return false }
+        return now >= max(lastNewImageCommit + Self.stillAfter, lastCommit + period)
+    }
+
+    /// How long without a new image before the HUD or the pointer is drawn again on its own: below 20 images a second.
+    private static let stillAfter: CFTimeInterval = 0.05
 
     // MARK: - Realising a plan
 
@@ -327,14 +377,18 @@ final class RenderPipeline: @unchecked Sendable {
 
     // MARK: - Presentation
 
-    /// Fills the drawable from `content`, upscaling on the way when scaling is on.
+    /// Fills the drawable from `content`, upscaling on the way when scaling is on, with `graphics` over it.
     ///
     /// MetalFX only writes private textures, and a drawable is not one, so the scaled image is
     /// built in a texture of our own and then copied across. A blit does that at memory speed;
     /// the render pass is kept for the cases that need resampling — a drawable smaller than the
-    /// capture, or scaling off with an overlay that is not the capture's size.
-    private func encodePresent(_ content: any MTLTexture, to target: any MTLTexture, upscaling: Bool,
-                               command: GPUCommand) {
+    /// capture, or scaling off with an overlay that is not the capture's size — and for an image with the HUD or the pointer
+    /// over it, which the pass draws after the picture without reading the drawable back.
+    /// Content an app drew at half the window's pixels and showed as blocks (`magnification`) is shown so again where the
+    /// drawable is twice its size and nothing scales it up, as the app's own window showed it; the bilinear present made it
+    /// softer.
+    private func encodePresent(_ content: any MTLTexture, graphics: OverlayGraphics.Snapshot, to target: any MTLTexture,
+                                upscaling: Bool, magnification: ContentResolution.Magnification?, command: GPUCommand) -> Bool {
         var source = content
         let growsInBothDimensions = target.width >= content.width && target.height >= content.height
         let sameSize = target.width == content.width && target.height == content.height
@@ -356,17 +410,43 @@ final class RenderPipeline: @unchecked Sendable {
         }
 
         // The drawable is made resident by its layer's own residency set (`RenderDriver`), not by the command buffer.
-        if source.width == target.width, source.height == target.height {
-            guard let pass = command.makeComputePass() else { return }
+        if source.width == target.width, source.height == target.height, graphics.hud == nil, graphics.pointer == nil {
+            guard let pass = command.makeComputePass() else { return false }
             pass.copy(from: source, toDrawable: target)
             pass.endEncoding()
         } else {
             // Every pixel is drawn, so what was there is not read back.
-            guard let pass = command.makeRenderPass(target: target) else { return }
-            pass.setRenderPipelineState(gpu.pipelines.present)
+            guard let pass = command.makeRenderPass(target: target) else { return false }
+            let asBlocks = magnification == .nearest && source.width * 2 == target.width && source.height * 2 == target.height
+            pass.setRenderPipelineState(asBlocks ? gpu.pipelines.presentNearest : gpu.pipelines.present)
             pass.setFragmentTexture(source, index: 0)
             pass.drawFullTarget()
+            drawGraphics(graphics, in: pass, target: target)
             pass.endEncoding()
+        }
+        return true
+    }
+
+    /// Draws the HUD and the pointer over the picture `pass` has drawn, a pixel of theirs to a pixel of the drawable's.
+    private func drawGraphics(_ graphics: OverlayGraphics.Snapshot, in pass: RenderPass, target: any MTLTexture) {
+        var sprites: [(sprite: OverlayGraphics.Sprite, at: CGPoint)] = []
+        if let hud = graphics.hud { sprites.append((hud.sprite, hud.origin)) }
+        if let pointer = graphics.pointer {
+            sprites.append((pointer.sprite, CGPoint(x: pointer.fraction.x * CGFloat(target.width),
+                                                    y: pointer.fraction.y * CGFloat(target.height))))
+        }
+        guard !sprites.isEmpty else { return }
+        pass.setRenderPipelineState(gpu.pipelines.sprite)
+        let width = Float(target.width), height = Float(target.height)
+        for (sprite, point) in sprites {
+            // On whole pixels, so that the image is sampled at its texels' centres and stays sharp.
+            let left = Float((point.x - sprite.anchor.x).rounded())
+            let top = Float((point.y - sprite.anchor.y).rounded())
+            var rect = SIMD4<Float>(left / width, top / height,
+                                    (left + Float(sprite.texture.width)) / width, (top + Float(sprite.texture.height)) / height)
+            pass.setFragmentTexture(sprite.texture, index: 0)
+            pass.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+            pass.drawFullTarget()
         }
     }
 

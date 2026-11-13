@@ -11,9 +11,12 @@ struct CapturedFrame: @unchecked Sendable {
     let captureTime: CFTimeInterval
     /// The picture was replaced rather than moved.
     let isSceneCut: Bool
-    /// The target window's size in pixels before render scale was applied. Frame
-    /// generation works at this size, so that lowering render scale cannot degrade it.
+    /// The target window's size in pixels before render scale was applied, or its content's where that is drawn at half of
+    /// them. Frame generation works at this size, so that lowering render scale cannot degrade it.
     let nativePixelSize: CGSize
+    /// How the frame's content, drawn at half the window's pixels, was magnified to them; the pipeline takes it back to the
+    /// content's own size first (`ContentResolution`). Nil for a frame that is the content as it is.
+    var magnification: ContentResolution.Magnification?
 }
 
 /// The window being captured, resolved by the caller. Screens are an AppKit matter, so the
@@ -24,6 +27,8 @@ struct CaptureTarget: Sendable, Equatable {
     let frame: CGRect
     /// Pixels per point on the display the window sits on.
     let backingScale: CGFloat
+    /// An explicit caller binds a window to its owning process at ScreenCaptureKit selection too.
+    var ownerPID: Int32? = nil
 
     var pixelSize: CGSize { CGSize(width: frame.width * backingScale, height: frame.height * backingScale) }
 }

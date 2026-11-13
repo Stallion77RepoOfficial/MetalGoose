@@ -12,6 +12,9 @@ struct EngineConfig: Equatable, Sendable {
     /// MetalFX, which makes the midpoint alone, never does.
     var multiplier = 1
     var vsync = true
+    /// Each image presented at the moment it is due, for a panel that can vary its refresh (VRR), rather than on a fixed
+    /// refresh (`RenderDriver`).
+    var variableRefresh = false
     var profile = Sharpening.balanced.profile
     var bufferDepth = GooseEngine.maxInFlight
 

@@ -32,7 +32,7 @@ final class ScalingController: ObservableObject {
     private var engine: GooseEngine?
     private let capture = WindowCaptureManager()
     private let overlay = OverlayWindowManager()
-    private let hud = HUDWindowController()
+    private let hud = HUDController()
 
     private var engineCreationFailed = false
     private var activeScreen: NSScreen?
@@ -49,6 +49,10 @@ final class ScalingController: ObservableObject {
     /// Set by the view once it has a window, so the controller can hide and restore it without
     /// guessing which window is the right one from its title.
     weak var mainWindow: NSWindow?
+
+    /// The main window was put away when a session started, so that it is not left over the captured app; it comes back
+    /// when the user comes to MetalGoose itself (`showMainWindowIfPutAway`). A window the user closed stays closed.
+    private var mainWindowPutAway = false
 
     /// The target window has to hold the overlay's Space for this many consecutive checks before the
     /// session is ended: a Space switch in progress looks the same as a fullscreen target for a moment.
@@ -93,7 +97,15 @@ final class ScalingController: ObservableObject {
             }
         }
 
-        overlay.onPresentingChange = { [weak self] presenting in self?.engine?.setPresenting(presenting) }
+        overlay.onPresentingChange = { [weak self] presenting in
+            self?.engine?.setPresenting(presenting)
+        }
+        // Command-Tab to MetalGoose, or a click on its Dock icon, during a session found no window to stop it from: the
+        // one with Stop Scaling had been put away.
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil,
+                                               queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.showMainWindowIfPutAway() }
+        }
         overlay.onGeometryChange = { [weak self] in self?.engine?.requestRedraw() }
         overlay.onTargetChanged = { [weak self] target, covered in
             self?.capture.follow(target, includesAppWindows: covered)
@@ -106,6 +118,7 @@ final class ScalingController: ObservableObject {
             self.activeScreen = screen
             engine.updateDisplayRate(rate)
             Task { await self.capture.reconfigure(maxFPS: rate.maximum) }
+            self.drawPointer(on: screen, engine: engine)
             if self.settings.showMGHUD { self.showHUD(on: screen, engine: engine) }
         }
     }
@@ -242,7 +255,7 @@ final class ScalingController: ObservableObject {
         // Wired before the stream starts: frames arrive the moment it does.
         capture.onFrame = { [engine] frame in engine.receive(frame) }
 
-        guard await capture.startCapture(target: captureTarget, maxFPS: displayRate.maximum, showsCursor: false,
+        guard await capture.startCapture(target: captureTarget, maxFPS: displayRate.maximum,
                                          renderScale: upscaling ? settings.renderScale.multiplier : 1.0,
                                          pipelineDepth: settings.bufferCount) else {
             let error = capture.lastError ?? MGError("MG-CAP-002", String(localized: "Unknown capture error."))
@@ -253,12 +266,16 @@ final class ScalingController: ObservableObject {
             return
         }
 
-        mainWindow?.orderOut(nil)
+        if let mainWindow, mainWindow.isVisible {
+            mainWindow.orderOut(nil)
+            mainWindowPutAway = true
+        }
         let configuration = OverlayWindowManager.Configuration(
             screen: screen, windowFrame: target.frame, alignsPointer: settings.alignPointer,
             outputScale: upscaling ? CGFloat(settings.scaleFactor.value) : 1.0,
-            fillsScreen: upscaling && settings.scaleFactor.fillsScreen)
+            fillsScreen: upscaling && settings.scaleFactor.fillsScreen, drawsPointer: !settings.vrr)
         engine.attach(to: overlay.createOverlay(configuration), displayRate: displayRate)
+        drawPointer(on: screen, engine: engine)
 
         overlay.setTarget(windowID: target.id, pid: app.processIdentifier)
         activeScreen = screen
@@ -306,7 +323,7 @@ final class ScalingController: ObservableObject {
         hud.hide()
     }
 
-    /// The stream ended without being asked to — the captured window closed, or the system stopped it.
+    /// The stream ended or could not apply a configuration.
     private func captureEnded(_ error: MGError?) {
         guard isActive, !isTransitioning else { return }
         isTransitioning = true
@@ -326,6 +343,7 @@ final class ScalingController: ObservableObject {
         overlay.setOutputScale(upscaling ? CGFloat(settings.scaleFactor.value) : 1.0,
                                fillsScreen: upscaling && settings.scaleFactor.fillsScreen)
         overlay.setAlignsPointer(settings.alignPointer)
+        overlay.setDrawsPointer(!settings.vrr)
         guard isActive else { return }
 
         Task { await capture.reconfigure(renderScale: upscaling ? settings.renderScale.multiplier : 1.0) }
@@ -335,11 +353,29 @@ final class ScalingController: ObservableObject {
         } else if !settings.showMGHUD {
             hud.hide()
         }
+        if let engine { followContentResolution(engine: engine) }
+    }
+
+    /// The pointer the engine draws into the picture with VRR on, at the pixels a point the overlay is drawn at.
+    private func drawPointer(on screen: NSScreen, engine: GooseEngine) {
+        let pointer = OverlayView.pointerImage(scale: overlay.drawableScale ?? screen.backingScaleFactor)
+        engine.setPointer(pointer?.image, hotSpot: pointer?.hotSpot ?? .zero, position: { MouseConstraintManager.shared.pointer })
     }
 
     private func showHUD(on screen: NSScreen, engine: GooseEngine) {
-        hud.show(on: screen)
+        hud.show(scale: overlay.drawableScale ?? screen.backingScaleFactor, engine: engine)
         pushHUD(engine: engine)
+    }
+
+    /// The overlay at the content's resolution once the capture has found the content drawn at one pixel a point and
+    /// nothing scales it up (`OverlayView.contentMagnification`), and the HUD and the pointer the engine draws into the
+    /// picture at it too.
+    private func followContentResolution(engine: GooseEngine) {
+        let before = overlay.drawableScale
+        overlay.setContentMagnification(settings.isUpscaling ? nil : capture.contentMagnification)
+        guard overlay.drawableScale != before, let screen = activeScreen else { return }
+        drawPointer(on: screen, engine: engine)
+        if settings.showMGHUD { showHUD(on: screen, engine: engine) }
     }
 
     private func startStatsTimer() {
@@ -351,6 +387,7 @@ final class ScalingController: ObservableObject {
 
     private func tick() {
         guard isActive, let engine else { return }
+        followContentResolution(engine: engine)
         pushHUD(engine: engine)
         // Leave queued engine errors pending while a user-facing alert is open.
         if alertMessage == nil, let error = engine.takeError() { alertMessage = error.message }
@@ -381,7 +418,7 @@ final class ScalingController: ObservableObject {
     }
 
     private func hudInfo(_ engine: GooseEngine) -> HUDInfo {
-        let size = capture.capturePixelSize
+        let size = capture.contentPixelSize
         // What was asked for is a preference; the engine reports what is actually in use.
         let off = settings.frameGenMode == .off
         let choice = engine.generation
@@ -394,7 +431,8 @@ final class ScalingController: ObservableObject {
                        generatesFrames: !off,
                        generationEngine: off ? "-" : Self.describeEngine(choice),
                        antiAliasing: String(localized: settings.aaMode.title),
-                       vsync: settings.vsync ? String(localized: "On") : String(localized: "Off"))
+                       vsync: settings.vsync ? String(localized: "On") : String(localized: "Off"),
+                       vrr: settings.vrr ? String(localized: "On") : String(localized: "Off"))
     }
 
     /// What the Frame Gen row says: the mode, and how many images it delivers a capture where an engine is making them.
@@ -405,15 +443,13 @@ final class ScalingController: ObservableObject {
     }
 
     /// What the Engine row says: the engine making the images, and the size the Neural Engine works at where that is not the
-    /// capture's own; or why no engine is making any.
+    /// capture's own; or why no engine is making them.
     private static func describeEngine(_ choice: GenerationChoice) -> String {
         guard let engine = choice.engine else {
-            // No engine: the panel could not show more than the captures, the Neural Engine's session is being built, or
-            // nothing can make its images in time.
-            if choice.limitedByPanel { return String(localized: "Display-limited") }
+            // No engine: the Neural Engine's session is being built, or nothing can make the steps asked for just now.
             // Literal keys, one to a call, so that Xcode's string extraction sees every one of them.
-            if choice.neuralRung != nil { return String(localized: "Starting") }
-            return String(localized: "Not keeping up")
+            if choice.unavailable { return String(localized: "Unavailable") }
+            return String(localized: "Starting")
         }
         let name = String(localized: engine.title)
         guard let size = choice.neuralSize else { return name }
@@ -421,7 +457,14 @@ final class ScalingController: ObservableObject {
     }
 
     func bringToFront() {
+        mainWindowPutAway = false
         mainWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func showMainWindowIfPutAway() {
+        guard mainWindowPutAway, let mainWindow else { return }
+        mainWindowPutAway = false
+        mainWindow.makeKeyAndOrderFront(nil)
     }
 }

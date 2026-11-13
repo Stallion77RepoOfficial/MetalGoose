@@ -8,9 +8,12 @@ on:
 
 jobs:
   build:
-    name: Build and analyze
+    name: Build and analyze (${{ matrix.configuration }})
     # macOS 27 with Xcode 27 and the macOS 27 SDK, which the app is built against.
     runs-on: xcode-27
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
 
     steps:
       - name: Checkout
@@ -32,4 +35,6 @@ jobs:
           xcodebuild clean build analyze \
             -scheme MetalGoose \
             -project MetalGoose.xcodeproj \
+            -configuration "${{ matrix.configuration }}" \
+            -derivedDataPath "$RUNNER_TEMP/MetalGooseDerivedData" \
             CODE_SIGNING_ALLOWED=NO

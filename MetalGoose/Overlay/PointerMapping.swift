@@ -73,9 +73,12 @@ struct PointerMapping: Equatable, Sendable {
     /// from there can leave the cursor still because there is nowhere further for it to go.
     func isAtBorder(_ point: CGPoint) -> Bool {
         let reach = 2 * Self.edgeInset
-        return reachable.contains {
-            point.x <= $0.minX + reach || point.x >= $0.maxX - reach || point.y <= $0.minY + reach || point.y >= $0.maxY - reach
+        let regions = reachable
+        func outside(_ x: CGFloat, _ y: CGFloat) -> Bool {
+            !regions.contains { $0.contains(CGPoint(x: x, y: y)) }
         }
+        return outside(point.x - reach, point.y) || outside(point.x + reach, point.y)
+            || outside(point.x, point.y - reach) || outside(point.x, point.y + reach)
     }
 
     /// Where `point` is as a fraction of the window, measured from its top-left corner and kept to it: what the overlay

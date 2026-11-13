@@ -23,7 +23,13 @@ final class GPUContext: @unchecked Sendable {
         let stabilityBlendFromYUVResampled: any MTLComputePipelineState
         let convertTo420: any MTLComputePipelineState
         let convertTo420Resampled: any MTLComputePipelineState
+        let demagnifyNearest: any MTLComputePipelineState
+        let demagnifyBilinear: any MTLComputePipelineState
         let present: any MTLRenderPipelineState
+        /// The same, sampling the nearest texel, for content magnified as blocks (`ContentResolution`).
+        let presentNearest: any MTLRenderPipelineState
+        /// The HUD and the pointer, blended over the picture.
+        let sprite: any MTLRenderPipelineState
     }
 
     let device: any MTLDevice
@@ -56,6 +62,23 @@ final class GPUContext: @unchecked Sendable {
         self.render = render
     }
 
+    static var shaderLibraryURL: URL? {
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        let directory = executable.deletingLastPathComponent()
+        var candidates: [URL] = []
+        if let configured = ProcessInfo.processInfo.environment["GOOSE_METALGOOSE_LIBRARY"] {
+            candidates.append(URL(fileURLWithPath: configured))
+        }
+        if let resources = Bundle.main.resourceURL {
+            candidates.append(resources.appendingPathComponent("MetalGoose/default.metallib"))
+            candidates.append(resources.appendingPathComponent("default.metallib"))
+        }
+        candidates.append(directory.appendingPathComponent("../Resources/MetalGoose/default.metallib").standardizedFileURL)
+        candidates.append(directory.appendingPathComponent("../Resources/default.metallib").standardizedFileURL)
+        candidates.append(directory.appendingPathComponent("default.metallib"))
+        return candidates.first { FileManager.default.isReadableFile(atPath: $0.path) }
+    }
+
     static func make() -> Result<GPUContext, MGError> {
         guard let device = MTLCreateSystemDefaultDevice() else { return .failure(.metalDeviceUnavailable) }
         let reports = GPUReports()
@@ -64,7 +87,15 @@ final class GPUContext: @unchecked Sendable {
               let render = GPULane(device: device, label: "render", reports: reports) else {
             return .failure(.commandQueueUnavailable)
         }
-        guard let library = device.makeDefaultLibrary() else { return .failure(.pipelineSetupFailed()) }
+        // A subprocess does not have Xcode's app-bundle default-library lookup. The build helper
+        // and Goose HUB packaging place our shaders at one of these explicit locations.
+        let library: (any MTLLibrary)?
+        if let url = Self.shaderLibraryURL {
+            library = try? device.makeLibrary(URL: url)
+        } else {
+            library = device.makeDefaultLibrary()
+        }
+        guard let library else { return .failure(.pipelineSetupFailed("MetalGoose shader library was not found or could not be loaded")) }
 
         do {
             let compiler = try device.makeCompiler(descriptor: MTL4CompilerDescriptor())
@@ -87,6 +118,19 @@ final class GPUContext: @unchecked Sendable {
             presentDescriptor.vertexFunctionDescriptor = try function("present_vertex")
             presentDescriptor.fragmentFunctionDescriptor = try function("present_fragment")
             presentDescriptor.colorAttachments[0].pixelFormat = Self.drawablePixelFormat
+            let presentNearestDescriptor = presentDescriptor.copy() as! MTL4RenderPipelineDescriptor
+            presentNearestDescriptor.fragmentFunctionDescriptor = try function("present_fragment_nearest")
+
+            // Premultiplied images over what is in the drawable.
+            let spriteDescriptor = MTL4RenderPipelineDescriptor()
+            spriteDescriptor.vertexFunctionDescriptor = try function("sprite_vertex")
+            spriteDescriptor.fragmentFunctionDescriptor = try function("sprite_fragment")
+            spriteDescriptor.colorAttachments[0].pixelFormat = Self.drawablePixelFormat
+            spriteDescriptor.colorAttachments[0].blendingState = .enabled
+            spriteDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+            spriteDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            spriteDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+            spriteDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
             let pipelines = Pipelines(
                 sharpen: try compute("contrastAdaptiveSharpening"),
@@ -103,7 +147,11 @@ final class GPUContext: @unchecked Sendable {
                 stabilityBlendFromYUVResampled: try compute("blendTowardCapturesFromYUVResampled"),
                 convertTo420: try compute("bgraTo420"),
                 convertTo420Resampled: try compute("bgraTo420Resampled"),
-                present: try compiler.makeRenderPipelineState(descriptor: presentDescriptor))
+                demagnifyNearest: try compute("demagnifyNearest"),
+                demagnifyBilinear: try compute("demagnifyBilinear"),
+                present: try compiler.makeRenderPipelineState(descriptor: presentDescriptor),
+                presentNearest: try compiler.makeRenderPipelineState(descriptor: presentNearestDescriptor),
+                sprite: try compiler.makeRenderPipelineState(descriptor: spriteDescriptor))
             return .success(GPUContext(device: device, compiler: compiler, pipelines: pipelines, reports: reports,
                                        capture: capture, interpolation: interpolation, render: render))
         } catch let error as MGError {

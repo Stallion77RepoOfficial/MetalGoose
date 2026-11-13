@@ -7,18 +7,15 @@ final class StabilityBlender {
 
     private let gpu: GPUContext
 
-    /// The blended images. One is read by the presentation pass of the command buffer that follows its blend, and
-    /// the next callback's blend must not overwrite it before that has run, which three slots in turn guarantee.
-    private var textures: [(any MTLTexture)?] = Array(repeating: nil, count: 3)
-    private var turn = 0
+    /// The render lane orders each blend and its presentation before the next command writes this texture.
+    private var texture: (any MTLTexture)?
 
     init(gpu: GPUContext) {
         self.gpu = gpu
     }
 
     func reset() {
-        textures = Array(repeating: nil, count: textures.count)
-        turn = 0
+        texture = nil
     }
 
     /// `generated`, blended with the captures `previous` and `next` it sits between at `phase` (0 at `previous`, 1 at
@@ -29,9 +26,8 @@ final class StabilityBlender {
                motion: Float, command: GPUCommand) -> (any MTLTexture)? {
         let (width, height) = (previous.width, previous.height)
         guard next.width == width, next.height == height,
-              let output = gpu.ensureTexture(&textures[turn], width: width, height: height),
+              let output = gpu.ensureTexture(&texture, width: width, height: height),
               let encoder = command.makeComputePass() else { return nil }
-        turn = (turn + 1) % textures.count
 
         var parameters = StabilityBlendParams(phase: Float(phase), motion: motion, noiseFloor: StabilityBlend.noiseFloor)
         let pipeline: any MTLComputePipelineState

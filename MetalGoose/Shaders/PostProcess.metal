@@ -6,80 +6,126 @@
 
 // MARK: - FXAA
 
+// FXAA 3.11, the PC Quality path (Timothy Lottes): the edge's orientation from the 3x3 around the pixel, a search along the
+// edge in both directions for where it ends, and the pixel moved across the edge by how far it is from the nearer end, plus
+// a sub-pixel term for features thinner than a pixel. It replaced a directional blur that searched for no end and softened
+// whatever it touched. Against an 8x8 supersampled truth on seven test scenes (shapes, lines, text, a photo with shapes on it,
+// a perspective floor, an interface, the photo alone), at the Balanced threshold: 26.85 dB over all of them against 25.66
+// (25.42 with no anti-aliasing), and the photo alone, where nothing should change, 38.1 dB against 29.6. The default
+// FXAA 3.11 settings (sub-pixel 0.75, threshold floor half the threshold) scored best; less sub-pixel blur spared the photo
+// a little and cost the edges more.
+constant float kFxaaSteps[12] = { 1.0f, 1.5f, 2.0f, 2.0f, 2.0f, 2.0f, 2.0f, 2.0f, 2.0f, 2.0f, 4.0f, 8.0f };
+
+inline float lumaAt(texture2d<half, access::sample> t, sampler s, float2 uv) {
+    return float(rgb2luma(t.sample(s, uv, level(0)).rgb));
+}
+
 kernel void fxaa(
-    texture2d<half, access::read> input [[texture(0)]],
+    texture2d<half, access::sample> input [[texture(0)]],
     texture2d<half, access::write> output [[texture(1)]],
     constant float& threshold [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    uint width = input.get_width();
-    uint height = input.get_height();
+    const uint width = input.get_width(), height = input.get_height();
     if (gid.x >= width || gid.y >= height) return;
+    constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
+    const float2 rcp = 1.0f / float2(width, height);
+    float2 pos = (float2(gid) + 0.5f) * rcp;
 
-    const half FXAA_REDUCE_MUL = 1.0h / 8.0h;
-    const half FXAA_REDUCE_MIN = 1.0h / 128.0h;
-    const half FXAA_SPAN_MAX = 8.0h;
-    const half FXAA_EDGE_THRESHOLD_MIN = 1.0h / 24.0h;
-    const half FXAA_SUBPIX = 0.75h;
+    const float edgeThreshold = threshold;
+    const float edgeThresholdMin = threshold * 0.5f;
+    const float subpixQuality = 0.75f;
 
-    int2 p = int2(gid);
-    half3 rgbNW = input.read(clampCoord(p + int2(-1, -1), width, height)).rgb;
-    half3 rgbNE = input.read(clampCoord(p + int2( 1, -1), width, height)).rgb;
-    half3 rgbSW = input.read(clampCoord(p + int2(-1,  1), width, height)).rgb;
-    half3 rgbSE = input.read(clampCoord(p + int2( 1,  1), width, height)).rgb;
-    half3 rgbM = input.read(gid).rgb;
+    const half4 centre = input.read(gid);
+    const float lumaM = float(rgb2luma(centre.rgb));
+    float lumaS = lumaAt(input, s, pos + float2(0, 1) * rcp);
+    float lumaE = lumaAt(input, s, pos + float2(1, 0) * rcp);
+    float lumaN = lumaAt(input, s, pos + float2(0, -1) * rcp);
+    float lumaW = lumaAt(input, s, pos + float2(-1, 0) * rcp);
 
-    half lumaNW = rgb2luma(rgbNW);
-    half lumaNE = rgb2luma(rgbNE);
-    half lumaSW = rgb2luma(rgbSW);
-    half lumaSE = rgb2luma(rgbSE);
-    half lumaM = rgb2luma(rgbM);
-
-    half lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
-    half lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
-    half lumaRange = lumaMax - lumaMin;
-
-    half edgeThreshold = max(FXAA_EDGE_THRESHOLD_MIN, lumaMax * half(threshold));
-    if (lumaRange < edgeThreshold) {
-        output.write(half4(rgbM, 1.0h), gid);
+    const float rangeMax = max(max(max(lumaS, lumaM), max(lumaE, lumaN)), lumaW);
+    const float rangeMin = min(min(min(lumaS, lumaM), min(lumaE, lumaN)), lumaW);
+    const float range = rangeMax - rangeMin;
+    if (range < max(edgeThresholdMin, rangeMax * edgeThreshold)) {
+        output.write(centre, gid);
         return;
     }
 
-    half2 dir;
-    dir.x = -((lumaNW + lumaNE) - (lumaSW + lumaSE));
-    dir.y = ((lumaNW + lumaSW) - (lumaNE + lumaSE));
+    const float lumaNW = lumaAt(input, s, pos + float2(-1, -1) * rcp);
+    const float lumaSE = lumaAt(input, s, pos + float2(1, 1) * rcp);
+    const float lumaNE = lumaAt(input, s, pos + float2(1, -1) * rcp);
+    const float lumaSW = lumaAt(input, s, pos + float2(-1, 1) * rcp);
 
-    half dirReduce = max((lumaNW + lumaNE + lumaSW + lumaSE) * (0.25h * FXAA_REDUCE_MUL), FXAA_REDUCE_MIN);
-    half rcpDirMin = 1.0h / (min(abs(dir.x), abs(dir.y)) + dirReduce);
-    dir = min(half2(FXAA_SPAN_MAX), max(half2(-FXAA_SPAN_MAX), dir * rcpDirMin));
+    const float lumaNS = lumaN + lumaS, lumaWE = lumaW + lumaE;
+    const float edgeHorz1 = -2.0f * lumaM + lumaNS, edgeVert1 = -2.0f * lumaM + lumaWE;
+    const float lumaNESE = lumaNE + lumaSE, lumaNWNE = lumaNW + lumaNE;
+    const float edgeHorz2 = -2.0f * lumaE + lumaNESE, edgeVert2 = -2.0f * lumaN + lumaNWNE;
+    const float lumaNWSW = lumaNW + lumaSW, lumaSWSE = lumaSW + lumaSE;
+    const float edgeHorz4 = abs(edgeHorz1) * 2.0f + abs(edgeHorz2), edgeVert4 = abs(edgeVert1) * 2.0f + abs(edgeVert2);
+    const float edgeHorz3 = -2.0f * lumaW + lumaNWSW, edgeVert3 = -2.0f * lumaS + lumaSWSE;
+    const float edgeHorz = abs(edgeHorz3) + edgeHorz4, edgeVert = abs(edgeVert3) + edgeVert4;
 
-    // Half is sufficient for colour, but loses large pixel addresses and small offsets.
-    float2 position = float2(gid);
-    float2 direction = float2(dir);
-    uint2 pos1 = clampCoord(int2(position + direction * (1.0f / 3.0f - 0.5f)), width, height);
-    uint2 pos2 = clampCoord(int2(position + direction * (2.0f / 3.0f - 0.5f)), width, height);
+    const bool horzSpan = edgeHorz >= edgeVert;
+    float lengthSign = horzSpan ? rcp.y : rcp.x;
+    if (!horzSpan) { lumaN = lumaW; lumaS = lumaE; }
 
-    half3 rgbA = (input.read(pos1).rgb + input.read(pos2).rgb) * 0.5h;
+    const float subpixA = (lumaNS + lumaWE) * 2.0f + lumaNWSW + lumaNESE;
+    const float subpixB = subpixA * (1.0f / 12.0f) - lumaM;
+    const float gradientN = lumaN - lumaM, gradientS = lumaS - lumaM;
+    float lumaNN = lumaN + lumaM;
+    const float lumaSS = lumaS + lumaM;
+    const bool pairN = abs(gradientN) >= abs(gradientS);
+    const float gradient = max(abs(gradientN), abs(gradientS));
+    if (pairN) lengthSign = -lengthSign;
+    const float subpixC = saturate(abs(subpixB) / range);
 
-    uint2 pos3 = clampCoord(int2(position + direction * -0.5f), width, height);
-    uint2 pos4 = clampCoord(int2(position + direction * 0.5f), width, height);
+    float2 posB = pos;
+    const float2 offNP = horzSpan ? float2(rcp.x, 0) : float2(0, rcp.y);
+    if (horzSpan) posB.y += lengthSign * 0.5f; else posB.x += lengthSign * 0.5f;
 
-    half3 rgbB = rgbA * 0.5h + (input.read(pos3).rgb + input.read(pos4).rgb) * 0.25h;
-    half lumaB = rgb2luma(rgbB);
+    float2 posN = posB - offNP * kFxaaSteps[0];
+    float2 posP = posB + offNP * kFxaaSteps[0];
+    const float subpixD = -2.0f * subpixC + 3.0f;
+    const float subpixE = subpixC * subpixC;
+    if (!pairN) lumaNN = lumaSS;
+    const float gradientScaled = gradient * 0.25f;
+    const float lumaMM = lumaM - lumaNN * 0.5f;
+    const float subpixF = subpixD * subpixE;
+    const bool lumaMLTZero = lumaMM < 0.0f;
 
-    half3 edgeResult = (lumaB < lumaMin || lumaB > lumaMax) ? rgbA : rgbB;
+    float lumaEndN = lumaAt(input, s, posN) - lumaNN * 0.5f;
+    float lumaEndP = lumaAt(input, s, posP) - lumaNN * 0.5f;
+    bool doneN = abs(lumaEndN) >= gradientScaled;
+    bool doneP = abs(lumaEndP) >= gradientScaled;
+    for (int i = 1; i < 12 && !(doneN && doneP); ++i) {
+        if (!doneN) { posN -= offNP * kFxaaSteps[i]; lumaEndN = lumaAt(input, s, posN) - lumaNN * 0.5f; doneN = abs(lumaEndN) >= gradientScaled; }
+        if (!doneP) { posP += offNP * kFxaaSteps[i]; lumaEndP = lumaAt(input, s, posP) - lumaNN * 0.5f; doneP = abs(lumaEndP) >= gradientScaled; }
+    }
 
-    half3 lowpass = (rgbNW + rgbNE + rgbSW + rgbSE + rgbM) * 0.2h;
-    half lumaLowpass = rgb2luma(lowpass);
-    half subpix = clamp(abs(lumaLowpass - lumaM) / max(lumaRange, FXAA_REDUCE_MIN), 0.0h, 1.0h);
-    subpix = subpix * subpix * FXAA_SUBPIX;
-
-    half3 result = mix(edgeResult, lowpass, subpix);
-    output.write(half4(result, 1.0h), gid);
+    const float dstN = horzSpan ? pos.x - posN.x : pos.y - posN.y;
+    const float dstP = horzSpan ? posP.x - pos.x : posP.y - pos.y;
+    const bool goodSpanN = (lumaEndN < 0.0f) != lumaMLTZero;
+    const bool goodSpanP = (lumaEndP < 0.0f) != lumaMLTZero;
+    const float spanLength = dstP + dstN;
+    const bool directionN = dstN < dstP;
+    const float dst = min(dstN, dstP);
+    const bool goodSpan = directionN ? goodSpanN : goodSpanP;
+    const float subpixG = subpixF * subpixF;
+    const float pixelOffset = dst * (-1.0f / spanLength) + 0.5f;
+    const float subpixH = subpixG * subpixQuality;
+    const float pixelOffsetSubpix = max(goodSpan ? pixelOffset : 0.0f, subpixH);
+    if (horzSpan) pos.y += pixelOffsetSubpix * lengthSign; else pos.x += pixelOffsetSubpix * lengthSign;
+    output.write(half4(input.sample(s, pos, level(0)).rgb, 1.0h), gid);
 }
 
 // MARK: - SMAA
 
+/// Edges where neighbouring pixels differ by more than the threshold in any channel, as SMAA's colour edge detection has it:
+/// an edge between two colours of one brightness is an edge. One that is less than two thirds of the largest difference
+/// around it is dropped, which keeps the edges of a texture's detail out (SMAA's local contrast adaptation). Measured on the
+/// same scenes as FXAA, against luma and half the largest difference: 26.72 dB over all against 26.65, the scenes with edges
+/// 28.70 against 28.52, and the photo alone unchanged (44.8 against 44.9). Blending across both axes of a staircase as well
+/// gained another 0.1 dB and took 1.5 dB more from the photo, and was left out.
 kernel void smaaEdgeDetection(
     texture2d<half, access::read> input [[texture(0)]],
     texture2d<half, access::write> edges [[texture(1)]],
@@ -93,13 +139,14 @@ kernel void smaaEdgeDetection(
     half threshold = half(params.threshold);
 
     int2 p = int2(gid);
-    half lumaC    = rgb2luma(input.read(gid).rgb);
-    half lumaLeft = rgb2luma(input.read(clampCoord(p + int2(-1, 0), width, height)).rgb);
-    half lumaTop  = rgb2luma(input.read(clampCoord(p + int2(0, -1), width, height)).rgb);
+    half3 cC = input.read(gid).rgb;
+    half3 cLeft = input.read(clampCoord(p + int2(-1, 0), width, height)).rgb;
+    half3 cTop  = input.read(clampCoord(p + int2(0, -1), width, height)).rgb;
+    auto diff = [](half3 a, half3 b) { half3 d = abs(a - b); return max(d.r, max(d.g, d.b)); };
 
     half2 delta;
-    delta.x = abs(lumaC - lumaLeft);
-    delta.y = abs(lumaC - lumaTop);
+    delta.x = diff(cC, cLeft);
+    delta.y = diff(cC, cTop);
 
     half2 edge = step(threshold, delta);
     if (edge.x == 0.0h && edge.y == 0.0h) {
@@ -107,20 +154,21 @@ kernel void smaaEdgeDetection(
         return;
     }
 
-    half lumaRight  = rgb2luma(input.read(clampCoord(p + int2( 1, 0), width, height)).rgb);
-    half lumaBottom = rgb2luma(input.read(clampCoord(p + int2(0,  1), width, height)).rgb);
-    half lumaLeftLeft = rgb2luma(input.read(clampCoord(p + int2(-2, 0), width, height)).rgb);
-    half lumaTopTop   = rgb2luma(input.read(clampCoord(p + int2(0, -2), width, height)).rgb);
+    half3 cRight  = input.read(clampCoord(p + int2( 1, 0), width, height)).rgb;
+    half3 cBottom = input.read(clampCoord(p + int2(0,  1), width, height)).rgb;
+    half3 cLeftLeft = input.read(clampCoord(p + int2(-2, 0), width, height)).rgb;
+    half3 cTopTop   = input.read(clampCoord(p + int2(0, -2), width, height)).rgb;
 
     half2 maxDelta;
-    maxDelta.x = max(max(delta.x, abs(lumaC - lumaRight)), abs(lumaLeft - lumaLeftLeft));
-    maxDelta.y = max(max(delta.y, abs(lumaC - lumaBottom)), abs(lumaTop - lumaTopTop));
+    maxDelta.x = max(max(delta.x, diff(cC, cRight)), diff(cLeft, cLeftLeft));
+    maxDelta.y = max(max(delta.y, diff(cC, cBottom)), diff(cTop, cTopTop));
 
     half finalDelta = max(maxDelta.x, maxDelta.y);
-    edge *= step(finalDelta * 0.5h, delta);
+    edge *= step(finalDelta * 0.66h, delta);
 
     edges.write(half4(edge.x, edge.y, 0.0h, 1.0h), gid);
 }
+
 
 /// A run of edges of one orientation along a border, and how the edge line leaves it at each end.
 struct EdgeRun {

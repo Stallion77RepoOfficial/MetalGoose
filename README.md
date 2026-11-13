@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="Assets/logo.png" alt="MetalGoose Logo" width="128" height="128">
+  <img src="MetalGoose/Assets.xcassets/GooseLogo.imageset/GooseLogo.jpg" alt="MetalGoose Logo" width="128" height="128">
   
   # MetalGoose
   
@@ -26,6 +26,16 @@ only games — anything that renders faster than it is being watched. Menus, pop
 tooltips and dialogs the app opens over its window are captured with it while they
 are open, so they stay visible on the overlay.
 
+A window is worked on at the resolution its content is drawn at. On a Retina display that is usually two pixels a point,
+but an app that is not drawn for Retina displays — a Windows game under Wine without its Retina mode, for one — draws at
+one, and is magnified to the display's pixels, bilinearly or as blocks of two by two. MetalGoose tells which from the
+first frames, by the relation each kind of magnification leaves between neighbouring pixels, and from then on takes every
+frame back to the content's own size before anything else: exactly for blocks (measured on such a game's frame) and to
+within one step of 255 for bilinear, and every stage after on a quarter of the pixels. With upscaling off the overlay is
+drawn at that resolution too, and macOS magnifies it to the display's pixels the way it magnified the app's own window,
+blocks as blocks: a quarter to two fifths less of the GPU for the same picture (measured), and the MG HUD drawn at that
+resolution with it. Native means the content's own resolution.
+
 ## Features
 
 ### MGUP-1 Upscaling
@@ -38,37 +48,34 @@ are open, so they stay visible on the overlay.
 ### MGFG-1 Frame Generation
 MGFG-1 makes the images between two captures by interpolation. The Neural Engine does it where it can, and MetalFX on
 the GPU where it cannot, and a single choice is made for every capture so that the two work as one. The HUD's
-**Frame Gen** row says MGFG-1 and the multiplier in use; its **Engine** row names the engine making the images (and the
-size the Neural Engine works at, where that is not the capture's own), or says why none is: Starting while the Neural
-Engine's session is being built, Not keeping up, or Display-limited.
+**Frame Gen** row says MGFG-1 and the multiplier; its **Engine** row names the engine making the images (and the size the
+Neural Engine works at, where that is not the capture's own), or says why none is: Starting while the Neural Engine's
+session is being built, or Unavailable where nothing can make the multiplier chosen just now (4x needs the Neural Engine).
 
 - **Neural Engine** — VideoToolbox low-latency frame interpolation, for 2x and 4x. It leaves the GPU to the captured
-  app: the GPU converts the capture to 4:2:0 once, and turns an image into colour only as it is shown. It works at the
-  largest size it takes (1920 px on a side, 2.07 MP): a larger capture is shrunk for it and its images are enlarged as
-  they are blended with the captures, so a 1440p or 4K window is covered too. Where the capture rate leaves no time for
-  that size, it works at a coarser one — 1280×720 or 960×540 — rather than giving way; so it does where the captures come
-  unevenly, as a 60 fps source does on a 120 Hz panel (a tenth of them arrive 8 ms after the one before), since a pair
-  that arrives while the last is still being made would go by without its images. A size it has not been used at takes
-  a second or two to prepare, the first time; the session that is serving goes on until the new one has started, and
-  MetalFX stands in meanwhile.
+  app: the GPU converts the capture to 4:2:0 once, and turns an image into colour only as it is shown. Above 1280×720's
+  pixels it runs a slower way that is much closer to the real in-between frame (measured, 3 to 7 dB nearer than at
+  1280×720 or below), so a capture of up to that size is enlarged into it; a capture of more is given whole, up to the
+  largest size it takes (1920 px on a side, 2.07 MP), and a larger one is shrunk for it, its images enlarged again as they
+  are blended with the captures. Where the capture rate leaves no time for that, it works at 1280×720 or 960×540 in the
+  fast way rather than giving way; so it does where the captures come unevenly, as a 60 fps source does on a 120 Hz panel
+  (a tenth of them arrive 8 ms after the one before), since a pair that arrives while the last is still being made would
+  go by without its images.
+- **Ready at once** — the Neural Engine builds a model for every size it is used at, which takes a second or two the first
+  time. The ten shapes Apple ships the network in, and the sizes used before, are built when MetalGoose launches, so a
+  ladder with a prepared shape can start at it while the window's own model builds.
 - **MetalFX** — interpolation with the media engine's motion field, for 2x where the Neural Engine cannot be used or
   cannot keep up. It is the more faithful of the two, makes the midpoint only, and uses GPU time.
-- Where neither can make its images before the next capture is due, nothing is held back: the captures are shown as
-  they arrive.
 - **Multiplier** — images presented per captured frame: 2x (the midpoint of each pair) or 4x (its quarters, on the
-  Neural Engine). 4x is made while the panel shows at least two and a half refreshes per capture — at 120 Hz up to about
-  46 captures a second; where it shows fewer than four, each refresh shows the quarter nearest its moment, which keeps the
-  motion more even than the midpoint alone. Below that it is 2x (4x at 30 captures a second on a 60 Hz panel is 2x), and
-  4x falls back to 2x where the quarters do not fit the time between captures. The HUD's Target is never more than the
-  panel's refresh rate.
+  Neural Engine), exactly as chosen, on any panel and at any capture rate. Where the panel shows fewer images than are
+  made, each refresh shows the one nearest its moment; where no engine keeps up, the nearest one makes them all the same,
+  and the pairs it has no time for go by without their images. The HUD's Target is never more than the panel's refresh
+  rate.
 - **Interface and text stay as captured** — where the content did not move between the two captures (an interface,
   text, a still background) they are blended back into the generated image, which keeps what did not move: the Neural
   Engine's images are lossy there, and MetalFX's gain a little. What counts is how much the captures differ compared with
   how much there is to differ, which is about how far the content moved, so a low contrast texture that is moving keeps
   the engine's image and is not cross-faded.
-- **When there is no room, nothing is made** — where the panel shows fewer than about two images in a capture interval
-  (60 captures a second on a 60 Hz panel, 120 on 120), a generated image would never be seen, and the captures are shown
-  as they arrive with nothing held back. The HUD says Display-limited.
 
 Interpolation holds the newest capture back by most of a capture interval plus the time the first generated image
 takes to make (some 40 to 50 ms at 30 captures a second). That delay is eased where it falls, so that a change of
@@ -88,14 +95,37 @@ which measured closer to the real image. Scene-cut detection avoids generating a
 Resize and reappearance may redraw an existing image. The HUD counts new images when the drawable
 reports an actual presentation, so **Generated + Passthrough = Presented** remains true.
 
+### Variable Refresh (VRR)
+**VRR** (Display Settings) presents every image at the moment it is due instead of on the display's fixed refreshes. A
+panel that can vary its refresh then shows each image at its own time — the built-in ProMotion display does so on a
+4.17 ms grid — so images whose rate does not divide the refresh rate are spaced evenly, and none is skipped. The system
+shows an image about a refresh after the time it was given, so each is handed over one refresh less ahead than on the
+fixed refresh and reaches the screen about as soon. Measured through the engine on the ProMotion display, three runs at
+each rate: at 80, 90 and 108 images a second the images reached the screen within 0.6 to 1.8 ms of their moment on
+average, against 2.1 to 2.6 ms on the fixed 120 Hz refresh, and at 54 within 1.7 to 1.8 ms against 2.3 to 2.5; at 120 about
+the same either way. They arrived at most 5 ms later than on the fixed refresh, and sooner at 54, 80 and 120. The presenter
+takes 0.2 to 0.5% of one CPU core more than the fixed refresh.
+
+macOS varies the refresh only for a window that covers the whole display, so it takes effect with Scale Factor
+**Fullscreen**, and anything the window server draws above it puts the display back on its fixed refresh. So the HUD and,
+with VRR on, the pointer of Align Pointer are drawn into the picture itself: measured, VRR stayed on with both, where the HUD
+as a window of its own, or the pointer as a moving layer, turned it off. The pointer then moves with the images, and over a
+picture that is not changing it is drawn again once a refresh. In a window that does not cover the display the images are
+shown on the fixed refresh, as without VRR, and measured 21 ms sooner.
+
+The display shows some images about 8 ms sooner after the time they were given than the rest, in stretches that come and
+go with or without the HUD and the pointer; while it does, the images are spaced less evenly (measured: a 95th percentile
+of 6 to 9 ms in such runs, against about 2 ms).
+
 ### Anti-Aliasing
 Post-process anti-aliasing that runs on the final captured image, with no need
 for depth buffers or motion vectors:
-- **FXAA** — Fast approximate anti-aliasing (relative edge threshold + subpixel pass)
-- **SMAA** — Morphological AA: pattern-based edge blending with local contrast adaptation and sharp-corner preservation
+- **FXAA** — FXAA 3.11 Quality: relative edge threshold, a search along each edge to its ends, and a subpixel pass
+- **SMAA** — Morphological AA: colour edge detection with local contrast adaptation, pattern-based edge blending and
+  sharp-corner preservation
 
 ### Performance Monitoring
-A HUD overlay reports, live:
+A HUD, drawn into the top-left corner of the overlay's picture, reports, live:
 - **Capture / Output / Generated** frame rates, the **Target** output (capture rate × the multiplier
   in use, which Output is coloured against), and the panel's refresh rate
 - Capture interval, total completed GPU command-buffer time per new presented image,
@@ -112,7 +142,7 @@ A HUD overlay reports, live:
 | Component | Requirement |
 |-----------|-------------|
 | **macOS** | 27.0 or later |
-| **Chip** | Apple Silicon (M1/M2/M3/M4) |
+| **Chip** | Apple Silicon |
 | **Xcode** | 27 or later (macOS 27 SDK) |
 | **Metal** | Metal 4.1: Metal 4 command queues and MetalFX, shaders built as Metal Shading Language 4.1 |
 | **Swift** | 6.4 toolchain, Swift 6 language mode |
@@ -133,6 +163,27 @@ cd MetalGoose
 open MetalGoose.xcodeproj
 ```
 
+### Package a Release
+
+In Xcode, use **Product → Archive → Distribute App → Custom → Copy App**.
+Package the exported app with macOS's `ditto`, which preserves executable permissions:
+
+```bash
+set -e
+release_app="/path/MetalGoose.app"
+release_zip="$HOME/Downloads/MetalGoose.zip"
+verification_dir="$(mktemp -d)"
+trap 'rm -rf "$verification_dir"' EXIT
+codesign --verify --deep --strict "$release_app"
+ditto -c -k --sequesterRsrc --keepParent "$release_app" "$release_zip"
+ditto -x -k "$release_zip" "$verification_dir"
+test -x "$verification_dir/MetalGoose.app/Contents/MacOS/MetalGoose"
+codesign --verify --deep --strict "$verification_dir/MetalGoose.app"
+```
+
+Run these commands in a fresh shell. Upload the ZIP only after the extracted executable
+and code signature pass verification.
+
 The project uses **Apple Development** signing to keep its identity stable across rebuilds.
 Select your own development team and certificate in Xcode, then build and run the MetalGoose
 scheme on My Mac. Screen Recording and Accessibility both require user permission before
@@ -140,6 +191,7 @@ scaling. You can also select your team locally without changing the shared proje
 
 ```bash
 xcodebuild -project MetalGoose.xcodeproj -scheme MetalGoose -configuration Release \
+  -derivedDataPath "$PWD/DerivedData" \
   DEVELOPMENT_TEAM=YOUR_TEAM_ID CODE_SIGN_IDENTITY="Apple Development" build
 ```
 
@@ -147,6 +199,7 @@ To build without a development certificate, choose **Sign to Run Locally**, or u
 
 ```bash
 xcodebuild -project MetalGoose.xcodeproj -scheme MetalGoose -configuration Release \
+  -derivedDataPath "$PWD/DerivedData" \
   DEVELOPMENT_TEAM= CODE_SIGN_IDENTITY="-" build
 ```
 
@@ -161,7 +214,28 @@ not a signing credential. See Apple's [code-signing certificates](https://develo
 [code identity and privacy permissions](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements),
 and [Developer ID distribution](https://developer.apple.com/developer-id/) documentation.
 
-CI builds and analyzes the app on macOS 27 with Xcode 27 and the macOS 27 SDK.
+### Keep Development Builds in One Location
+
+Use the same Derived Data directory for Xcode and command-line builds. In Xcode's
+**File → Project Settings**, select a custom Derived Data location pointing to this
+checkout's `DerivedData` directory. The commands above use that directory too; it is
+already ignored by Git. Keep the checkout path and signing identity stable.
+
+Open the intended bundle by its full path, for example:
+
+```bash
+open "$PWD/DerivedData/Build/Products/Release/MetalGoose.app"
+```
+
+Avoid launching old builds in other Derived Data directories. macOS can register each
+copy under the same bundle identifier, including during Xcode's `RegisterWithLaunchServices`
+build step before the app has been launched, and reopen a different copy after a permission
+change. If that happens, quit the copies, remove the obsolete build products, and open
+the intended bundle by its full path. Changing the bundle identifier or signing identity
+can require granting privacy permissions again. A fixed build path prevents extra copies
+from accumulating; it does not replace macOS's permission checks.
+
+CI builds and analyzes both Debug and Release on macOS 27 with Xcode 27 and the macOS 27 SDK.
 
 ### Languages
 
@@ -184,9 +258,9 @@ identifiers and error codes remain stable when the display language changes.
 
 Where the overlay is bigger than the window (a Scale Factor above 1.0x, or Fullscreen) the window is not where its picture
 is, so **Align Pointer** takes the pointer to the picture: the system pointer is kept inside the window and hidden, and
-the overlay draws one where the pointer appears in the scaled picture, so a click lands under it. This needs Accessibility,
-which is how mouse events are held inside the window. While an app has taken the mouse for itself, to look around with, no
-pointer is drawn. Turn Align Pointer off to leave the system pointer alone; at 1.0x there is nothing to align.
+the overlay draws one where the pointer appears in the scaled picture, so a click lands under it. While an app has taken
+the mouse for itself, to look around with, no pointer is drawn. Turn Align Pointer off to leave the system pointer alone; at 1.0x there is nothing to align.
+With VRR on, the pointer is drawn into each image rather than above it (see Variable Refresh).
 
 ### Keyboard Shortcuts
 
@@ -196,7 +270,13 @@ pointer is drawn. Turn Align Pointer off to leave the system pointer alone; at 1
 | `⌘ + ⇧ + C` | Show or hide the cursor sprite |
 
 Both are global and outlive the main window, so closing it with `⌘W` leaves the
-overlay running and `⌘⇧T` still stops it.
+overlay running and `⌘⇧T` still stops it. While scaling runs, the main window is put
+away; switching to MetalGoose (`⌘Tab` or the Dock) brings it back with **Stop Scaling**,
+and the HUD is hidden whenever the overlay is.
+
+One copy of MetalGoose runs at a time: the system hands a global shortcut to every app
+that registered it, so opening another copy (for example a build beside the installed
+app) quits the one already running.
 
 ## Error Codes
 

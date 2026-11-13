@@ -162,6 +162,7 @@ struct ContentView: View {
                 ToggleRow(label: "Show MG HUD", isOn: $settings.showMGHUD)
                 ToggleRow(label: "Align Pointer", isOn: $settings.alignPointer)
                 ToggleRow(label: "VSync", isOn: $settings.vsync)
+                ToggleRow(label: "VRR", isOn: $settings.vrr)
                 ToggleRow(label: "Triple Buffering", isOn: $settings.tripleBuffering)
                     .disabled(controller.isActive)
             }
@@ -175,35 +176,5 @@ struct ContentView: View {
                 .disabled(controller.isActive)
             }
         }
-    }
-}
-
-/// The shader caches MetalGoose has built, which can go stale after a toolchain change and make a
-/// correct shader misbehave.
-enum MetalCache {
-    /// Removes MetalGoose's own entries from the system's shader caches. Other apps keep theirs: the
-    /// parent directories are shared, so only the subfolder named for this bundle is removed.
-    static func clear() -> String {
-        let fileManager = FileManager.default
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.MetalGoose"
-
-        // The per-user cache directory sits next to the temporary one.
-        let userCache = fileManager.temporaryDirectory.deletingLastPathComponent()
-            .appendingPathComponent("C", isDirectory: true)
-        var targets = ["com.apple.metal", "com.apple.metalfx", "com.apple.metalfe"].map {
-            userCache.appendingPathComponent($0, isDirectory: true).appendingPathComponent(bundleID, isDirectory: true)
-        }
-        targets.append(userCache.appendingPathComponent(bundleID, isDirectory: true))
-        if let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            targets.append(caches.appendingPathComponent(bundleID, isDirectory: true))
-        }
-
-        let removed = targets.filter { url in
-            fileManager.fileExists(atPath: url.path) && (try? fileManager.removeItem(at: url)) != nil
-        }.count
-
-        return removed > 0
-            ? String(localized: "Metal cache cleared (\(removed) location(s)). Restart MetalGoose so shaders rebuild cleanly.")
-            : String(localized: "No Metal cache found to clear.")
     }
 }

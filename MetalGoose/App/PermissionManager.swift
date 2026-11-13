@@ -18,17 +18,14 @@ final class PermissionManager: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil,
                                                queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self else { return }
-                self.refresh()
-                if !(self.accessibilityGranted && self.screenRecordingGranted) { self.startMonitoring() }
+                self?.startMonitoring()
             }
         }
     }
 
     // MARK: - State
 
-    /// Re-reads both permissions. Each check is a round trip to tccd, so they run on demand and on a
-    /// timer only while something is missing.
+    /// Re-reads both permissions on demand and on a timer only while something is missing.
     func refresh() {
         accessibilityGranted = AXIsProcessTrusted()
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
@@ -36,13 +33,14 @@ final class PermissionManager: ObservableObject {
 
     /// Polls while a permission is missing: it is granted in another app, which does not notify this one.
     func startMonitoring() {
-        timer?.invalidate()
+        stopMonitoring()
         refresh()
+        guard !(accessibilityGranted && screenRecordingGranted) else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.refresh()
-                if self.accessibilityGranted && self.screenRecordingGranted { self.timer?.invalidate() }
+                if self.accessibilityGranted && self.screenRecordingGranted { self.stopMonitoring() }
             }
         }
     }
@@ -63,11 +61,9 @@ final class PermissionManager: ObservableObject {
     }
 
     func requestScreenRecording() {
-        guard !CGPreflightScreenCaptureAccess() else {
-            refresh()
-            return
+        if !CGPreflightScreenCaptureAccess() {
+            _ = CGRequestScreenCaptureAccess()
         }
-        _ = CGRequestScreenCaptureAccess()
         startMonitoring()
     }
 

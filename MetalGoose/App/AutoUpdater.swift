@@ -1,15 +1,14 @@
 import AppKit
 import CryptoKit
 import Foundation
+import Security
 
 struct GitHubRelease: Decodable, Sendable {
     let tagName: String
-    let name: String
     let assets: [GitHubAsset]
 
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
-        case name
         case assets
     }
 }
@@ -56,6 +55,7 @@ private enum UpdateError: LocalizedError {
     case checksumMismatch
     case extractionFailed(Int32)
     case noAppInArchive
+    case invalidApp
 
     var errorDescription: String? {
         switch self {
@@ -65,6 +65,7 @@ private enum UpdateError: LocalizedError {
         case .checksumMismatch:      return String(localized: "The downloaded update does not match the checksum GitHub published for it; refusing to install it.")
         case .extractionFailed(let status): return String(localized: "Extracting the update failed (status \(status)).")
         case .noAppInArchive:        return String(localized: "No .app bundle found in the update.")
+        case .invalidApp:            return String(localized: "The update does not contain a valid, signed MetalGoose app.")
         }
     }
 }
@@ -81,17 +82,20 @@ final class AutoUpdater: ObservableObject {
     private init() {}
 
     func checkForUpdates() {
+        guard case .idle = state else { return }
+        state = .checking
         Task { await check() }
     }
 
     func downloadAndInstall(release: GitHubRelease) {
+        guard case .available = state else { return }
+        state = .downloading(progress: 0)
         Task { await install(release) }
     }
 
     // MARK: - Checking
 
     private func check() async {
-        state = .checking
         do {
             let release = try await fetchLatestRelease()
             let latest = SemanticVersion(release.tagName)
@@ -125,7 +129,6 @@ final class AutoUpdater: ObservableObject {
             // assets and verify the published checksum when available.
             guard Self.isGitHubHTTPS(url) else { throw UpdateError.untrustedSource }
 
-            state = .downloading(progress: 0)
             let archive = try await download(url)
             defer { try? FileManager.default.removeItem(at: archive) }
 
@@ -156,7 +159,10 @@ final class AutoUpdater: ObservableObject {
         request.setValue("MetalGoose-Updater", forHTTPHeaderField: "User-Agent")
 
         let progress = DownloadProgress { [weak self] fraction in
-            Task { @MainActor in self?.state = .downloading(progress: fraction) }
+            Task { @MainActor in
+                guard let self, case .downloading = self.state else { return }
+                self.state = .downloading(progress: fraction)
+            }
         }
         let (file, response) = try await URLSession.shared.download(for: request, delegate: progress)
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
@@ -217,6 +223,15 @@ final class AutoUpdater: ObservableObject {
         guard let newApp = app(in: staging) ?? folders.lazy.compactMap({ app(in: $0) }).first else {
             throw UpdateError.noAppInArchive
         }
+
+        guard let bundle = Bundle(url: newApp), bundle.bundleIdentifier == Bundle.main.bundleIdentifier,
+              let executable = bundle.executableURL, fileManager.isExecutableFile(atPath: executable.path) else {
+            throw UpdateError.invalidApp
+        }
+        var signed: SecStaticCode?
+        let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckNestedCode | kSecCSCheckAllArchitectures)
+        guard SecStaticCodeCreateWithPath(newApp as CFURL, [], &signed) == errSecSuccess, let signed,
+              SecStaticCodeCheckValidity(signed, flags, nil) == errSecSuccess else { throw UpdateError.invalidApp }
 
         let current = Bundle.main.bundleURL
         _ = try fileManager.replaceItemAt(current, withItemAt: newApp)

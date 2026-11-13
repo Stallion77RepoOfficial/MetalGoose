@@ -79,7 +79,7 @@ private final class MediaEngineEstimator {
     private let measuring = OSAllocatedUnfairLock<[Measurement]>(initialState: [])
     private var measurementCount = 0
 
-    /// A measurement VideoToolbox never answers is given up on after this long.
+    /// Retire a stalled session and its buffers after this long; an outstanding pair must never be overwritten.
     private static let measurementTimeout: CFTimeInterval = 0.5
 
     /// VideoToolbox recycles its output buffers from a pool, so the same few IOSurfaces come
@@ -216,10 +216,14 @@ private final class MediaEngineEstimator {
         let now = CACurrentMediaTime()
         let destination = slot
         let reference = (destination + count - 1) % count
+
+        if measuring.withLock({ $0.contains { now - $0.since > Self.measurementTimeout } }) {
+            reset()
+            return nil
+        }
         // The destination is one of the buffers being measured: writing it would corrupt the measurement,
         // so this frame is skipped and the next one starts a new pair.
         let isFree = measuring.withLock { pairs -> Bool in
-            pairs.removeAll { now - $0.since > Self.measurementTimeout }
             return !pairs.contains { $0.reference == destination || $0.current == destination }
         }
         guard isFree else {
@@ -257,6 +261,7 @@ private final class MediaEngineEstimator {
         let status = __VTMotionEstimationSessionEstimateMotionVectors(
             session, pending.reference, pending.current, [], nil
         ) { [measuring, slowdown] status, _, _, vectors in
+            withExtendedLifetime((pending.reference, pending.current)) {}
             measuring.withLock { $0.removeAll { $0.id == id } }
             guard status == noErr, let vectors else { return }
             slowdown.withLock {
@@ -368,8 +373,8 @@ final class MotionPipeline: @unchecked Sendable {
         if let pending = prepared.pending {
             nonisolated(unsafe) let pending = pending
             let (width, timestamp, validity) = (texture.width, frame.timestamp, frame.validity)
-            command.onCompleted { [self] completion in
-                guard completion.succeeded, validity.isValid else { return }
+            command.onCompleted { [self] succeeded in
+                guard succeeded, validity.isValid else { return }
                 estimate(pending, frameWidth: width, timestamp: timestamp)
             }
         }
@@ -451,8 +456,8 @@ final class MotionPipeline: @unchecked Sendable {
         command.retain(buffer)
         command.retain(lease)
         let validity = WorkValidity()
-        command.onCompleted { completion in
-            if !completion.succeeded { validity.invalidate() }
+        command.onCompleted { succeeded in
+            if !succeeded { validity.invalidate() }
         }
         let written = command.commit()
 

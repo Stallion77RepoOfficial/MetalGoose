@@ -13,6 +13,7 @@ struct HUDInfo: Equatable {
     var generationEngine = "-"
     var antiAliasing = String(localized: "Off")
     var vsync = String(localized: "On")
+    var vrr = String(localized: "Off")
 }
 
 @MainActor
@@ -128,6 +129,7 @@ struct HUDView: View {
             }
             HUDRow(label: "AA", value: info.antiAliasing)
             HUDRow(label: "VSync", value: info.vsync)
+            HUDRow(label: "VRR", value: info.vrr)
         }
     }
 

@@ -38,6 +38,9 @@ final class EngineShared: @unchecked Sendable {
     /// The images both engines make, which the render thread picks from.
     let images = GeneratedImages()
 
+    /// What is drawn over the picture in the drawable: the HUD and the pointer.
+    let graphics: OverlayGraphics
+
     /// How long after a capture arrives the first image of its pair is ready, for each engine. The interpolation
     /// schedule sits that far behind the newest capture.
     let neuralLatency = GenerationLatency()
@@ -52,6 +55,7 @@ final class EngineShared: @unchecked Sendable {
     init(gpu: GPUContext) {
         self.gpu = gpu
         errors = gpu.errors
+        graphics = OverlayGraphics(device: gpu.device)
         neural = NeuralInterpolator(gpu: gpu, errors: errors, latency: neuralLatency, images: images)
         metalFX = MetalFXInterpolator(gpu: gpu, errors: errors, latency: metalFXLatency, images: images)
     }

@@ -12,12 +12,12 @@ struct SemanticVersion: Comparable, Equatable, Sendable {
     let prerelease: String?
     let revision: String?
 
-    /// Accepts a git tag or a bundle version: surrounding whitespace, case and a leading
+    /// Accepts a git tag or a bundle version: surrounding whitespace and a leading
     /// `v` are decoration. Only the tag's `v` prefix is dropped — removing every `v` would
     /// mangle suffixes like `preview`.
     init(_ text: String) {
-        var core = Substring(text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
-        if core.hasPrefix("v") { core.removeFirst() }
+        var core = Substring(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        if core.hasPrefix("v") || core.hasPrefix("V") { core.removeFirst() }
         // Build metadata after `+` carries no precedence at all.
         if let plus = core.firstIndex(of: "+") { core = core[..<plus] }
 
@@ -34,7 +34,7 @@ struct SemanticVersion: Comparable, Equatable, Sendable {
             let digits = component.prefix { $0.isNumber }
             numbers.append(Int(digits) ?? 0)
             let trailing = component.dropFirst(digits.count)
-            if revision == nil, !trailing.isEmpty { revision = String(trailing) }
+            if revision == nil, !trailing.isEmpty { revision = trailing.lowercased() }
         }
         self.numbers = numbers
         self.prerelease = prerelease
@@ -61,7 +61,16 @@ struct SemanticVersion: Comparable, Equatable, Sendable {
         case (nil, nil):             break
         case (.some, nil):           return true
         case (nil, .some):           return false
-        case (.some(let l), .some(let r)) where l != r: return l < r
+        case (.some(let l), .some(let r)) where l != r:
+            let left = l.split(separator: "."), right = r.split(separator: ".")
+            for (a, b) in zip(left, right) where a != b {
+                let numericA = a.utf8.allSatisfy { (48...57).contains($0) }
+                let numericB = b.utf8.allSatisfy { (48...57).contains($0) }
+                if numericA != numericB { return numericA }
+                if numericA, a.count != b.count { return a.count < b.count }
+                return a < b
+            }
+            return left.count < right.count
         default:                     break
         }
         switch (lhs.revision, rhs.revision) {

@@ -19,6 +19,9 @@ struct FrameHistory: TimedFrame {
     let presentationTime: CFTimeInterval
     let isSceneCut: Bool
     let validity: WorkValidity
+    /// How the capture's content, drawn at half the window's pixels and taken back to its own size, was magnified to them:
+    /// what the overlay magnifies it with again where it shows it at the window's pixels (`RenderPipeline`).
+    var magnification: ContentResolution.Magnification? = nil
 }
 
 /// The most recent captures, oldest first.

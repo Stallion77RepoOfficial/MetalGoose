@@ -50,7 +50,7 @@ struct UpdateAlerts: ViewModifier {
 
     /// An alert is showing while the state matches, and dismissing it resets the state.
     private func isShowing(_ matches: @escaping (UpdateState) -> Bool) -> Binding<Bool> {
-        Binding(get: { matches(updater.state) }, set: { if !$0 { updater.state = .idle } })
+        Binding(get: { matches(updater.state) }, set: { if !$0, matches(updater.state) { updater.state = .idle } })
     }
 
     func body(content: Content) -> some View {

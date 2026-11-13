@@ -59,6 +59,8 @@ final class CapturePipeline: @unchecked Sendable {
     private var historySlots = BufferLeasePool(capacity: CapturePipeline.poolDepth)
     private var restoreTexture: (any MTLTexture)?
     private var restoreScaler: (any MTL4FXSpatialScaler)?
+    /// A capture's content at its own size, where it was drawn at half the window's pixels.
+    private var contentTexture: (any MTLTexture)?
     private var cropTexture: (any MTLTexture)?
     private var sharpenTexture: (any MTLTexture)?
     private var smaaEdges: (any MTLTexture)?
@@ -82,6 +84,8 @@ final class CapturePipeline: @unchecked Sendable {
     /// The sizes the Neural Engine can work at for the frames this pipeline holds, finest first.
     private var neuralSizes: [NeuralSizes.Size] = []
     private var neuralSizesFor = CGSize.zero
+    /// The frame size whose rungs have been handed to `NeuralModelCache` to be built ahead.
+    private var modelsPreparedFor = CGSize.zero
 
     /// ScreenCaptureKit recycles a small pool of surfaces, so the same few come back frame after
     /// frame. Wrapping each in a texture again for every capture allocated for surfaces that were
@@ -199,6 +203,7 @@ final class CapturePipeline: @unchecked Sendable {
         restoreTexture = nil
         restoreScaler = nil
         cropTexture = nil
+        contentTexture = nil
         sharpenTexture = nil
         smaaEdges = nil
         smaaWeights = nil
@@ -220,6 +225,7 @@ final class CapturePipeline: @unchecked Sendable {
         lastMotionTimestamp = nil
         neuralSizes = []
         neuralSizesFor = .zero
+        modelsPreparedFor = .zero
         shared.generation.withLock { $0 = .nothing }
     }
 
@@ -247,10 +253,26 @@ final class CapturePipeline: @unchecked Sendable {
         command.retain(frame.pixelBuffer)
         command.onCompleted { [inFlight] _ in inFlight.signal() }
 
-        guard let input = surfaceTexture(for: frame.surface) else {
+        guard var input = surfaceTexture(for: frame.surface) else {
             shared.errors.report(.surfaceTextureFailed)
             drop(command)
             return
+        }
+        // Content drawn at half the window's pixels is taken back to its own size before anything else, which then works on
+        // a quarter of the pixels, and on the content as it was drawn rather than its magnified picture.
+        if let magnification = frame.magnification {
+            guard let content = gpu.ensureTexture(&contentTexture, width: input.width / 2, height: input.height / 2),
+                  let pass = command.makeComputePass() else {
+                drop(command)
+                return
+            }
+            let pipeline = magnification == .nearest ? gpu.pipelines.demagnifyNearest : gpu.pipelines.demagnifyBilinear
+            pass.setComputePipelineState(pipeline)
+            pass.setTexture(input, index: 0)
+            pass.setTexture(content, index: 1)
+            gpu.dispatch(pipeline, on: pass, width: content.width, height: content.height)
+            pass.endEncoding()
+            input = content
         }
 
         let config = shared.config.withLock { $0 }
@@ -398,21 +420,19 @@ final class CapturePipeline: @unchecked Sendable {
         let scheduleDelay = FramePlanner.interpolationDelay(captureInterval: shared.captureInterval.withLock { $0.value },
                                                             generationLatency: choice.latency, steps: neuralSteps)
         let validity = WorkValidity()
-        command.onCompleted { [shared] completion in
-            guard completion.succeeded else {
+        command.onCompleted { [shared] succeeded in
+            guard succeeded else {
                 validity.invalidate()
                 shared.renderResetRequested.withLock { $0 = true }
                 shared.stats.withLock { $0.droppedFrames += 1 }
                 return
             }
-            let gpuTime = Float(completion.gpuTime * 1000)
-            shared.stats.withLock { $0.captureGPUTime = gpuTime }
             if let yuv { shared.neural.frameConverted(yuv, timestamp: now, previous: partner, steps: neuralSteps, delay: scheduleDelay) }
         }
         let written = command.commit()
         let captured = FrameHistory(texture: history, lease: lease, written: written, timestamp: now,
                                     presentationTime: presentationTime(of: frame, arrival: now), isSceneCut: frame.isSceneCut,
-                                    validity: validity)
+                                    validity: validity, magnification: frame.magnification)
 
         // MetalFX takes the motion between the pair as an input; the Neural Engine needs none. The motion of a pair is
         // measured between two captures that followed one another, so after a stretch in which the media engine was given
@@ -485,16 +505,22 @@ final class CapturePipeline: @unchecked Sendable {
             requested: config.multiplier,
             captureInterval: shared.captureInterval.withLock { $0.value },
             shortestInterval: shared.captureSpread.withLock { $0.shortest },
-            refreshRate: shared.stats.withLock { $0.screenRefreshRate },
             framePixels: width * height,
             // A size the processor refused is as good as one with no time to spare.
             neuralRungs: usable ? neuralSizes.map { shared.neural.isRejected($0) ? Int.max / 8 : $0.pixels } : [],
+            neuralBuilt: usable ? neuralSizes.map { NeuralModelCache.isBuilt($0) } : [],
             neuralActive: usable ? shared.neural.activeSize.flatMap { neuralSizes.firstIndex(of: $0) } : nil,
             neuralMidpointTime: shared.neural.midpointTime, neuralQuartersTime: shared.neural.quartersTime,
             neuralLatency: shared.neuralLatency.value, metalFXLatency: shared.metalFXLatency.value)
 
         var choice = selector.choose(inputs, now: now)
         if let rung = choice.neuralRung, rung < neuralSizes.count { shared.neural.prepare(neuralSizes[rung]) }
+        // The other rungs' models are built behind the one asked for, so that moving to one later does not wait for it.
+        // From the first choice on: before it, the time between captures, which the rung follows from, is not known.
+        if usable, inputs.captureInterval > 0, modelsPreparedFor != neuralSizesFor {
+            modelsPreparedFor = neuralSizesFor
+            NeuralModelCache.prepare(neuralSizes, serving: choice.neuralRung.flatMap { $0 < neuralSizes.count ? neuralSizes[$0] : nil })
+        }
         // Where the Neural Engine works at a size other than the frames' own, the size is reported.
         if choice.engine == .neuralEngine, let size = shared.neural.activeSize, size.width != width || size.height != height {
             choice.neuralSize = size

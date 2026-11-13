@@ -23,6 +23,8 @@ final class CaptureSettings: ObservableObject {
     @Published var alignPointer: Bool = true                    { didSet { save(alignPointer, .alignPointer) } }
     @Published var showMGHUD: Bool = true                       { didSet { save(showMGHUD, .showMGHUD) } }
     @Published var vsync: Bool = true                           { didSet { save(vsync, .vsync) } }
+    /// Each image presented at its own moment, which a panel that can vary its refresh (VRR) shows then.
+    @Published var vrr: Bool = false                            { didSet { save(vrr, .vrr) } }
     /// Double versus triple buffering. Stored as a flag because the pipeline only ever
     /// supported those two depths.
     @Published var tripleBuffering: Bool = true                 { didSet { save(tripleBuffering, .tripleBuffering) } }
@@ -46,6 +48,7 @@ final class CaptureSettings: ObservableObject {
                      frameGeneration: frameGenMode,
                      multiplier: effectiveMultiplier,
                      vsync: vsync,
+                     variableRefresh: vrr,
                      profile: sharpening.profile,
                      bufferDepth: bufferCount)
     }
@@ -56,7 +59,7 @@ final class CaptureSettings: ObservableObject {
         case scalingMethod = "scalingType"   // the key predates the rename and is kept for stored values
         case scaleFactor, renderScale, frameGenMode, frameGenMultiplier
         case sharpening = "qualityMode"      // ditto
-        case aaMode, alignPointer, showMGHUD, vsync, tripleBuffering
+        case aaMode, alignPointer, showMGHUD, vsync, vrr, tripleBuffering
 
         var path: String { "MetalGoose." + rawValue }
     }
@@ -77,6 +80,7 @@ final class CaptureSettings: ObservableObject {
         alignPointer        = restore(.alignPointer, alignPointer)
         showMGHUD           = restore(.showMGHUD, showMGHUD)
         vsync               = restore(.vsync, vsync)
+        vrr                 = restore(.vrr, vrr)
         tripleBuffering     = restore(.tripleBuffering, tripleBuffering)
     }
 

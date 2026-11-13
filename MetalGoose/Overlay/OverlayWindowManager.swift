@@ -25,6 +25,8 @@ final class OverlayWindowManager {
         let outputScale: CGFloat
         /// Ignores `outputScale` and covers the whole display.
         let fillsScreen: Bool
+        /// Whether the overlay draws the pointer as a layer of its own, or leaves it to the engine (`OverlayView`).
+        let drawsPointer: Bool
     }
 
     /// Whether the overlay should currently be drawing. It follows the captured app: while the user is
@@ -54,6 +56,7 @@ final class OverlayWindowManager {
     private var alignsPointer = true
     private var outputScale: CGFloat = 1
     private var fillsScreen = false
+    private var drawsPointer = true
 
     private var activationObserver: NSObjectProtocol?
     private var pollTimer: Timer?
@@ -97,6 +100,31 @@ final class OverlayWindowManager {
         alignsPointer = enabled
     }
 
+    func setDrawsPointer(_ draws: Bool) {
+        drawsPointer = draws
+        view?.drawsPointer = draws
+    }
+
+    /// Draws at the content's resolution where the app magnified its content to the window's pixels (`OverlayView`).
+    func setContentMagnification(_ magnification: ContentResolution.Magnification?) {
+        guard let view, view.contentMagnification != magnification else { return }
+        view.contentMagnification = magnification
+        onGeometryChange?()
+    }
+
+    /// Pixels a point the overlay is drawn at.
+    var drawableScale: CGFloat? { view?.drawableScale }
+
+    /// A running capture is suspended on purpose when its owning app loses focus. The hub
+    /// gets that state, so an active session does not look stalled.
+    var presentationState: (presenting: Bool, frontmostPID: Int32?, onScreen: Bool?, reason: String?) {
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        guard targetPID != 0 else { return (false, frontmost, nil, nil) }
+        let onScreen = isOnScreen()
+        let reason: String? = !targetIsFrontmost ? "target-not-frontmost" : !onScreen ? "target-not-onscreen" : nil
+        return (isPresenting, frontmost, onScreen, reason)
+    }
+
     // MARK: - Lifecycle
 
     /// Creates the window and returns the layer the engine should present into.
@@ -106,6 +134,7 @@ final class OverlayWindowManager {
         alignsPointer = configuration.alignsPointer
         outputScale = max(1.0, configuration.outputScale)
         fillsScreen = configuration.fillsScreen
+        drawsPointer = configuration.drawsPointer
         targetFrame = configuration.windowFrame
         targetBackingScale = configuration.screen.backingScaleFactor
         targetDisplayID = ScreenGeometry.displayID(of: configuration.screen)
@@ -118,14 +147,18 @@ final class OverlayWindowManager {
                                          defer: false, screen: nil)
         window.isReleasedWhenClosed = false
         window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)) + 1)
-        window.backgroundColor = .clear
-        window.isOpaque = false
+        // Opaque, black until the first image. Measured with the engine: a window that was not opaque, opened just after an
+        // opaque window covering the display had closed, got 19 display-link callbacks and then none, and showed nothing;
+        // an opaque one never stalled, at the same latency and pacing.
+        window.isOpaque = true
+        window.backgroundColor = .black
         window.hasShadow = false
         window.ignoresMouseEvents = true
         window.acceptsMouseMovedEvents = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
 
         let view = OverlayView(frame: CGRect(origin: .zero, size: frame.size))
+        view.drawsPointer = drawsPointer
         window.contentView = view
         window.orderFrontRegardless()
 
@@ -195,7 +228,10 @@ final class OverlayWindowManager {
     private func windowInfo() -> [String: Any]? {
         guard targetWindowID != 0,
               let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], targetWindowID) as? [[String: Any]] else { return nil }
-        return list.first
+        return list.first {
+            ($0[kCGWindowNumber as String] as? UInt32) == targetWindowID
+                && ($0[kCGWindowOwnerPID as String] as? Int32) == targetPID
+        }
     }
 
     private func isOnScreen() -> Bool {

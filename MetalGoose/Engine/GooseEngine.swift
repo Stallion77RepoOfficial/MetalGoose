@@ -74,6 +74,9 @@ final class GooseEngine: @unchecked Sendable {
         if let presentation, config.vsync != previous.vsync || config.bufferDepth != previous.bufferDepth {
             presentation.driver.configure(layer: presentation.layer, config: config)
         }
+        if let presentation, config.variableRefresh != previous.variableRefresh {
+            presentation.driver.setVariableRefresh(config.variableRefresh)
+        }
 
         // The cumulative counters describe one mode's behaviour. Carrying them across a mode switch
         // mixes two schedules into one set of totals, and the generated/passthrough split stops
@@ -178,5 +181,21 @@ final class GooseEngine: @unchecked Sendable {
     @MainActor
     func requestRedraw() {
         presentation?.pipeline.requestRedraw()
+    }
+
+    // MARK: - Drawn over the picture
+
+    /// The HUD, drawn into every image with its top-left corner `origin` pixels from the drawable's; `nil` for none.
+    @MainActor
+    func setHUD(_ image: CGImage?, origin: CGPoint) {
+        shared.graphics.setHUD(image, origin: origin)
+    }
+
+    /// The pointer, drawn into the images while they are presented at their own times (VRR): its image and hot spot, in
+    /// pixels, and `position`, which the render thread asks for each image where the pointer is as a fraction of the overlay
+    /// from its top-left corner, `nil` while none is drawn.
+    @MainActor
+    func setPointer(_ image: CGImage?, hotSpot: CGPoint, position: (@Sendable () -> CGPoint?)?) {
+        shared.graphics.setPointer(image, hotSpot: hotSpot, position: position)
     }
 }

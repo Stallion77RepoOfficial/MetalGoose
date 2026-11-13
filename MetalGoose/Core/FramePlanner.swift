@@ -30,6 +30,14 @@ enum PresentedImage: Equatable {
     /// `phase` is how far from `previous` to `next` the image sits: the midpoint is 0.5 whether the pair was cut
     /// into two steps or four, so the same image is the same image either way.
     case interpolated(previous: CFTimeInterval, next: CFTimeInterval, phase: Double)
+
+    /// The moment on the captures' timeline the image shows.
+    var time: CFTimeInterval {
+        switch self {
+        case .captured(let time): return time
+        case .interpolated(let previous, let next, let phase): return previous + phase * (next - previous)
+        }
+    }
 }
 
 struct PlanningInput {

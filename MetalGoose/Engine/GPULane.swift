@@ -45,7 +45,6 @@ final class GPUReports: Sendable {
 final class GPULane: @unchecked Sendable {
 
     let queue: any MTL4CommandQueue
-    let label: String
 
     /// Signalled with the number of command buffers committed so far, after each of them.
     let progress: any MTLSharedEvent
@@ -96,7 +95,6 @@ final class GPULane: @unchecked Sendable {
               let progress = device.makeSharedEvent(),
               let table = try? device.makeArgumentTable(descriptor: tableDescriptor) else { return nil }
         self.queue = queue
-        self.label = label
         self.progress = progress
         self.table = table
         self.reports = reports
@@ -127,13 +125,6 @@ final class GPULane: @unchecked Sendable {
     }
 }
 
-/// How a command buffer ended, for the work that waited on it.
-struct GPUCompletion: Sendable {
-    let succeeded: Bool
-    /// Seconds the GPU spent on it.
-    let gpuTime: CFTimeInterval
-}
-
 /// One Metal 4 command buffer on a lane: its passes, the work of other lanes it waits for, what it holds until it has run,
 /// and what runs when it has.
 final class GPUCommand: @unchecked Sendable {
@@ -144,7 +135,7 @@ final class GPUCommand: @unchecked Sendable {
 
     /// Objects the GPU does not see that have to live as long as the command buffer: leases, pixel buffers.
     private var retained: [AnyObject] = []
-    private var handlers: [@Sendable (GPUCompletion) -> Void] = []
+    private var handlers: [@Sendable (Bool) -> Void] = []
     private var waits: [(event: any MTLSharedEvent, value: UInt64)] = []
     private var constantsOffset = 0
     private var usesConstants = false
@@ -166,7 +157,7 @@ final class GPUCommand: @unchecked Sendable {
     }
 
     /// Runs `handler` once the command buffer has run, on the lane's completion queue.
-    func onCompleted(_ handler: @escaping @Sendable (GPUCompletion) -> Void) {
+    func onCompleted(_ handler: @escaping @Sendable (Bool) -> Void) {
         handlers.append(handler)
     }
 
@@ -198,7 +189,7 @@ final class GPUCommand: @unchecked Sendable {
         descriptor.colorAttachments[0].storeAction = .store
         guard let encoder = slot.commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return nil }
         encoder.barrier(afterQueueStages: .all, beforeStages: [.vertex, .fragment], visibilityOptions: .device)
-        encoder.setArgumentTable(lane.table, stages: .fragment)
+        encoder.setArgumentTable(lane.table, stages: [.vertex, .fragment])
         return RenderPass(encoder: encoder, command: self)
     }
 
@@ -221,9 +212,10 @@ final class GPUCommand: @unchecked Sendable {
     }
 
     /// Commits the command buffer and returns its place on the lane (`GPULane.submitted`). With `drawable`, the command
-    /// buffer draws into it, and it is presented once that is done.
+    /// buffer draws into it, and it is presented once that is done: at `time`, where one is given, and otherwise as soon as
+    /// it can be.
     @discardableResult
-    func commit(presenting drawable: (any CAMetalDrawable)? = nil) -> UInt64 {
+    func commit(presenting drawable: (any CAMetalDrawable)? = nil, at time: CFTimeInterval? = nil) -> UInt64 {
         slot.residency.commit()
         slot.commandBuffer.endCommandBuffer()
         for wait in waits { lane.queue.waitForEvent(wait.event, value: wait.value) }
@@ -234,16 +226,14 @@ final class GPUCommand: @unchecked Sendable {
         let value = lane.committed()
         if let drawable {
             lane.queue.signalDrawable(drawable)
-            drawable.present()
+            if let time { drawable.present(at: time) } else { drawable.present() }
         }
         return value
     }
 
     private func finished(_ feedback: any MTL4CommitFeedback) {
         lane.reports.record(label, feedback: feedback)
-        let completion = GPUCompletion(succeeded: feedback.error == nil,
-                                       gpuTime: max(0, feedback.gpuEndTime - feedback.gpuStartTime))
-        for handler in handlers { handler(completion) }
+        for handler in handlers { handler(feedback.error == nil) }
         handlers.removeAll()
         retained.removeAll()
         lane.recycle(slot)
@@ -324,7 +314,7 @@ final class ComputePass {
     }
 }
 
-/// A render pass of a `GPUCommand`: one full-target draw, for resampling into a drawable.
+/// A render pass of a `GPUCommand`: a full-target draw, for resampling into a drawable, or images placed over it.
 final class RenderPass {
     private let encoder: any MTL4RenderCommandEncoder
     private let command: GPUCommand
@@ -343,6 +333,12 @@ final class RenderPass {
         command.lane.table.setTexture(texture.gpuResourceID, index: index)
     }
 
+    /// Values for the vertex function, bound as `setBytes` binds them for a compute pass.
+    func setVertexBytes(_ bytes: UnsafeRawPointer, length: Int, index: Int) {
+        command.lane.table.setAddress(command.constant(bytes, length: length), index: index)
+    }
+
+    /// Four vertices as a strip, which the vertex function places: over the whole target, or over a sprite's rectangle.
     func drawFullTarget() {
         encoder.drawPrimitives(primitiveType: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }

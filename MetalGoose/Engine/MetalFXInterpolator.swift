@@ -109,7 +109,11 @@ final class MetalFXInterpolator: @unchecked Sendable {
         command.wait(for: gpu.capture, value: max(previous.written, next.written, field.written))
         for held in [previous.lease, next.lease, field.lease, lease] { command.retain(held) }
 
-        if !flatDepthIsCleared, let pass = command.makeRenderPass(target: depth, clearColor: MTLClearColor(red: 1, green: 0, blue: 0, alpha: 0)) {
+        if !flatDepthIsCleared {
+            guard let pass = command.makeRenderPass(target: depth, clearColor: MTLClearColor(red: 1, green: 0, blue: 0, alpha: 0)) else {
+                command.commit()
+                return
+            }
             pass.endEncoding()
             flatDepthIsCleared = true
         }
@@ -157,9 +161,9 @@ final class MetalFXInterpolator: @unchecked Sendable {
         let lane = gpu.interpolation
         // The lane is encoded from this queue alone, so this command buffer's place on it is the next.
         let written = lane.submitted + 1
-        command.onCompleted { [epoch, images, latency, pending] completion in
+        command.onCompleted { [epoch, images, latency, pending] succeeded in
             pending.withLock { $0 -= 1 }
-            guard completion.succeeded, validities.0.isValid, validities.1.isValid, validities.2.isValid,
+            guard succeeded, validities.0.isValid, validities.1.isValid, validities.2.isValid,
                   producesImage, epoch.withLock({ $0 }) == issued else { return }
             images.publish([GeneratedImages.Image(previous: pair.previous, next: pair.next, phase: 0.5,
                                                   source: .colour(output, lease: lease, lane: lane, written: written),

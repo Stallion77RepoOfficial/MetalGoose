@@ -82,7 +82,7 @@ final class NeuralInterpolator: @unchecked Sendable {
     /// Whether frames of this size are taken as they are, which needs both dimensions even, because the chroma planes
     /// are half-size, and the frame inside what the processor supports.
     static func supports(width: Int, height: Int) -> Bool {
-        ladder(frameWidth: width, frameHeight: height).first == NeuralSizes.Size(width: width, height: height)
+        limits.map { NeuralSizes.accepts(width: width, height: height, limits: $0) } ?? false
     }
 
     /// Two captures that followed one another, and what the schedule behind them looks like.
@@ -430,8 +430,8 @@ final class NeuralInterpolator: @unchecked Sendable {
     // MARK: - Set-up
 
     /// Builds the buffers for this size at once, and the processor in the background: starting a session builds the model for
-    /// the size, which takes long enough that nothing should wait for it. The session that is serving goes on until the new
-    /// one has started.
+    /// the size, unless it has been built before (`NeuralModelCache`), which takes long enough that nothing should wait for it.
+    /// The session that is serving goes on until the new one has started.
     private func startSession(for size: NeuralSizes.Size) {
         if active?.size == size {
             // Already serving at it: whatever was being built for another size is not wanted.
@@ -443,10 +443,7 @@ final class NeuralInterpolator: @unchecked Sendable {
         retire(building)
         building = nil
 
-        // Configured for the quarters, which a call for the midpoint alone takes as well and at the same cost,
-        // so that going from two steps to four does not mean a new session.
-        guard let configuration = VTLowLatencyFrameInterpolationConfiguration(frameWidth: size.width, frameHeight: size.height,
-                                                                               numberOfInterpolatedFrames: 2) else {
+        guard let configuration = NeuralModelCache.configuration(for: size) else {
             noteFailure(at: size)
             return
         }
@@ -467,7 +464,7 @@ final class NeuralInterpolator: @unchecked Sendable {
 
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let session = VTFrameProcessor()
-            do { try session.startSession(configuration: configuration) } catch {
+            do { try NeuralModelCache.starting(size) { try session.startSession(configuration: configuration) } } catch {
                 queue.async { [self] in
                     guard building === rig else { return }
                     building = nil

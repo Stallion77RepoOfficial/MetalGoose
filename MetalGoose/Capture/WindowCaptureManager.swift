@@ -20,11 +20,17 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
         var windowFilter: SCContentFilter?
         var application: SCRunningApplication?
         var windowFrame: CGRect = .zero
+        /// Pixels per point on the display the window is on.
+        var backingScale: CGFloat = 1
+        /// How the window's content was magnified to the window's pixels, where it is drawn at half of them
+        /// (`ContentResolution`); nil where it is not, or not yet known to be.
+        var magnification: ContentResolution.Magnification?
+        /// Whether that is still to be found out.
+        var testsContent = false
         var windowPixelSize: CGSize = .zero
         var capturePixelSize: CGSize = .zero
         var renderScale: Float = 1
         var maxFPS = 0
-        var showsCursor = false
         var pipelineDepth = 0
         /// The display, in CoreGraphics coordinates, whose part under the window is captured with the app's other windows
         /// on it (`follow`); nil while the window alone is.
@@ -46,12 +52,28 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
     private var lastLuma: [UInt8]?
     private var lastPixelBuffer: CVPixelBuffer?
     private var sceneCuts = SceneCutDetector()
+    private var contentFrames = 0
 
     var lastError: MGError? { state.withLockUnchecked { $0.lastError } }
 
     /// Size ScreenCaptureKit is actually delivering. The compositor does the downscale, so
     /// nothing further down the pipeline pays for it.
     var capturePixelSize: CGSize { state.withLockUnchecked { $0.capturePixelSize } }
+
+    /// How the window's content was magnified to the frames being delivered, where they are its magnified picture.
+    var contentMagnification: ContentResolution.Magnification? {
+        state.withLockUnchecked { Self.magnification(of: $0, frameSize: $0.capturePixelSize) }
+    }
+
+    /// Size the pipeline works at: what is delivered, or half of it where that is content drawn at half the window's pixels
+    /// and magnified, which the pipeline takes back to the content's own size first.
+    var contentPixelSize: CGSize {
+        state.withLockUnchecked { state in
+            Self.magnification(of: state, frameSize: state.capturePixelSize) == nil
+                ? state.capturePixelSize
+                : CGSize(width: (state.capturePixelSize.width / 2).rounded(.down), height: (state.capturePixelSize.height / 2).rounded(.down))
+        }
+    }
 
     /// Delivered for every frame that is not a repeat of the one before. Set before
     /// `startCapture`, because frames begin the moment the stream does.
@@ -60,8 +82,8 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
         set { state.withLockUnchecked { $0.onFrame = newValue } }
     }
 
-    /// Called when the stream ends on its own — the target window closed, or the system
-    /// stopped it. `nil` means it ended without an error worth showing.
+    /// Called when the stream ends, or will not take even the configuration it is put back to after a change it would not
+    /// take (`recover`). `nil` means it ended without an error worth showing.
     var onStop: (@Sendable (MGError?) -> Void)? {
         get { state.withLockUnchecked { $0.onStop } }
         set { state.withLockUnchecked { $0.onStop = newValue } }
@@ -75,6 +97,19 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
         CGSize(width: max(minimumCaptureDimension, (native.width * CGFloat(renderScale)).rounded()),
                height: max(minimumCaptureDimension, (native.height * CGFloat(renderScale)).rounded()))
     }
+
+    /// The magnification a frame of `frameSize` carries: only one of the window's full size on a display of two is the
+    /// magnified picture; at a reduced render scale ScreenCaptureKit has made it small already, and on a display of one the
+    /// content is the window's pixels.
+    private static func magnification(of state: State, frameSize: CGSize) -> ContentResolution.Magnification? {
+        guard state.backingScale == 2, Int(frameSize.width) == Int(state.windowPixelSize.width.rounded()),
+              Int(frameSize.height) == Int(state.windowPixelSize.height.rounded()) else { return nil }
+        return state.magnification
+    }
+
+    /// How often a frame is tested while the content's resolution is not known, in frames delivered: a test of a
+    /// 3024x1964 frame takes up to 3 ms of the capture queue.
+    private static let contentTestInterval = 30
 
     /// Surfaces ScreenCaptureKit keeps in its pool. The pipeline holds a frame for as long as the GPU works on it, up to its
     /// buffer depth of them at once; one more waits for a permit, one in the mailbox, and the last one delivered is kept to
@@ -93,7 +128,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
             config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(snapshot.maxFPS))
         }
         config.pixelFormat = kCVPixelFormatType_32BGRA
-        config.showsCursor = snapshot.showsCursor
+        config.showsCursor = false
         // The window's own shadow is not part of what is being scaled. Including it squeezes
         // the shadow and the window into a surface sized for the window alone, so the content
         // lands smaller than the window it is drawn over.
@@ -109,21 +144,24 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
         return config
     }
 
-    func startCapture(target: CaptureTarget, maxFPS: Int, showsCursor: Bool,
+    func startCapture(target: CaptureTarget, maxFPS: Int,
                       renderScale: Float, pipelineDepth: Int) async -> Bool {
         await configurationGate.perform { [self] in
-            await startSerially(target: target, maxFPS: maxFPS, showsCursor: showsCursor, renderScale: renderScale,
+            await startSerially(target: target, maxFPS: maxFPS, renderScale: renderScale,
                                 pipelineDepth: pipelineDepth)
         }
     }
 
-    private func startSerially(target: CaptureTarget, maxFPS: Int, showsCursor: Bool,
+    private func startSerially(target: CaptureTarget, maxFPS: Int,
                                renderScale: Float, pipelineDepth: Int) async -> Bool {
         await stopSerially()
 
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let window = content.windows.first(where: { $0.windowID == target.windowID }) else {
+            guard let window = content.windows.first(where: {
+                $0.windowID == target.windowID
+                    && (target.ownerPID == nil || $0.owningApplication?.processID == target.ownerPID)
+            }) else {
                 state.withLockUnchecked { $0.lastError = .captureWindowNotFound }
                 return false
             }
@@ -133,11 +171,14 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 state.windowFilter = filter
                 state.application = window.owningApplication
                 state.windowFrame = target.frame
+                state.backingScale = target.backingScale
+                state.magnification = nil
+                // Content drawn at one pixel a point is told by how a display of two magnifies it.
+                state.testsContent = target.backingScale == 2
                 state.windowPixelSize = target.pixelSize
                 state.capturePixelSize = Self.scaledSize(target.pixelSize, by: renderScale)
                 state.renderScale = renderScale
                 state.maxFPS = maxFPS
-                state.showsCursor = showsCursor
                 state.pipelineDepth = pipelineDepth
                 state.appWindowsDisplay = nil
                 state.followed = nil
@@ -155,6 +196,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 lastLuma = nil
                 lastPixelBuffer = nil
                 sceneCuts.reset()
+                contentFrames = 0
             }
 
             let stream = SCStream(filter: filter, configuration: makeConfiguration(snapshot), delegate: self)
@@ -204,7 +246,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
     }
 
     private func reconfigureSerially(renderScale: Float?, maxFPS: Int?) async {
-        let update = state.withLockUnchecked { state -> (SCStream, State)? in
+        let update = state.withLockUnchecked { state -> (SCStream, State, State)? in
             guard let stream = state.stream else { return nil }
             var requested = state
             requested.renderScale = renderScale ?? state.renderScale
@@ -214,9 +256,9 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 state.renderScale = requested.renderScale
                 return nil
             }
-            return (stream, requested)
+            return (stream, state, requested)
         }
-        guard let (stream, snapshot) = update else { return }
+        guard let (stream, current, snapshot) = update else { return }
 
         do {
             try await stream.updateConfiguration(makeConfiguration(snapshot))
@@ -228,10 +270,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 $0.lastError = nil
             }
         } catch {
-            state.withLockUnchecked {
-                guard $0.stream === stream else { return }
-                $0.lastError = .captureReconfigurationFailed(error)
-            }
+            await recover(from: error, on: stream, to: current, filter: nil)
         }
     }
 
@@ -258,6 +297,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
 
         var next = current
         next.windowFrame = wanted.target.frame
+        next.backingScale = wanted.target.backingScale
         next.windowPixelSize = wanted.target.pixelSize
         next.capturePixelSize = Self.scaledSize(wanted.target.pixelSize, by: current.renderScale)
 
@@ -285,6 +325,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
             state.withLockUnchecked {
                 guard $0.stream === stream else { return }
                 $0.windowFrame = next.windowFrame
+                $0.backingScale = next.backingScale
                 $0.windowPixelSize = next.windowPixelSize
             }
             return
@@ -297,6 +338,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
             state.withLockUnchecked {
                 guard $0.stream === stream else { return }
                 $0.windowFrame = next.windowFrame
+                $0.backingScale = next.backingScale
                 $0.windowPixelSize = next.windowPixelSize
                 $0.capturePixelSize = next.capturePixelSize
                 $0.appWindowsDisplay = next.appWindowsDisplay
@@ -304,23 +346,68 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 $0.lastError = nil
             }
         } catch {
-            // Back to the window alone, which is what the stream was started with, rather than half of a switch.
-            var fallback = next
-            fallback.appWindowsDisplay = nil
+            // Back to the window alone, which is what the stream was started with, where a switch of what it captures is what
+            // failed, rather than half of a switch; to the configuration it had where a change of size or rectangle did.
             if filter != nil, let windowFilter = current.windowFilter {
-                try? await stream.updateContentFilter(windowFilter)
-                try? await stream.updateConfiguration(makeConfiguration(fallback))
-            }
-            state.withLockUnchecked {
-                guard $0.stream === stream else { return }
-                if filter != nil {
-                    $0.appWindowsDisplay = nil
-                    $0.cutsNext = true
-                }
-                $0.lastError = .captureReconfigurationFailed(error)
+                var fallback = next
+                fallback.appWindowsDisplay = nil
+                await recover(from: error, on: stream, to: fallback, filter: windowFilter)
+            } else {
+                await recover(from: error, on: stream, to: current, filter: nil)
             }
         }
         if filter != nil { state.withLockUnchecked { if $0.stream === stream { $0.isSwitching = false } } }
+    }
+
+    /// After a change the stream would not take: back to `fallback`, which it has run with, so that the session goes on with
+    /// what can be captured, and the error is kept. Only a stream that will not take even that ends the session
+    /// (`configurationFailed`).
+    private func recover(from error: Error, on stream: SCStream, to fallback: State, filter: SCContentFilter?) async {
+        do {
+            if let filter { try await stream.updateContentFilter(filter) }
+            try await stream.updateConfiguration(makeConfiguration(fallback))
+        } catch {
+            configurationFailed(error, on: stream)
+            return
+        }
+        state.withLockUnchecked {
+            guard $0.stream === stream else { return }
+            if filter != nil { $0.cutsNext = true }
+            $0.windowFrame = fallback.windowFrame
+            $0.backingScale = fallback.backingScale
+            $0.windowPixelSize = fallback.windowPixelSize
+            $0.capturePixelSize = fallback.capturePixelSize
+            $0.renderScale = fallback.renderScale
+            $0.maxFPS = fallback.maxFPS
+            $0.appWindowsDisplay = fallback.appWindowsDisplay
+            $0.lastError = .captureReconfigurationFailed(error)
+        }
+    }
+
+    // MARK: - The content's resolution
+
+    /// Now and then, until it is known: whether the window's content is drawn at half its pixels, while the window alone is
+    /// captured at all of them (`ContentResolution`). Capture queue only.
+    private func testContent(_ surface: IOSurfaceRef, of stream: SCStream) {
+        contentFrames += 1
+        guard contentFrames % Self.contentTestInterval == 1, let count = ContentResolution.count(surface) else { return }
+        let verdict = ContentResolution.verdict(of: count)
+        guard verdict != .undecided else { return }
+        state.withLockUnchecked { state in
+            guard state.stream === stream, state.testsContent else { return }
+            state.testsContent = false
+            if case .half(let magnification) = verdict { state.magnification = magnification }
+        }
+    }
+
+    private func configurationFailed(_ error: Error, on stream: SCStream) {
+        let failure = MGError.captureReconfigurationFailed(error)
+        let callback = state.withLockUnchecked { state -> (@Sendable (MGError?) -> Void)? in
+            guard state.stream === stream else { return nil }
+            state.lastError = failure
+            return state.onStop
+        }
+        callback?(failure)
     }
 
     /// The display holding most of `frame`, as AppKit decides a window's screen.
@@ -364,12 +451,22 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
               let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue() else { return }
 
-        let snapshot = state.withLockUnchecked { state -> ((@Sendable (CapturedFrame) -> Void)?, CGSize, Int, Bool)? in
+        let frameSize = CGSize(width: IOSurfaceGetWidth(surface), height: IOSurfaceGetHeight(surface))
+        let snapshot = state.withLockUnchecked { state -> ((@Sendable (CapturedFrame) -> Void)?, CGSize, Int, Bool, Bool,
+                                                            ContentResolution.Magnification?)? in
             guard state.stream === stream, !state.isSwitching else { return nil }
             defer { state.cutsNext = false }
-            return (state.onFrame, state.windowPixelSize, state.maxFPS, state.cutsNext)
+            let magnification = Self.magnification(of: state, frameSize: frameSize)
+            // At the window's full size only: a frame the render scale reduced is not the magnified picture the test reads.
+            let testsContent = state.testsContent && state.appWindowsDisplay == nil && state.backingScale == 2
+                && Int(frameSize.width) == Int(state.windowPixelSize.width.rounded())
+                && Int(frameSize.height) == Int(state.windowPixelSize.height.rounded())
+            // A magnified frame stands for content of half its size.
+            let native = magnification == nil ? state.windowPixelSize
+                : CGSize(width: (state.windowPixelSize.width / 2).rounded(.down), height: (state.windowPixelSize.height / 2).rounded(.down))
+            return (state.onFrame, native, state.maxFPS, state.cutsNext, testsContent, magnification)
         }
-        guard let (callback, native, maxFPS, cutsHere) = snapshot else { return }
+        guard let (callback, native, maxFPS, cutsHere, testsContent, magnification) = snapshot else { return }
 
         // A frame whose pixels match the previous one's carries nothing new. A surface that
         // cannot be sampled is passed through rather than guessed at.
@@ -391,9 +488,10 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
             lastLuma = nil
         }
         lastPixelBuffer = pixelBuffer
+        if testsContent { testContent(surface, of: stream) }
 
         callback?(CapturedFrame(pixelBuffer: pixelBuffer, surface: surface,
                                 captureTime: CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)),
-                                isSceneCut: isSceneCut, nativePixelSize: native))
+                                isSceneCut: isSceneCut, nativePixelSize: native, magnification: magnification))
     }
 }

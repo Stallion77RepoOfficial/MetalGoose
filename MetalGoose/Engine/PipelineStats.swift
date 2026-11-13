@@ -17,7 +17,6 @@ struct PipelineStats: Sendable, Equatable {
     /// Completed command-buffer duration / wall time: a workload budget estimate,
     /// not hardware utilisation. Preemption and overlap can inflate it.
     var gpuLoad: Float = 0
-    var captureGPUTime: Float = 0
     var captureLatency: Float = 0
     var presentLatency: Float = 0
     var endToEndLatency: Float = 0
