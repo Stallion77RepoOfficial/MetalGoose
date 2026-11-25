@@ -43,7 +43,8 @@ def main():
     objects = []
     for i, shader in enumerate(shaders, 2):
         obj = air / (shader.stem + '.air')
-        subprocess.run(['xcrun', 'metal', '-c', '-target', 'air64-apple-macos27.0', '-std=metal4.1',
+        subprocess.run(['xcrun', 'metal', '-c', '-O2', '-fmetal-math-mode=fast',
+                        '-target', 'air64-apple-macos27.0', '-std=metal4.1',
                         '-o', str(obj), str(shader)], check=True)
         objects.append(str(obj))
         progress(i)

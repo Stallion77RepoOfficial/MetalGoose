@@ -25,9 +25,30 @@ import Foundation
 struct PointerMapping: Equatable, Sendable {
 
     /// The captured window, in CoreGraphics coordinates: points, origin at the top-left of the primary display.
-    var window: CGRect
+    var window: CGRect {
+        didSet {
+            if window != oldValue { reachable = Self.computeReachable(window: window, displays: displays) }
+        }
+    }
     /// The displays the cursor can be on, in the same coordinates.
-    var displays: [CGRect]
+    var displays: [CGRect] {
+        didSet {
+            if displays != oldValue { reachable = Self.computeReachable(window: window, displays: displays) }
+        }
+    }
+
+    /// The parts of the window the cursor can be on: the window on each display it overlaps.
+    private(set) var reachable: [CGRect]
+
+    init(window: CGRect, displays: [CGRect]) {
+        self.window = window
+        self.displays = displays
+        self.reachable = Self.computeReachable(window: window, displays: displays)
+    }
+
+    static func == (lhs: PointerMapping, rhs: PointerMapping) -> Bool {
+        lhs.window == rhs.window && lhs.displays == rhs.displays
+    }
 
     /// A cursor held at the far edge of the window is held this far inside it, so that an app that rounds the position
     /// rather than truncating it does not land on the first point past the window. On a 2x display this is the window's
@@ -41,8 +62,7 @@ struct PointerMapping: Equatable, Sendable {
             && abs(window.maxX - overlay.maxX) <= edgeInset && abs(window.maxY - overlay.maxY) <= edgeInset
     }
 
-    /// The parts of the window the cursor can be on: the window on each display it overlaps.
-    var reachable: [CGRect] {
+    private static func computeReachable(window: CGRect, displays: [CGRect]) -> [CGRect] {
         displays.map { window.intersection($0) }.filter { !$0.isNull && $0.width > Self.edgeInset && $0.height > Self.edgeInset }
     }
 

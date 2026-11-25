@@ -41,8 +41,15 @@ enum NeuralModelCache {
         var awaitedUntil: CFTimeInterval = 0
     }
 
-    private static let state = OSAllocatedUnfairLock(initialState: State())
+    private static let condition = NSCondition()
+    nonisolated(unsafe) private static var state = State()
     private static let worker = DispatchQueue(label: "com.metalgoose.neural.models", qos: .utility)
+
+    private static func withState<T>(_ body: (inout State) -> T) -> T {
+        condition.lock()
+        defer { condition.unlock() }
+        return body(&state)
+    }
 
     /// The configuration every session is started with, here and in `NeuralInterpolator`: a model is built for a
     /// configuration, not only a size.
@@ -62,7 +69,7 @@ enum NeuralModelCache {
 
     /// Whether a session at this size starts at once: its model has been built, or a session started at it, in this run.
     static func isBuilt(_ size: NeuralSizes.Size) -> Bool {
-        state.withLock { $0.built.contains(size) }
+        withState { $0.built.contains(size) }
     }
 
     /// Builds the models of a frame size's ladder: `serving`, the rung a session is being started at, by that session, and
@@ -74,23 +81,32 @@ enum NeuralModelCache {
 
     /// A session's start, which builds the model unless it has been built, with nothing else being built meanwhile.
     static func starting<T>(_ size: NeuralSizes.Size, _ start: () throws -> T) rethrows -> T {
-        state.withLock { $0.startingSessions += 1 }
-        defer { state.withLock { $0.startingSessions -= 1 } }
+        withState { $0.startingSessions += 1 }
+        defer {
+            withState {
+                $0.startingSessions -= 1
+                condition.broadcast()
+            }
+        }
         let result = try start()
-        state.withLock { _ = $0.built.insert(size) }
+        withState {
+            _ = $0.built.insert(size)
+            condition.broadcast()
+        }
         return result
     }
 
     // MARK: - Building
 
     private static func enqueue(_ sizes: [NeuralSizes.Size], after serving: NeuralSizes.Size?) {
-        let starts = state.withLock { state -> Bool in
+        let starts = withState { state -> Bool in
             let fresh = sizes.filter { !state.built.contains($0) }
             state.queue = fresh + state.queue.filter { !fresh.contains($0) }
             if let serving {
                 state.awaited = serving
                 state.awaitedUntil = CACurrentMediaTime() + servingWait
             }
+            condition.broadcast()
             guard !state.working, !state.queue.isEmpty else { return false }
             state.working = true
             return true
@@ -101,22 +117,27 @@ enum NeuralModelCache {
     /// The next size to build, once no session is being started and the rung one is being started at has been; nil, which
     /// ends the worker, where there is none.
     private static func next() -> NeuralSizes.Size? {
+        condition.lock()
+        defer { condition.unlock() }
         while true {
-            let (size, waits) = state.withLock { state -> (NeuralSizes.Size?, Bool) in
-                if state.startingSessions > 0 { return (nil, true) }
-                if let awaited = state.awaited {
-                    if !state.built.contains(awaited), CACurrentMediaTime() < state.awaitedUntil { return (nil, true) }
-                    state.awaited = nil
-                }
-                while !state.queue.isEmpty {
-                    let size = state.queue.removeFirst()
-                    if !state.built.contains(size) { return (size, false) }
-                }
-                state.working = false
-                return (nil, false)
+            if state.startingSessions > 0 {
+                condition.wait()
+                continue
             }
-            guard waits else { return size }
-            Thread.sleep(forTimeInterval: 0.05)
+            if let awaited = state.awaited {
+                let remaining = state.awaitedUntil - CACurrentMediaTime()
+                if !state.built.contains(awaited), remaining > 0 {
+                    condition.wait(until: Date(timeIntervalSinceNow: remaining))
+                    continue
+                }
+                state.awaited = nil
+            }
+            while !state.queue.isEmpty {
+                let size = state.queue.removeFirst()
+                if !state.built.contains(size) { return size }
+            }
+            state.working = false
+            return nil
         }
     }
 
@@ -125,7 +146,10 @@ enum NeuralModelCache {
         guard let configuration = configuration(for: size) else { return }
         let session = VTFrameProcessor()
         do { try session.startSession(configuration: configuration) } catch { return }
-        state.withLock { _ = $0.built.insert(size) }
+        withState {
+            _ = $0.built.insert(size)
+            condition.broadcast()
+        }
         session.endSession()
     }
 

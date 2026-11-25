@@ -59,7 +59,10 @@ final class OverlayWindowManager {
     private var drawsPointer = true
 
     private var activationObserver: NSObjectProtocol?
+    private var screenObserver: NSObjectProtocol?
     private var pollTimer: Timer?
+    private var cachedDisplayBounds: [CGRect] = ScreenGeometry.displayBounds
+    private var screenParametersDirty = false
 
     /// How often the captured window is looked at again. Position and size come from the window
     /// server, one small synchronous call, and the overlay should follow a dragged or resized window
@@ -80,12 +83,12 @@ final class OverlayWindowManager {
         var height = cgFrame.height * outputScale
         if width > 0, height > 0 {
             let fit = min(1.0, min(bounds.width / width, bounds.height / height))
-            width *= fit
-            height *= fit
+            width = (width * fit).rounded()
+            height = (height * fit).rounded()
         }
 
-        let x = min(max(windowCocoa.midX - width / 2, bounds.minX), bounds.maxX - width)
-        let y = min(max(windowCocoa.midY - height / 2, bounds.minY), bounds.maxY - height)
+        let x = min(max((windowCocoa.midX - width / 2).rounded(), bounds.minX), bounds.maxX - width)
+        let y = min(max((windowCocoa.midY - height / 2).rounded(), bounds.minY), bounds.maxY - height)
         return CGRect(x: x, y: y, width: width, height: height)
     }
 
@@ -94,10 +97,12 @@ final class OverlayWindowManager {
     func setOutputScale(_ scale: CGFloat, fillsScreen: Bool) {
         outputScale = max(1.0, scale)
         self.fillsScreen = fillsScreen
+        if window != nil { refresh() }
     }
 
     func setAlignsPointer(_ enabled: Bool) {
         alignsPointer = enabled
+        if window != nil { refresh() }
     }
 
     func setDrawsPointer(_ draws: Bool) {
@@ -159,12 +164,26 @@ final class OverlayWindowManager {
 
         let view = OverlayView(frame: CGRect(origin: .zero, size: frame.size))
         view.drawsPointer = drawsPointer
+        view.metalLayer.colorspace = ScreenGeometry.metalColorSpace(of: configuration.screen)
         window.contentView = view
         window.orderFrontRegardless()
 
         self.window = window
         self.view = view
         isPresenting = true
+        cachedDisplayBounds = ScreenGeometry.displayBounds
+        screenParametersDirty = false
+
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.cachedDisplayBounds = ScreenGeometry.displayBounds
+                self.screenParametersDirty = true
+                self.refresh()
+            }
+        }
 
         MouseConstraintManager.shared.onPointerChange = { [weak view] fraction in view?.setPointer(fraction) }
         return view.metalLayer
@@ -174,6 +193,10 @@ final class OverlayWindowManager {
         if let observer = activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             activationObserver = nil
+        }
+        if let observer = screenObserver {
+            NotificationCenter.default.removeObserver(observer)
+            screenObserver = nil
         }
         pollTimer?.invalidate()
         pollTimer = nil
@@ -194,7 +217,10 @@ final class OverlayWindowManager {
         targetWindowID = windowID
         targetPID = pid
         // What the stream was started with: the window alone, where the overlay was created.
-        followed = (CaptureTarget(windowID: windowID, frame: targetFrame, backingScale: targetBackingScale), false)
+        let initialScreen = ScreenGeometry.screen(containing: targetFrame)
+        followed = (CaptureTarget(windowID: windowID, frame: targetFrame, backingScale: targetBackingScale,
+                                  ownerPID: pid,
+                                  colorSpaceName: initialScreen.map(ScreenGeometry.captureColorSpaceName(of:))), false)
         // Seeded from the world rather than assumed, so the overlay does not show itself over an app
         // the user never left MetalGoose for. The observer only fires on a change, and starting a
         // capture from MetalGoose's own window means the first change is the one that brings the
@@ -290,13 +316,18 @@ final class OverlayWindowManager {
         let cgFrame = CGRect(x: x, y: y, width: width, height: height)
         guard let screen = ScreenGeometry.screen(containing: cgFrame) else { return }
         let id = ScreenGeometry.displayID(of: screen)
-        if let rate = ScreenGeometry.displayRate(of: screen), id != targetDisplayID || rate != targetDisplayRate {
-            targetDisplayID = id
-            targetDisplayRate = rate
-            onDisplayChanged?(screen, rate)
+        if id != targetDisplayID || screenParametersDirty {
+            screenParametersDirty = false
+            if let rate = ScreenGeometry.displayRate(of: screen), id != targetDisplayID || rate != targetDisplayRate {
+                targetDisplayID = id
+                targetDisplayRate = rate
+                view.metalLayer.colorspace = ScreenGeometry.metalColorSpace(of: screen)
+                onDisplayChanged?(screen, rate)
+            }
         }
 
-        let target = CaptureTarget(windowID: targetWindowID, frame: cgFrame, backingScale: screen.backingScaleFactor)
+        let target = CaptureTarget(windowID: targetWindowID, frame: cgFrame, backingScale: screen.backingScaleFactor,
+                                   ownerPID: targetPID, colorSpaceName: ScreenGeometry.captureColorSpaceName(of: screen))
         let covered = coversTarget(cgFrame, layer: (info[kCGWindowLayer as String] as? Int) ?? 0)
         if let followed, followed.target != target || followed.covered != covered {
             onTargetChanged?(target, covered)
@@ -319,7 +350,7 @@ final class OverlayWindowManager {
             mouse.stopConstraining()
             return
         }
-        let displays = ScreenGeometry.displayBounds
+        let displays = cachedDisplayBounds
         if mouse.isConstraining {
             mouse.update(window: cgFrame, displays: displays)
         } else {

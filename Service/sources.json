@@ -1,6 +1,7 @@
 [
   "MetalGoose/App/GlobalHotkeyManager.swift",
   "MetalGoose/App/PermissionManager.swift",
+  "MetalGoose/App/ScalingSession.swift",
   "MetalGoose/Capture/CapturedFrame.swift",
   "MetalGoose/Capture/ContentResolution.swift",
   "MetalGoose/Capture/FrameSampler.swift",

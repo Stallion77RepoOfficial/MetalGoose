@@ -51,6 +51,8 @@ enum ContentResolution {
     /// How far apart the two estimates of a content pixel may be, in 8-bit steps of twice its luma: rounding each channel of
     /// the magnified picture to eight bits moves the difference by up to 4.
     private static let tolerance = 6
+    /// Nearest-neighbour magnification repeats each content pixel as a 2x2 block, so the two pixels differ by at most 1 luma step.
+    private static let nearestTolerance = 1
     private static let fewestEdges = 500
 
     static func verdict(of count: Count) -> Verdict {
@@ -74,7 +76,9 @@ enum ContentResolution {
     }
 
     static func count(_ base: UnsafePointer<UInt8>, width: Int, height: Int, bytesPerRow: Int) -> Count {
-        let edge = Self.edge * 256, tolerance = Self.tolerance * 256
+        let edge = Self.edge * 256
+        let bilinearTolerance = Self.tolerance * 256
+        let nearestTolerance = Self.nearestTolerance * 256
         var count = Count()
         // Content pixel i covers the picture's 2i and 2i+1; the first and the last are left out, where the magnification
         // clamps at the edge of the content.
@@ -83,8 +87,8 @@ enum ContentResolution {
                 let l0 = line[2 * i - 1], l1 = line[2 * i], l2 = line[2 * i + 1], l3 = line[2 * i + 2]
                 guard max(abs(l1 - l0), abs(l2 - l1), abs(l3 - l2)) >= edge else { continue }
                 count.edges += 1
-                if abs((3 * l2 - l3) - (3 * l1 - l0)) > tolerance { count.breaks += 1 }
-                if abs(l2 - l1) > tolerance { count.nearestBreaks += 1 }
+                if abs((3 * l2 - l3) - (3 * l1 - l0)) > bilinearTolerance { count.breaks += 1 }
+                if abs(l2 - l1) > nearestTolerance { count.nearestBreaks += 1 }
             }
         }
         // Luma at 256 times the scale of a channel, unrounded, so that it is as linear in the channels as they are.

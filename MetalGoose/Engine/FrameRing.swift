@@ -45,6 +45,15 @@ final class FrameRing: @unchecked Sendable {
         frames.withLockUnchecked { $0.filter { $0.validity.isValid } }
     }
 
+    func snapshot(into destination: inout [FrameHistory]) {
+        destination.removeAll(keepingCapacity: true)
+        frames.withLockUnchecked { stored in
+            for frame in stored where frame.validity.isValid {
+                destination.append(frame)
+            }
+        }
+    }
+
     func clear() {
         frames.withLockUnchecked { $0.removeAll() }
     }

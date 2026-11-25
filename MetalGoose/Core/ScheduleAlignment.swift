@@ -86,8 +86,17 @@ enum ScheduleAlignment {
         // How a delay does: how clear of the half-steps its samples are, and how long after the first image of a pair is
         // expected that image is first wanted. The first sample past the half-step into the first image comes `firstPast`
         // steps after it, so the image is wanted half a step and that much into the pair.
+        let refreshes = Int((captureInterval / refreshPeriod).rounded())
+        let sampleCount: Int
+        if refreshes >= 1 && abs(captureInterval / refreshPeriod - Double(refreshes)) < 1e-6 {
+            sampleCount = min(samples, refreshes / gcd(refreshes, steps))
+        } else {
+            sampleCount = samples
+        }
+
         func judge(_ delay: CFTimeInterval) -> (clearance: Double, room: CFTimeInterval) {
-            let landing = Self.landing(delay: delay, phase: phase, refreshPeriod: refreshPeriod, step: step)
+            let landing = Self.landing(delay: delay, phase: phase, refreshPeriod: refreshPeriod,
+                                       step: step, sampleCount: sampleCount)
             return (landing.clearance, delay + (0.5 + landing.firstPast) * step - due)
         }
 
@@ -97,16 +106,28 @@ enum ScheduleAlignment {
         let grain = refreshPeriod / Double(candidates)
         let first = Int((lowest / grain).rounded(.up))
         let last = Int(((lowest + span) / grain).rounded(.up))
-        let tried = (first...last).map { candidate -> (delay: CFTimeInterval, clearance: Double, room: CFTimeInterval) in
-            let delay = Double(candidate) * grain
-            let verdict = judge(delay)
-            return (delay, verdict.clearance, verdict.room)
+        guard first <= last else { return nil }
+
+        var clearest: Double = -1
+        for candidate in first...last {
+            let verdict = judge(Double(candidate) * grain)
+            if verdict.room >= margin && verdict.clearance > clearest {
+                clearest = verdict.clearance
+            }
         }
-        guard let clearest = tried.filter({ $0.room >= margin }).map(\.clearance).max() else { return nil }
+        guard clearest >= 0 else { return nil }
+
         // Clear enough is `clearance`, or the clearest there is where nothing is that clear: more only costs latency.
         let enough = min(clearest, max(Self.clearance, Self.leastClearance / step)) * 0.999
         func shortest(withRoom room: CFTimeInterval) -> CFTimeInterval? {
-            tried.first { $0.room >= room && $0.clearance >= enough }?.delay
+            for candidate in first...last {
+                let delay = Double(candidate) * grain
+                let verdict = judge(delay)
+                if verdict.room >= room && verdict.clearance >= enough {
+                    return delay
+                }
+            }
+            return nil
         }
 
         if let current {
@@ -124,14 +145,25 @@ enum ScheduleAlignment {
         return shortest(withRoom: margin)
     }
 
+    private static func gcd(_ a: Int, _ b: Int) -> Int {
+        var x = abs(a)
+        var y = abs(b)
+        while y != 0 {
+            let t = x % y
+            x = y
+            y = t
+        }
+        return max(1, x)
+    }
+
     /// Where the samples land within the steps, at this delay, in steps: `clearance` is how far the nearest one is from a
     /// half-step (0.5 when every sample is on an image, 0 when one is on a half-step), and `firstPast` how little past a
     /// half-step a sample can be.
     static func landing(delay: CFTimeInterval, phase: CFTimeInterval, refreshPeriod: CFTimeInterval,
-                        step: CFTimeInterval) -> (clearance: Double, firstPast: Double) {
+                        step: CFTimeInterval, sampleCount: Int = samples) -> (clearance: Double, firstPast: Double) {
         var clearance = 0.5
         var firstPast = 1.0
-        for n in 0..<samples {
+        for n in 0..<sampleCount {
             let position = (Double(n) * refreshPeriod + phase - delay) / step
             let past = (position - 0.5) - (position - 0.5).rounded(.down)
             firstPast = min(firstPast, past)

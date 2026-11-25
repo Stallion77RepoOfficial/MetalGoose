@@ -4,7 +4,12 @@
 #include "ShaderCommon.h"
 
 // BT.709 luma and chroma weights.
-constant half3 kLumaWeights = half3(0.2126h, 0.7152h, 0.0722h);
+constant float3 kLumaWeights = float3(0.2126f, 0.7152f, 0.0722f);
+constant float kLumaScale = 219.0f / 255.0f;
+constant float kLumaOffset = 16.0f / 255.0f;
+constant float kChromaScaleCb = (224.0f / 255.0f) / 1.8556f;
+constant float kChromaScaleCr = (224.0f / 255.0f) / 1.5748f;
+constant float kChromaOffset = 128.0f / 255.0f;
 
 /// One 2x2 block of BGRA pixels -> its four luma values and the one chroma pair of their average.
 ///
@@ -12,17 +17,18 @@ constant half3 kLumaWeights = half3(0.2126h, 0.7152h, 0.0722h);
 inline void writeBlock(const thread half3 (&rgb)[4], texture2d<half, access::write> luma,
                        texture2d<half, access::write> chroma, uint2 gid) {
     const uint2 base = gid * 2;
-    half3 average = half3(0.0h);
+    float3 average = float3(0.0f);
     for (uint k = 0; k < 4; ++k) {
+        const float3 c = float3(rgb[k]);
         // Video range: black is 16/255 and white 235/255.
-        luma.write(half4((16.0h + dot(rgb[k], kLumaWeights) * 219.0h) / 255.0h), base + uint2(k & 1, k >> 1));
-        average += rgb[k] * 0.25h;
+        luma.write(half4(half(fma(dot(c, kLumaWeights), kLumaScale, kLumaOffset))), base + uint2(k & 1, k >> 1));
+        average += c * 0.25f;
     }
 
-    const half y = dot(average, kLumaWeights);
-    const half cb = (average.b - y) / 1.8556h;
-    const half cr = (average.r - y) / 1.5748h;
-    chroma.write(half4((128.0h + cb * 224.0h) / 255.0h, (128.0h + cr * 224.0h) / 255.0h, 0.0h, 1.0h), gid);
+    const float y = dot(average, kLumaWeights);
+    const float cb = fma(average.b - y, kChromaScaleCb, kChromaOffset);
+    const float cr = fma(average.r - y, kChromaScaleCr, kChromaOffset);
+    chroma.write(half4(half(cb), half(cr), 0.0h, 1.0h), gid);
 }
 
 /// BGRA -> luma plane (full resolution) and interleaved CbCr plane (half resolution).

@@ -175,7 +175,7 @@ struct BackendMetrics: Encodable {
 
 struct BackendStatus: Encodable {
     let backend = "MetalGoose"
-    let version = "1.2.4-goosehub.2"
+    let version = "1.2.5-goosehub.2"
     let architecture = "arm64"
     let minimumMacOS = "27.0"
     let screenRecordingGranted: Bool

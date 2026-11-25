@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 @preconcurrency import Metal
 import QuartzCore
 import os
@@ -36,13 +37,15 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     private var layer: CAMetalLayer?
     /// Whether images are presented at their own times (`presenter`) rather than on the link's refreshes.
     private var variableRefresh = false
+    private var colorSpace: CGColorSpace?
     private var presenter: PresentationThread?
     private var isPaused = false
 
-    init(shared: EngineShared, pipeline: RenderPipeline, displayRate: DisplayRate) {
+    init(shared: EngineShared, pipeline: RenderPipeline, displayRate: DisplayRate, colorSpace: CGColorSpace? = nil) {
         self.shared = shared
         self.pipeline = pipeline
         self.displayRate = OSAllocatedUnfairLock(initialState: displayRate)
+        self.colorSpace = colorSpace
         super.init()
     }
 
@@ -52,7 +55,7 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     @MainActor
     func start(layer: CAMetalLayer) {
         let config = shared.config.withLock { $0 }
-        configure(layer: layer, config: config)
+        configure(layer: layer, config: config, colorSpace: colorSpace)
         let drawables = layer.residencySet
         shared.gpu.render.queue.addResidencySet(drawables)
         self.drawables = drawables
@@ -105,9 +108,15 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
 
     /// Re-applies what depends on the settings, from the main thread.
     @MainActor
-    func configure(layer: CAMetalLayer, config: EngineConfig) {
+    func configure(layer: CAMetalLayer, config: EngineConfig, colorSpace: CGColorSpace? = nil) {
         layer.device = shared.gpu.device
         layer.pixelFormat = GPUContext.drawablePixelFormat
+        if let colorSpace {
+            self.colorSpace = colorSpace
+            layer.colorspace = colorSpace
+        } else if let current = self.colorSpace {
+            layer.colorspace = current
+        }
         // The pipeline copies into the drawable, which a framebuffer-only texture does not allow.
         layer.framebufferOnly = false
         layer.presentsWithTransaction = false
@@ -171,13 +180,11 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             // 120 Hz, measured), which the link's frame latency already counts: one refresh less ahead than the link keeps
             // about its latency. At least half a refresh, for the image to be encoded in.
             let latency = max(Double(Self.frameLatency(for: shared.config.withLock { $0 })) - 1, 0.5) * period
-            pipeline.render(drawable: { layer.nextDrawable() }, displayRate: rate,
-                            targetTime: CACurrentMediaTime() + latency, atImageTime: true)
-            // An image is taken up at most a quarter refresh after its moment, which leaves most of the lead to encode it
-            // in; taken up every half refresh, some at 90 a second missed their time. Sleeping until the plan's next image
-            // instead, and waking for each capture, took 0.4 to 0.5% of a core less but left the timing off by more in
-            // 14 of 26 runs against 7, measured.
-            return period / 4
+            let active = pipeline.render(drawable: { layer.nextDrawable() }, displayRate: rate,
+                                         targetTime: CACurrentMediaTime() + latency, atImageTime: true)
+            // An image is taken up at most a quarter refresh after its moment while active; when idle, polling once per
+            // refresh cuts wakeups 4x while keeping pointer/HUD redraws responsive.
+            return active ? period / 4 : period
         }
         presenter.setPaused(isPaused)
         presenter.start()
@@ -196,7 +203,12 @@ final class RenderDriver: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         Float(min(max(2, config.bufferDepth), GooseEngine.maxInFlight) - 1)
     }
 
-    func updateDisplayRate(_ rate: DisplayRate) {
+    @MainActor
+    func updateDisplayRate(_ rate: DisplayRate, colorSpace: CGColorSpace? = nil) {
+        if let colorSpace {
+            self.colorSpace = colorSpace
+            layer?.colorspace = colorSpace
+        }
         let changed = displayRate.withLock { current -> Bool in
             guard current != rate else { return false }
             current = rate
@@ -265,6 +277,12 @@ private final class PresentationThread: Thread, @unchecked Sendable {
     /// How long a paused presenter sleeps between looks at whether it still is.
     private static let pausedNap: CFTimeInterval = 0.05
 
+    private static let ticksPerSecond: Double = {
+        var info = mach_timebase_info_data_t()
+        guard mach_timebase_info(&info) == KERN_SUCCESS, info.numer > 0 else { return 1_000_000_000 }
+        return 1_000_000_000.0 * Double(info.denom) / Double(info.numer)
+    }()
+
     init(pass: @escaping @Sendable () -> CFTimeInterval) {
         self.pass = pass
         super.init()
@@ -277,9 +295,18 @@ private final class PresentationThread: Thread, @unchecked Sendable {
     }
 
     override func main() {
+        var nextWake = mach_absolute_time()
         while !isCancelled {
-            let nap = paused.withLock { $0 } ? Self.pausedNap : autoreleasepool { pass() }
-            Thread.sleep(forTimeInterval: nap)
+            let isPaused = paused.withLock { $0 }
+            let nap = isPaused ? Self.pausedNap : autoreleasepool { pass() }
+            let intervalTicks = UInt64(max(0.0005, nap) * Self.ticksPerSecond)
+            let now = mach_absolute_time()
+            if isPaused || now > nextWake + intervalTicks {
+                nextWake = now + intervalTicks
+            } else {
+                nextWake &+= intervalTicks
+            }
+            mach_wait_until(nextWake)
         }
         stopped.signal()
     }

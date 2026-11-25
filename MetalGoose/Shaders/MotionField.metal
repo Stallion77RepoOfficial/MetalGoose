@@ -7,7 +7,7 @@
 /// bounded size, so the output may be smaller than the input by a whole divisor: each texel is the mean of
 /// the block of pixels it covers.
 kernel void bgraToLuma(
-    texture2d<half, access::read> input [[texture(0)]],
+    texture2d<half, access::sample> input [[texture(0)]],
     texture2d<half, access::write> output [[texture(1)]],
     constant uint& divisor [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
@@ -15,6 +15,18 @@ kernel void bgraToLuma(
     uint width = output.get_width();
     uint height = output.get_height();
     if (gid.x >= width || gid.y >= height) return;
+
+    if (divisor <= 1) {
+        output.write(half4(rgb2luma(input.read(clampCoord(int2(gid), input.get_width(), input.get_height())).rgb),
+                           0.0h, 0.0h, 1.0h), gid);
+        return;
+    }
+    if (divisor == 2) {
+        constexpr sampler linearSampler(filter::linear, address::clamp_to_edge, coord::normalized);
+        float2 uv = (float2(gid) * 2.0f + 1.0f) / float2(input.get_width(), input.get_height());
+        output.write(half4(rgb2luma(input.sample(linearSampler, uv).rgb), 0.0h, 0.0h, 1.0h), gid);
+        return;
+    }
 
     float sum = 0.0f;
     for (uint dy = 0; dy < divisor; dy++) {
@@ -120,13 +132,13 @@ kernel void despeckleMotion(
             ++n;
         }
     }
+    float2 v = float2(xs[4], ys[4]);
     const float2 median = float2(medianOfNine(xs), medianOfNine(ys));
     const float2 frame = globalMotion;
 
     // Distances scale with the frame, so a 4K capture and a 720p one are judged alike.
     const float slack = 0.02f * frameWidth;
 
-    float2 v = float2(input.read(gid).xy);
     if (length(v - median) > max(slack, length(median))) v = median;
     if (length(v - frame) > 2.0f * max(length(frame), slack)) v = frame;
     output.write(half4(half(v.x), half(v.y), 0.0h, 1.0h), gid);

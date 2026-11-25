@@ -16,6 +16,7 @@ struct FrameSample {
 
 enum FrameSampler {
     private static let gridSize = 64
+    static let lumaCount = gridSize * gridSize
 
     /// A fixed sample budget, deliberately not derived from the frame size: this runs on the
     /// capture thread for every frame, so its cost must stay flat as resolution rises. A
@@ -59,42 +60,64 @@ enum FrameSampler {
     }
 
     static func sample(_ surface: IOSurfaceRef) -> FrameSample? {
+        var luma = [UInt8](repeating: 0, count: lumaCount)
+        guard let result = sample(surface, luma: &luma) else { return nil }
+        return FrameSample(signature: result.signature, luma: luma)
+    }
+
+    /// Samples `surface` into a caller-owned `luma` buffer (`lumaCount` bytes) under a single IOSurface lock,
+    /// optionally running `ContentResolution.count` on the same locked base pointer.
+    static func sample(_ surface: IOSurfaceRef, luma: inout [UInt8],
+                       testContent: Bool = false) -> (signature: UInt64, contentCount: ContentResolution.Count?)? {
         guard IOSurfaceLock(surface, .readOnly, nil) == kIOReturnSuccess else { return nil }
         defer { IOSurfaceUnlock(surface, .readOnly, nil) }
 
         let width = IOSurfaceGetWidth(surface)
         let height = IOSurfaceGetHeight(surface)
         let bytesPerRow = IOSurfaceGetBytesPerRow(surface)
-        guard width > 0, height > 0, bytesPerRow > 0 else { return nil }
+        guard width > 0, height > 0, bytesPerRow >= width * 4 else { return nil }
 
         let base = IOSurfaceGetBaseAddress(surface).assumingMemoryBound(to: UInt8.self)
+        if luma.count != lumaCount { luma = [UInt8](repeating: 0, count: lumaCount) }
+
         let blockArea = blockSpan * blockSpan
         var hash: UInt64 = 0xcbf29ce484222325
-        var luma = [UInt8](repeating: 0, count: gridSize * gridSize)
 
-        for gy in 0..<gridSize {
-            let y = (height - 1) * gy / (gridSize - 1)
-            let row = base + y * bytesPerRow
-            for gx in 0..<gridSize {
-                let x = (width - 1) * gx / (gridSize - 1)
-                let pixel = row + x * 4
-                let value = UInt32(pixel[0]) | (UInt32(pixel[1]) << 8) |
-                            (UInt32(pixel[2]) << 16) | (UInt32(pixel[3]) << 24)
-                hash = (hash ^ UInt64(value)) &* 0x100000001b3
+        // Precompute the 64 column coordinates once rather than dividing 4,096 times inside the loop.
+        var xCoords = [Int](repeating: 0, count: gridSize)
+        for gx in 0..<gridSize { xCoords[gx] = (width - 1) * gx / (gridSize - 1) }
 
-                // Clamped so the block never leaves the surface at the right and bottom
-                // edges, where the grid point is the last pixel.
-                var sum = 0
-                for by in 0..<blockSpan {
-                    let blockRow = base + min(height - 1, y + by) * bytesPerRow
-                    for bx in 0..<blockSpan {
-                        let p = blockRow + min(width - 1, x + bx) * 4
-                        sum += Int((UInt16(p[2]) * 54 + UInt16(p[1]) * 183 + UInt16(p[0]) * 19) >> 8)
-                    }
+        luma.withUnsafeMutableBufferPointer { lumaBuffer in
+            for gy in 0..<gridSize {
+                let y = (height - 1) * gy / (gridSize - 1)
+                let y1 = min(height - 1, y + 1)
+                let row0 = base + y * bytesPerRow
+                let row1 = base + y1 * bytesPerRow
+                let rowBase = gy * gridSize
+
+                for gx in 0..<gridSize {
+                    let x = xCoords[gx]
+                    let p00 = row0 + x * 4
+                    let value = UInt32(p00[0]) | (UInt32(p00[1]) << 8)
+                              | (UInt32(p00[2]) << 16) | (UInt32(p00[3]) << 24)
+                    hash = (hash ^ UInt64(value)) &* 0x100000001b3
+
+                    let x1Offset = min(width - 1, x + 1) * 4
+                    let p01 = row0 + x1Offset
+                    let p10 = row1 + x * 4
+                    let p11 = row1 + x1Offset
+                    let sum = Int((UInt16(p00[2]) * 54 + UInt16(p00[1]) * 183 + UInt16(p00[0]) * 19) >> 8)
+                            + Int((UInt16(p01[2]) * 54 + UInt16(p01[1]) * 183 + UInt16(p01[0]) * 19) >> 8)
+                            + Int((UInt16(p10[2]) * 54 + UInt16(p10[1]) * 183 + UInt16(p10[0]) * 19) >> 8)
+                            + Int((UInt16(p11[2]) * 54 + UInt16(p11[1]) * 183 + UInt16(p11[0]) * 19) >> 8)
+                    lumaBuffer[rowBase + gx] = UInt8(min(255, sum / blockArea))
                 }
-                luma[gy * gridSize + gx] = UInt8(min(255, sum / blockArea))
             }
         }
-        return FrameSample(signature: hash, luma: luma)
+
+        let contentCount = testContent && width >= 8 && height >= 8
+            ? ContentResolution.count(base, width: width, height: height, bytesPerRow: bytesPerRow)
+            : nil
+        return (hash, contentCount)
     }
 }

@@ -147,7 +147,7 @@ final class AutoUpdater: ObservableObject {
         }
     }
 
-    private static func isGitHubHTTPS(_ url: URL) -> Bool {
+    private nonisolated static func isGitHubHTTPS(_ url: URL) -> Bool {
         guard url.scheme == "https", let host = url.host()?.lowercased() else { return false }
         return host == "github.com" || host.hasSuffix(".github.com")
             || host == "githubusercontent.com" || host.hasSuffix(".githubusercontent.com")
@@ -165,6 +165,10 @@ final class AutoUpdater: ObservableObject {
             }
         }
         let (file, response) = try await URLSession.shared.download(for: request, delegate: progress)
+        if progress.blockedUntrustedRedirect {
+            try? FileManager.default.removeItem(at: file)
+            throw UpdateError.untrustedSource
+        }
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
             try? FileManager.default.removeItem(at: file)
             throw UpdateError.http(http.statusCode)
@@ -173,10 +177,23 @@ final class AutoUpdater: ObservableObject {
     }
 
     /// Reports the real byte count from the transfer instead of guessing it from the size of the file
-    /// on disk.
+    /// on disk, and blocks redirects to hosts outside GitHub HTTPS.
     private final class DownloadProgress: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
         private let report: @Sendable (Double) -> Void
+        private(set) var blockedUntrustedRedirect = false
         init(report: @escaping @Sendable (Double) -> Void) { self.report = report }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            guard let url = request.url, AutoUpdater.isGitHubHTTPS(url) else {
+                blockedUntrustedRedirect = true
+                completionHandler(nil)
+                return
+            }
+            completionHandler(request)
+        }
 
         func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
                         totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
@@ -230,12 +247,36 @@ final class AutoUpdater: ObservableObject {
         }
         var signed: SecStaticCode?
         let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckNestedCode | kSecCSCheckAllArchitectures)
-        guard SecStaticCodeCreateWithPath(newApp as CFURL, [], &signed) == errSecSuccess, let signed,
-              SecStaticCodeCheckValidity(signed, flags, nil) == errSecSuccess else { throw UpdateError.invalidApp }
+        guard SecStaticCodeCreateWithPath(newApp as CFURL, [], &signed) == errSecSuccess, let signed else {
+            throw UpdateError.invalidApp
+        }
+        let requirement = Self.expectedRequirement(for: bundle.bundleIdentifier)
+        guard SecStaticCodeCheckValidity(signed, flags, requirement) == errSecSuccess else { throw UpdateError.invalidApp }
 
         let current = Bundle.main.bundleURL
         _ = try fileManager.replaceItemAt(current, withItemAt: newApp)
         return current
+    }
+
+    private nonisolated static func expectedRequirement(for bundleIdentifier: String?) -> SecRequirement? {
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return nil }
+        var selfCode: SecCode?
+        guard SecCodeCopySelf([], &selfCode) == errSecSuccess, let selfCode else { return nil }
+        var staticSelf: SecStaticCode?
+        guard SecCodeCopyStaticCode(selfCode, [], &staticSelf) == errSecSuccess, let staticSelf else { return nil }
+        var infoCF: CFDictionary?
+        guard SecCodeCopySigningInformation(staticSelf, SecCSFlags(rawValue: kSecCSSigningInformation), &infoCF) == errSecSuccess,
+              let info = infoCF as? [String: Any],
+              let teamID = info[kSecCodeInfoTeamIdentifier as String] as? String, !teamID.isEmpty else {
+            // Ad-hoc builds carry no Team ID, so validate strict signature without pinning a leaf OU.
+            return nil
+        }
+        let escapedID = bundleIdentifier.replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedTeam = teamID.replacingOccurrences(of: "\"", with: "\\\"")
+        var requirement: SecRequirement?
+        let source = "identifier \"\(escapedID)\" and certificate leaf[subject.OU] = \"\(escapedTeam)\"" as CFString
+        guard SecRequirementCreateWithString(source, [], &requirement) == errSecSuccess else { return nil }
+        return requirement
     }
 
     private nonisolated static func removeQuarantine(at url: URL) {
@@ -246,13 +287,13 @@ final class AutoUpdater: ObservableObject {
         xattr.waitUntilExit()
     }
 
-    /// Waits for this process to exit, then opens the new bundle.
+    /// Waits for this process to exit (up to 30 seconds), then opens the new bundle.
     private static func relaunch(_ app: URL) {
         let pid = ProcessInfo.processInfo.processIdentifier
         let quotedPath = app.path.replacingOccurrences(of: "'", with: "'\\''")
         let shell = Process()
         shell.executableURL = URL(fileURLWithPath: "/bin/sh")
-        shell.arguments = ["-c", "while /bin/kill -0 \(pid) 2>/dev/null; do sleep 0.1; done; open -n '\(quotedPath)'"]
+        shell.arguments = ["-c", "n=0; while /bin/kill -0 \(pid) 2>/dev/null; do n=$((n+1)); [ $n -ge 300 ] && exit 0; sleep 0.1; done; open -n '\(quotedPath)'"]
         shell.standardOutput = FileHandle.nullDevice
         shell.standardError = FileHandle.nullDevice
         try? shell.run()

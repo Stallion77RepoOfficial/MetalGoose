@@ -29,6 +29,8 @@ struct CaptureTarget: Sendable, Equatable {
     let backingScale: CGFloat
     /// An explicit caller binds a window to its owning process at ScreenCaptureKit selection too.
     var ownerPID: Int32? = nil
+    /// Preferred capture color space (e.g. Display P3 or sRGB matching the target display).
+    var colorSpaceName: String? = nil
 
     var pixelSize: CGSize { CGSize(width: frame.width * backingScale, height: frame.height * backingScale) }
 }

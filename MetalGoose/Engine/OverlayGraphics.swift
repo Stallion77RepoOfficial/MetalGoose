@@ -40,6 +40,10 @@ final class OverlayGraphics: @unchecked Sendable {
     private let state = OSAllocatedUnfairLock<State>(uncheckedState: State())
     /// Where the HUD's images are turned into textures, in the order they were given, off the main thread.
     private let uploads = DispatchQueue(label: "com.metalgoose.graphics", qos: .userInitiated)
+    /// Ping-pong HUD textures & staging buffer confined to `uploads` so 1 Hz HUD refreshes never reallocate.
+    private var hudTextures: [(any MTLTexture)?] = [nil, nil]
+    private var hudSlot = 0
+    private var hudBytes: [UInt8] = []
 
     init(device: any MTLDevice) {
         self.device = device
@@ -49,7 +53,17 @@ final class OverlayGraphics: @unchecked Sendable {
     /// next image on whose texture is ready.
     func setHUD(_ image: CGImage?, origin: CGPoint) {
         uploads.async { [self] in
-            let sprite = image.flatMap { Self.texture(from: $0, device: device) }.map { Sprite(texture: $0, anchor: .zero) }
+            guard let image else {
+                hudTextures = [nil, nil]
+                hudBytes.removeAll(keepingCapacity: false)
+                state.withLockUnchecked {
+                    $0.hud = nil
+                    $0.hudGeneration &+= 1
+                }
+                return
+            }
+            let texture = hudTexture(from: image)
+            let sprite = texture.map { Sprite(texture: $0, anchor: .zero) }
             state.withLockUnchecked {
                 $0.hud = sprite.map { ($0, origin) }
                 $0.hudGeneration &+= 1
@@ -76,6 +90,62 @@ final class OverlayGraphics: @unchecked Sendable {
             snapshot.pointer = (pointer, fraction)
         }
         return snapshot
+    }
+
+    private func ensureHUDTexture(width: Int, height: Int) -> (any MTLTexture)? {
+        let slot = hudSlot
+        hudSlot = (hudSlot + 1) & 1
+        if let existing = hudTextures[slot], existing.width == width, existing.height == height {
+            return existing
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: GPUContext.drawablePixelFormat,
+                                                                  width: width, height: height, mipmapped: false)
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        let created = device.makeTexture(descriptor: descriptor)
+        hudTextures[slot] = created
+        return created
+    }
+
+    private func hudTexture(from image: CGImage) -> (any MTLTexture)? {
+        let width = image.width, height = image.height
+        let bytesPerRow = width * 4
+        guard width > 0, height > 0, let texture = ensureHUDTexture(width: width, height: height) else { return nil }
+
+        // Fast path: upload directly when the CGImage already matches premultiplied BGRA8 sRGB.
+        if image.bitsPerComponent == 8,
+           image.bitsPerPixel == 32,
+           image.bitmapInfo.contains(.byteOrder32Little),
+           image.alphaInfo == .premultipliedFirst,
+           image.colorSpace?.name == CGColorSpace.sRGB,
+           let data = image.dataProvider?.data,
+           let ptr = CFDataGetBytePtr(data),
+           CFDataGetLength(data) >= image.bytesPerRow * height {
+            texture.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0,
+                            withBytes: ptr, bytesPerRow: image.bytesPerRow)
+            return texture
+        }
+
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let byteCount = bytesPerRow * height
+        if hudBytes.count != byteCount { hudBytes = [UInt8](repeating: 0, count: byteCount) }
+        else { _ = hudBytes.withUnsafeMutableBytes { memset($0.baseAddress, 0, byteCount) } }
+
+        let drawn = hudBytes.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: bytesPerRow, space: space,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                              | CGBitmapInfo.byteOrder32Little.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
+        hudBytes.withUnsafeBytes { bytes in
+            guard let address = bytes.baseAddress else { return }
+            texture.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0,
+                            withBytes: address, bytesPerRow: bytesPerRow)
+        }
+        return texture
     }
 
     /// `image` in a texture of its own, premultiplied BGRA as the drawable is. Nothing writes it again: a new image is a new

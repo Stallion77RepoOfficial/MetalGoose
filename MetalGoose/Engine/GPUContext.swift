@@ -211,11 +211,19 @@ final class GPUContext: @unchecked Sendable {
     /// Encodes a MetalFX spatial upscale of `input` into `output` on `command`, between its passes.
     func encodeUpscale(_ scaler: any MTL4FXSpatialScaler, from input: any MTLTexture, to output: any MTLTexture,
                        on command: GPUCommand) {
+        command.endComputePassIfOpen()
         command.use(input)
         command.use(output)
         scaler.colorTexture = input
         scaler.outputTexture = output
         scaler.encode(commandBuffer: command.commandBuffer)
+    }
+
+    /// Drops cached residency entries across all lanes when a capture session ends.
+    func clearResidencies() {
+        capture.clearResidencies()
+        interpolation.clearResidencies()
+        render.clearResidencies()
     }
 
     /// Threadgroup shape for a per-pixel kernel: as wide as the hardware's SIMD width, as tall

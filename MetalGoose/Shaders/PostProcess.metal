@@ -20,6 +20,10 @@ inline float lumaAt(texture2d<half, access::sample> t, sampler s, float2 uv) {
     return float(rgb2luma(t.sample(s, uv, level(0)).rgb));
 }
 
+inline float lumaRead(texture2d<half, access::sample> t, int2 p, uint width, uint height) {
+    return float(rgb2luma(t.read(clampCoord(p, width, height)).rgb));
+}
+
 kernel void fxaa(
     texture2d<half, access::sample> input [[texture(0)]],
     texture2d<half, access::write> output [[texture(1)]],
@@ -31,6 +35,7 @@ kernel void fxaa(
     constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
     const float2 rcp = 1.0f / float2(width, height);
     float2 pos = (float2(gid) + 0.5f) * rcp;
+    const int2 igid = int2(gid);
 
     const float edgeThreshold = threshold;
     const float edgeThresholdMin = threshold * 0.5f;
@@ -38,10 +43,10 @@ kernel void fxaa(
 
     const half4 centre = input.read(gid);
     const float lumaM = float(rgb2luma(centre.rgb));
-    float lumaS = lumaAt(input, s, pos + float2(0, 1) * rcp);
-    float lumaE = lumaAt(input, s, pos + float2(1, 0) * rcp);
-    float lumaN = lumaAt(input, s, pos + float2(0, -1) * rcp);
-    float lumaW = lumaAt(input, s, pos + float2(-1, 0) * rcp);
+    float lumaS = lumaRead(input, igid + int2(0, 1), width, height);
+    float lumaE = lumaRead(input, igid + int2(1, 0), width, height);
+    float lumaN = lumaRead(input, igid + int2(0, -1), width, height);
+    float lumaW = lumaRead(input, igid + int2(-1, 0), width, height);
 
     const float rangeMax = max(max(max(lumaS, lumaM), max(lumaE, lumaN)), lumaW);
     const float rangeMin = min(min(min(lumaS, lumaM), min(lumaE, lumaN)), lumaW);
@@ -51,10 +56,10 @@ kernel void fxaa(
         return;
     }
 
-    const float lumaNW = lumaAt(input, s, pos + float2(-1, -1) * rcp);
-    const float lumaSE = lumaAt(input, s, pos + float2(1, 1) * rcp);
-    const float lumaNE = lumaAt(input, s, pos + float2(1, -1) * rcp);
-    const float lumaSW = lumaAt(input, s, pos + float2(-1, 1) * rcp);
+    const float lumaNW = lumaRead(input, igid + int2(-1, -1), width, height);
+    const float lumaSE = lumaRead(input, igid + int2(1, 1), width, height);
+    const float lumaNE = lumaRead(input, igid + int2(1, -1), width, height);
+    const float lumaSW = lumaRead(input, igid + int2(-1, 1), width, height);
 
     const float lumaNS = lumaN + lumaS, lumaWE = lumaW + lumaE;
     const float edgeHorz1 = -2.0f * lumaM + lumaNS, edgeVert1 = -2.0f * lumaM + lumaWE;
@@ -115,7 +120,7 @@ kernel void fxaa(
     const float subpixH = subpixG * subpixQuality;
     const float pixelOffsetSubpix = max(goodSpan ? pixelOffset : 0.0f, subpixH);
     if (horzSpan) pos.y += pixelOffsetSubpix * lengthSign; else pos.x += pixelOffsetSubpix * lengthSign;
-    output.write(half4(input.sample(s, pos, level(0)).rgb, 1.0h), gid);
+    output.write(half4(input.sample(s, pos, level(0)).rgb, centre.a), gid);
 }
 
 // MARK: - SMAA
@@ -193,13 +198,16 @@ inline half edgeAt(texture2d<half, access::read> edges, int2 p, bool green, int2
     return green ? e.g : e.r;
 }
 
+inline half2 edgesAt(texture2d<half, access::read> edges, int2 p, int2 size) {
+    if (any(p < 0) || any(p >= size)) return half2(0.0h);
+    return edges.read(uint2(p)).rg;
+}
+
 /// Where the edge line leaves a run at the border position `q`: the edges that cross the run's border
-/// there, on either side of it. A crossing on one side puts the line half a pixel to that side; none, or
-/// one on both sides, leaves it on the border.
-inline float crossingOffset(texture2d<half, access::read> edges, int2 q, int2 across, bool crossIsGreen,
-                            int2 size, thread bool& crossed) {
+/// there, on either side of it, given the already-loaded `positive` crossing edge at `q`.
+inline float crossingOffsetFromPositive(texture2d<half, access::read> edges, int2 q, int2 across, bool crossIsGreen,
+                                        half positive, int2 size, thread bool& crossed) {
     half negative = edgeAt(edges, q - across, crossIsGreen, size);
-    half positive = edgeAt(edges, q, crossIsGreen, size);
     crossed = negative > 0.0h || positive > 0.0h;
     if (!crossed) return 0.0f;
 
@@ -212,30 +220,39 @@ inline float crossingOffset(texture2d<half, access::read> edges, int2 q, int2 ac
 /// Follows the run of edges through `p` in both directions. A horizontal run is made of top-border edges
 /// (green) and is crossed by left-border edges (red); a vertical run is the other way round. The search
 /// stops where the run ends or something crosses it.
-inline EdgeRun followRun(texture2d<half, access::read> edges, int2 p, bool horizontal, int maxSteps, int2 size) {
+inline EdgeRun followRun(texture2d<half, access::read> edges, int2 p, half2 ep, bool horizontal, int maxSteps, int2 size) {
     const int2 along = horizontal ? int2(1, 0) : int2(0, 1);
     const int2 across = horizontal ? int2(0, 1) : int2(1, 0);
     const bool runIsGreen = horizontal;
+    const bool crossIsGreen = !runIsGreen;
 
     EdgeRun run = { 0, 0, 0.0f, 0.0f };
 
     int2 q = p;
+    half2 eq = ep;
     for (int i = 0; i < maxSteps; i++) {
         bool crossed;
-        float offset = crossingOffset(edges, q, across, !runIsGreen, size, crossed);
+        half posCross = crossIsGreen ? eq.g : eq.r;
+        float offset = crossingOffsetFromPositive(edges, q, across, crossIsGreen, posCross, size, crossed);
         if (crossed) { run.startOffset = offset; break; }
-        if (edgeAt(edges, q - along, runIsGreen, size) == 0.0h) break;
-        q -= along;
+        int2 qNext = q - along;
+        half2 eNext = edgesAt(edges, qNext, size);
+        if ((runIsGreen ? eNext.g : eNext.r) == 0.0h) break;
+        q = qNext;
+        eq = eNext;
         run.before++;
     }
 
     q = p;
     for (int i = 0; i < maxSteps; i++) {
+        int2 qNext = q + along;
+        half2 eNext = edgesAt(edges, qNext, size);
         bool crossed;
-        float offset = crossingOffset(edges, q + along, across, !runIsGreen, size, crossed);
+        half posCross = crossIsGreen ? eNext.g : eNext.r;
+        float offset = crossingOffsetFromPositive(edges, qNext, across, crossIsGreen, posCross, size, crossed);
         if (crossed) { run.endOffset = offset; break; }
-        if (edgeAt(edges, q + along, runIsGreen, size) == 0.0h) break;
-        q += along;
+        if ((runIsGreen ? eNext.g : eNext.r) == 0.0h) break;
+        q = qNext;
         run.after++;
     }
     return run;
@@ -308,12 +325,12 @@ kernel void smaaBlendingWeights(
     int2 p = int2(gid);
 
     if (e.g > 0.0h) {
-        float2 area = lineAreas(followRun(edges, p, true, params.maxSearchSteps, size));
+        float2 area = lineAreas(followRun(edges, p, e, true, params.maxSearchSteps, size));
         result.r = half(area.x);
         result.g = half(area.y);
     }
     if (e.r > 0.0h) {
-        float2 area = lineAreas(followRun(edges, p, false, params.maxSearchSteps, size));
+        float2 area = lineAreas(followRun(edges, p, e, false, params.maxSearchSteps, size));
         result.b = half(area.x);
         result.a = half(area.y);
     }
@@ -329,7 +346,7 @@ inline half4 weightsAt(texture2d<half, access::read> weights, int2 p, int2 size)
 /// one border; only the axis with the larger weight is used, so a corner is smoothed in one direction
 /// instead of being blurred in two.
 kernel void smaaBlend(
-    texture2d<half, access::read> input [[texture(0)]],
+    texture2d<half, access::sample> input [[texture(0)]],
     texture2d<half, access::read> weights [[texture(1)]],
     texture2d<half, access::write> output [[texture(2)]],
     uint2 gid [[thread_position_in_grid]]
@@ -340,7 +357,6 @@ kernel void smaaBlend(
 
     int2 size = int2(width, height);
     int2 p = int2(gid);
-    half4 center = input.read(gid);
 
     float above = float(weightsAt(weights, p, size).g);
     float below = float(weightsAt(weights, p + int2(0, 1), size).r);
@@ -348,7 +364,7 @@ kernel void smaaBlend(
     float right = float(weightsAt(weights, p + int2(1, 0), size).b);
 
     if (above + below + left + right < 1e-5f) {
-        output.write(center, gid);
+        output.write(input.read(gid), gid);
         return;
     }
 
@@ -358,15 +374,22 @@ kernel void smaaBlend(
     int2 firstStep = horizontal ? int2(-1, 0) : int2(0, -1);
     int2 secondStep = horizontal ? int2(1, 0) : int2(0, 1);
 
-    float4 c = float4(center);
-    float4 a = float4(input.read(clampCoord(p + firstStep, width, height)));
-    float4 b = float4(input.read(clampCoord(p + secondStep, width, height)));
-    float total = first + second;
-    float4 result = (first / total) * mix(c, a, first) + (second / total) * mix(c, b, second);
-    output.write(half4(result), gid);
+    constexpr sampler linearSampler(filter::linear, address::clamp_to_edge, coord::normalized);
+    const float2 rcp = 1.0f / float2(width, height);
+    const float2 centerUV = (float2(gid) + 0.5f) * rcp;
+
+    if (second < 1e-5f) {
+        output.write(input.sample(linearSampler, centerUV + float2(firstStep) * first * rcp), gid);
+    } else if (first < 1e-5f) {
+        output.write(input.sample(linearSampler, centerUV + float2(secondStep) * second * rcp), gid);
+    } else {
+        float4 a = float4(input.sample(linearSampler, centerUV + float2(firstStep) * first * rcp));
+        float4 b = float4(input.sample(linearSampler, centerUV + float2(secondStep) * second * rcp));
+        output.write(half4((first * a + second * b) / (first + second)), gid);
+    }
 }
 
-// MARK: - Contrast-adaptive sharpening
+// MARK: - Contrast-adaptive sharpening (FidelityFX CAS)
 
 kernel void contrastAdaptiveSharpening(
     texture2d<half, access::read> input [[texture(0)]],
@@ -384,28 +407,29 @@ kernel void contrastAdaptiveSharpening(
     half3 b = input.read(clampCoord(p + int2( 0, -1), width, height)).rgb;
     half3 c = input.read(clampCoord(p + int2( 1, -1), width, height)).rgb;
     half3 d = input.read(clampCoord(p + int2(-1,  0), width, height)).rgb;
-    half3 e = input.read(gid).rgb;
+    half4 center = input.read(gid);
+    half3 e = center.rgb;
     half3 f = input.read(clampCoord(p + int2( 1,  0), width, height)).rgb;
     half3 g = input.read(clampCoord(p + int2(-1,  1), width, height)).rgb;
     half3 h = input.read(clampCoord(p + int2( 0,  1), width, height)).rgb;
     half3 i = input.read(clampCoord(p + int2( 1,  1), width, height)).rgb;
 
-    half3 minRGB = min(min(min(d, e), min(f, b)), h);
-    half3 maxRGB = max(max(max(d, e), max(f, b)), h);
+    half3 mnRGB = min(min(min(d, e), min(f, b)), h);
+    half3 mxRGB = max(max(max(d, e), max(f, b)), h);
 
-    minRGB = min(min(min(minRGB, a), min(c, g)), i);
-    maxRGB = max(max(max(maxRGB, a), max(c, g)), i);
+    // Soft min and max over the 3x3 neighbourhood reduce ringing on high-contrast edges.
+    half3 mnRGB2 = min(min(min(mnRGB, a), min(c, g)), i);
+    half3 mxRGB2 = max(max(max(mxRGB, a), max(c, g)), i);
+    mnRGB += mnRGB2;
+    mxRGB += mxRGB2;
 
-    half3 contrast = maxRGB - minRGB;
-    half3 ampFactor = saturate(1.0h - contrast * 2.0h);
+    half3 amp = sqrt(saturate(min(mnRGB, 2.0h - mxRGB) / max(mxRGB, half3(1e-4h))));
+    half sharpness = saturate((half(params.sharpness) - 0.4h) / 0.8h);
+    half peak = -1.0h / mix(8.0h, 5.0h, sharpness);
+    half3 weight = amp * peak;
 
-    half sharpness = half(params.sharpness);
-    half3 weight = ampFactor * sharpness;
+    half3 sharpened = ((b + d + f + h) * weight + e) / (1.0h + 4.0h * weight);
+    sharpened = clamp(sharpened, mnRGB2, mxRGB2);
 
-    half3 blur = (a + b + c + d + f + g + h + i) / 8.0h;
-    half3 sharpened = e + (e - blur) * weight;
-
-    sharpened = clamp(sharpened, minRGB, maxRGB);
-
-    output.write(half4(clampColor(sharpened), 1.0h), gid);
+    output.write(half4(clampColor(sharpened), center.a), gid);
 }

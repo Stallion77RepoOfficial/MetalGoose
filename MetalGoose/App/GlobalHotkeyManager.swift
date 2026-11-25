@@ -6,8 +6,9 @@ import AppKit
 ///
 /// Shortcuts are registered once and live as long as the process: nothing ever needs them undone, and
 /// the system drops them when the process ends.
+@MainActor
 final class GlobalHotkeyManager {
-    nonisolated(unsafe) static let shared = GlobalHotkeyManager()
+    static let shared = GlobalHotkeyManager()
 
     private struct Entry {
         let ref: EventHotKeyRef
@@ -62,7 +63,9 @@ final class GlobalHotkeyManager {
             guard status == noErr else { return status }
 
             let manager = Unmanaged<GlobalHotkeyManager>.fromOpaque(userData).takeUnretainedValue()
-            manager.callbacks[hotKeyID.id]?()
+            MainActor.assumeIsolated {
+                manager.callbacks[hotKeyID.id]?()
+            }
             return noErr
         }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &eventHandler)
         return status == noErr

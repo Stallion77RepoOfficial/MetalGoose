@@ -217,6 +217,8 @@ final class CapturePipeline: @unchecked Sendable {
         shared.images.reset()
         shared.neuralLatency.reset()
         shared.metalFXLatency.reset()
+        shared.scheduleDelay.withLock { $0 = 0 }
+        shared.lastCaptureArrival.withLock { $0 = 0 }
         shared.renderResetRequested.withLock { $0 = true }
         shared.ring.clear()
         if resetCounters { shared.stats.withLock { $0.resetCumulativeCounters() } }
@@ -253,26 +255,10 @@ final class CapturePipeline: @unchecked Sendable {
         command.retain(frame.pixelBuffer)
         command.onCompleted { [inFlight] _ in inFlight.signal() }
 
-        guard var input = surfaceTexture(for: frame.surface) else {
+        guard let input = surfaceTexture(for: frame.surface) else {
             shared.errors.report(.surfaceTextureFailed)
             drop(command)
             return
-        }
-        // Content drawn at half the window's pixels is taken back to its own size before anything else, which then works on
-        // a quarter of the pixels, and on the content as it was drawn rather than its magnified picture.
-        if let magnification = frame.magnification {
-            guard let content = gpu.ensureTexture(&contentTexture, width: input.width / 2, height: input.height / 2),
-                  let pass = command.makeComputePass() else {
-                drop(command)
-                return
-            }
-            let pipeline = magnification == .nearest ? gpu.pipelines.demagnifyNearest : gpu.pipelines.demagnifyBilinear
-            pass.setComputePipelineState(pipeline)
-            pass.setTexture(input, index: 0)
-            pass.setTexture(content, index: 1)
-            gpu.dispatch(pipeline, on: pass, width: content.width, height: content.height)
-            pass.endEncoding()
-            input = content
         }
 
         let config = shared.config.withLock { $0 }
@@ -281,6 +267,11 @@ final class CapturePipeline: @unchecked Sendable {
             generating = generates
             if !generates { stopGeneration() }
         }
+
+        // Content drawn at half the window's pixels is taken back to its own size before anything else, which then works on
+        // a quarter of the pixels, and on the content as it was drawn rather than its magnified picture.
+        let demagWidth = frame.magnification != nil ? input.width / 2 : input.width
+        let demagHeight = frame.magnification != nil ? input.height / 2 : input.height
 
         // ScreenCaptureKit delivers the render resolution directly and the spatial upscale runs once
         // per presented frame, so the capture path only sharpens and anti-aliases before the frame
@@ -295,22 +286,22 @@ final class CapturePipeline: @unchecked Sendable {
         // up to 0.21 dB further on photos. It is also one pass at the capture's size a capture, where after
         // MetalFX it would be one at the screen's size for every image presented.
         let native = frame.nativePixelSize
-        let isReduced = native.width >= CGFloat(input.width) + 1 && native.height >= CGFloat(input.height) + 1
+        let isReduced = native.width >= CGFloat(demagWidth) + 1 && native.height >= CGFloat(demagHeight) + 1
         // What the Neural Engine is given whole is even in both dimensions, because its chroma planes are half-size. A
         // window or a capture that is odd in one is taken one pixel short: a restored frame is made that much smaller, and
         // a capture is cropped by it where what is left fits. A frame that is larger than the Neural Engine takes is not
         // cropped: it is shrunk to what it takes, whatever its parity.
-        let windowWidth = (isReduced ? Int(native.width) : input.width) & ~1
-        let windowHeight = (isReduced ? Int(native.height) : input.height) & ~1
+        let windowWidth = (isReduced ? Int(native.width) : demagWidth) & ~1
+        let windowHeight = (isReduced ? Int(native.height) : demagHeight) & ~1
         let neuralEngineFitsWindow = generates && NeuralInterpolator.supports(width: windowWidth, height: windowHeight)
         let restores = CaptureRestore.isRestored(upscaling: config.upscaling, generating: generates, isReduced: isReduced,
                                                  neuralEngineFitsWindow: neuralEngineFitsWindow)
-        let evenWidth = input.width & ~1
-        let evenHeight = input.height & ~1
-        let crops = !restores && generates && (evenWidth != input.width || evenHeight != input.height)
+        let evenWidth = demagWidth & ~1
+        let evenHeight = demagHeight & ~1
+        let crops = !restores && generates && (evenWidth != demagWidth || evenHeight != demagHeight)
             && NeuralInterpolator.supports(width: evenWidth, height: evenHeight)
-        let width = restores ? windowWidth : (crops ? evenWidth : input.width)
-        let height = restores ? windowHeight : (crops ? evenHeight : input.height)
+        let width = restores ? windowWidth : (crops ? evenWidth : demagWidth)
+        let height = restores ? windowHeight : (crops ? evenHeight : demagHeight)
 
         let size = CGSize(width: width, height: height)
         if size != processedSize {
@@ -347,16 +338,32 @@ final class CapturePipeline: @unchecked Sendable {
         let antiAliases = config.antiAliasing != .off
         var working = input
 
+        if let magnification = frame.magnification {
+            let directToHistory = !crops && !restores && !sharpens && !antiAliases
+            guard let destination = directToHistory
+                ? history
+                : gpu.ensureTexture(&contentTexture, width: demagWidth, height: demagHeight),
+                  let pass = command.computePass() else {
+                drop(command)
+                return
+            }
+            let pipeline = magnification == .nearest ? gpu.pipelines.demagnifyNearest : gpu.pipelines.demagnifyBilinear
+            pass.setComputePipelineState(pipeline)
+            pass.setTexture(input, index: 0)
+            pass.setTexture(destination, index: 1)
+            gpu.dispatch(pipeline, on: pass, width: destination.width, height: destination.height)
+            working = destination
+        }
+
         if crops {
             // With nothing after the crop, the crop is the copy into the ring.
             let destination = sharpens || antiAliases
                 ? gpu.ensureTexture(&cropTexture, width: width, height: height, usage: targetUsage) : history
-            guard let cropped = destination, let pass = command.makeComputePass() else {
+            guard let cropped = destination, let pass = command.computePass() else {
                 drop(command)
                 return
             }
-            pass.copy(from: input, size: MTLSize(width: width, height: height, depth: 1), to: cropped)
-            pass.endEncoding()
+            pass.copy(from: working, size: MTLSize(width: width, height: height, depth: 1), to: cropped)
             working = cropped
         }
 
@@ -368,13 +375,13 @@ final class CapturePipeline: @unchecked Sendable {
                 destination = history
             }
             guard let destination,
-                  let scaler = gpu.ensureSpatialScaler(&restoreScaler, inputWidth: input.width, inputHeight: input.height,
+                  let scaler = gpu.ensureSpatialScaler(&restoreScaler, inputWidth: working.width, inputHeight: working.height,
                                                        outputWidth: width, outputHeight: height) else {
                 shared.errors.report(.spatialScalerFailed)
                 drop(command)
                 return
             }
-            gpu.encodeUpscale(scaler, from: input, to: destination, on: command)
+            gpu.encodeUpscale(scaler, from: working, to: destination, on: command)
             working = destination
         }
 
@@ -400,12 +407,11 @@ final class CapturePipeline: @unchecked Sendable {
                 return
             }
         } else if working !== history {
-            guard let pass = command.makeComputePass() else {
+            guard let pass = command.computePass() else {
                 drop(command)
                 return
             }
             pass.copy(from: working, to: history)
-            pass.endEncoding()
         }
 
         // The Neural Engine takes the capture in 4:2:0, converted here and handed over once the GPU has written it. It is
@@ -417,8 +423,10 @@ final class CapturePipeline: @unchecked Sendable {
 
         // How far behind real time the render clock runs for this pair, which tells the Neural Engine how long a pair may wait
         // for it and still be shown.
-        let scheduleDelay = FramePlanner.interpolationDelay(captureInterval: shared.captureInterval.withLock { $0.value },
-                                                            generationLatency: choice.latency, steps: neuralSteps)
+        let activeDelay = shared.scheduleDelay.withLock { $0 }
+        let scheduleDelay = activeDelay > 0 ? activeDelay : FramePlanner.interpolationDelay(
+            captureInterval: shared.captureInterval.withLock { $0.value },
+            generationLatency: choice.latency, steps: neuralSteps)
         let validity = WorkValidity()
         command.onCompleted { [shared] succeeded in
             guard succeeded else {
@@ -429,19 +437,22 @@ final class CapturePipeline: @unchecked Sendable {
             }
             if let yuv { shared.neural.frameConverted(yuv, timestamp: now, previous: partner, steps: neuralSteps, delay: scheduleDelay) }
         }
-        let written = command.commit()
-        let captured = FrameHistory(texture: history, lease: lease, written: written, timestamp: now,
-                                    presentationTime: presentationTime(of: frame, arrival: now), isSceneCut: frame.isSceneCut,
-                                    validity: validity, magnification: frame.magnification)
 
         // MetalFX takes the motion between the pair as an input; the Neural Engine needs none. The motion of a pair is
         // measured between two captures that followed one another, so after a stretch in which the media engine was given
         // none the next capture starts a pair, rather than being compared with one from long ago.
         if runsMetalFX {
             if lastMotionTimestamp != previousCapture?.timestamp { motion.breakSequence() }
-            lastMotionTimestamp = now
-            motion.submit(frame: captured, interval: shared.captureInterval.withLock { $0.value })
+            if motion.encode(texture: history, lease: lease, timestamp: now, validity: validity,
+                             interval: shared.captureInterval.withLock { $0.value }, command: command) {
+                lastMotionTimestamp = now
+            }
         }
+
+        let written = command.commit()
+        let captured = FrameHistory(texture: history, lease: lease, written: written, timestamp: now,
+                                    presentationTime: presentationTime(of: frame, arrival: now), isSceneCut: frame.isSceneCut,
+                                    validity: validity, magnification: frame.magnification)
 
         shared.ring.push(captured)
     }
@@ -559,14 +570,13 @@ final class CapturePipeline: @unchecked Sendable {
 
     private func encodeSharpen(_ input: any MTLTexture, to output: any MTLTexture, strength: Float,
                                command: GPUCommand) -> Bool {
-        guard let encoder = command.makeComputePass() else { return false }
+        guard let encoder = command.computePass() else { return false }
         var params = SharpenParams(sharpness: strength)
         encoder.setComputePipelineState(gpu.pipelines.sharpen)
         encoder.setTexture(input, index: 0)
         encoder.setTexture(output, index: 1)
         encoder.setBytes(&params, length: MemoryLayout<SharpenParams>.size, index: 0)
         gpu.dispatch(gpu.pipelines.sharpen, on: encoder, width: output.width, height: output.height)
-        encoder.endEncoding()
         return true
     }
 
@@ -580,7 +590,7 @@ final class CapturePipeline: @unchecked Sendable {
             return true
 
         case .fxaa:
-            guard let encoder = command.makeComputePass() else {
+            guard let encoder = command.computePass() else {
                 shared.errors.report(.antiAliasingUnavailable("FXAA"))
                 return false
             }
@@ -590,14 +600,13 @@ final class CapturePipeline: @unchecked Sendable {
             encoder.setTexture(output, index: 1)
             encoder.setBytes(&threshold, length: MemoryLayout<Float>.size, index: 0)
             gpu.dispatch(gpu.pipelines.fxaa, on: encoder, width: width, height: height)
-            encoder.endEncoding()
             return true
 
         case .smaa:
             // Edges carry two channels and need no more; weights carry four.
             guard let edges = gpu.ensureTexture(&smaaEdges, width: width, height: height, pixelFormat: .rg8Unorm),
                   let weights = gpu.ensureTexture(&smaaWeights, width: width, height: height),
-                  let encoder = command.makeComputePass() else {
+                  let encoder = command.computePass() else {
                 shared.errors.report(.antiAliasingUnavailable("SMAA"))
                 return false
             }
@@ -620,7 +629,6 @@ final class CapturePipeline: @unchecked Sendable {
             encoder.setTexture(weights, index: 1)
             encoder.setTexture(output, index: 2)
             gpu.dispatch(gpu.pipelines.smaaBlend, on: encoder, width: width, height: height)
-            encoder.endEncoding()
             return true
         }
     }
@@ -629,6 +637,7 @@ final class CapturePipeline: @unchecked Sendable {
 
     private func recordArrival(now: CFTimeInterval, captureTime: CFTimeInterval) {
         fpsWindowFrames += 1
+        shared.lastCaptureArrival.withLock { $0 = now }
 
         if lastArrival > 0 {
             let interval = now - lastArrival

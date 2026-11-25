@@ -278,13 +278,20 @@ struct GenerationSelector {
 
         // Not keeping up, or nothing yet: the best there is now, at once. The Neural Engine, when it was timed and MetalFX
         // takes the midpoint over from it, is left alone for a while; MetalFX, when it was timed and is left, too.
+        var blockedNeuralNow = false
         if current.engine == .neuralEngine, best.engine == .metalFX, i.neuralActive != nil, neuralMeasured(steps: current.steps, i) > 0 {
             neuralBlockedUntil = now + Self.block
+            blockedNeuralNow = true
         }
         if current.engine == .metalFX, best.engine != .metalFX, i.metalFXLatency > 0 {
             metalFXBlockedUntil = now + Self.block
         }
-        return adopt(best, desired: desired, target: target, waiting: pending && best != candidates[0], i, now: now)
+        return adopt(best,
+                     desired: blockedNeuralNow ? nil : desired,
+                     target: blockedNeuralNow ? nil : target,
+                     waiting: blockedNeuralNow ? false : (pending && best != candidates[0]),
+                     i,
+                     now: now)
     }
 
     /// The engines that make `steps` images an interval, best first: the Neural Engine for either, MetalFX for the midpoint.

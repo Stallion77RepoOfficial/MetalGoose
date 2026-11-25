@@ -179,8 +179,13 @@ final class MouseConstraintManager: @unchecked Sendable {
     /// the window, and putting it there now would pull at a window being dragged by its title bar.
     @MainActor
     func update(window: CGRect, displays: [CGRect]) {
-        state.withLockUnchecked { $0.tracker.mapping = PointerMapping(window: window, displays: displays) }
-        notifyPointer()
+        let nextMapping = PointerMapping(window: window, displays: displays)
+        let changed = state.withLockUnchecked { state -> Bool in
+            guard state.tracker.mapping != nextMapping else { return false }
+            state.tracker.mapping = nextMapping
+            return true
+        }
+        if changed { notifyPointer() }
     }
 
     // MARK: - Pointer
@@ -251,8 +256,9 @@ final class MouseConstraintManager: @unchecked Sendable {
     private func startCursorReassertTimer() {
         cursorHideTimer?.invalidate()
         let timer = Timer(timeInterval: Self.cursorReassertInterval, repeats: true) { _ in
-            CGDisplayShowCursor(CGMainDisplayID())
+            // Hide before show so the WindowServer hide count goes 1 -> 2 -> 1 and never drops to 0.
             CGDisplayHideCursor(CGMainDisplayID())
+            CGDisplayShowCursor(CGMainDisplayID())
         }
         RunLoop.current.add(timer, forMode: .common)
         cursorHideTimer = timer

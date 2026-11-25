@@ -72,4 +72,12 @@ enum ScreenGeometry {
     static var displayBounds: [CGRect] {
         NSScreen.screens.compactMap { displayID(of: $0).map(CGDisplayBounds) }
     }
+
+    static func captureColorSpaceName(of screen: NSScreen) -> String {
+        (screen.canRepresent(.p3) ? CGColorSpace.displayP3 : CGColorSpace.sRGB) as String
+    }
+
+    static func metalColorSpace(of screen: NSScreen) -> CGColorSpace? {
+        CGColorSpace(name: captureColorSpaceName(of: screen) as CFString)
+    }
 }

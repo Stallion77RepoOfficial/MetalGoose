@@ -222,13 +222,13 @@ final class NeuralInterpolator: @unchecked Sendable {
     var quartersTime: CFTimeInterval { published.withLockUnchecked { $0.active }?.quarterTimes.withLock { $0.value } ?? 0 }
 
     func reset() {
+        published.withLockUnchecked { $0 = Published() }
+        failure.withLock { $0 = Failure() }
         queue.async { [self] in
             retire(active)
             retire(building)
             active = nil
             building = nil
-            published.withLockUnchecked { $0 = Published() }
-            failure.withLock { $0 = Failure() }
         }
     }
 
@@ -284,7 +284,7 @@ final class NeuralInterpolator: @unchecked Sendable {
     func encodeConversion(of frame: any MTLTexture, command: GPUCommand) -> YUVFrame? {
         guard let rig = published.withLockUnchecked({ $0.active }),
               let target = rig.takeInput(),
-              let encoder = command.makeComputePass() else { return nil }
+              let encoder = command.computePass() else { return nil }
 
         let resamples = frame.width != rig.size.width || frame.height != rig.size.height
         let pipeline = resamples ? gpu.pipelines.convertTo420Resampled : gpu.pipelines.convertTo420
@@ -294,7 +294,6 @@ final class NeuralInterpolator: @unchecked Sendable {
         encoder.setTexture(target.chroma, index: 2)
         // One thread per 2x2 block.
         gpu.dispatch(pipeline, on: encoder, width: rig.size.width / 2, height: rig.size.height / 2)
-        encoder.endEncoding()
         if let lease = target.lease { command.retain(lease) }
         command.retain(target.buffer)
         return target
@@ -325,12 +324,12 @@ final class NeuralInterpolator: @unchecked Sendable {
         }
     }
 
-    /// Whether the first image of a pair that has been waiting for the engine can still be made before it is wanted.
+    /// Whether at least the last generated image of a pair that has been waiting for the engine can still be made in time.
     private func isStillWanted(_ pair: Pair, on rig: Rig) -> Bool {
         let call = pair.steps >= InterpolationSteps.quarters ? rig.quarterTimes : rig.midpointTimes
-        let wanted = FramePlanner.firstImageWanted(previous: pair.previous.timestamp, next: pair.current.timestamp,
-                                                   delay: pair.delay, steps: pair.steps)
-        return CACurrentMediaTime() + call.withLock { $0.value } <= wanted
+        let target = FramePlanner.lastImageTarget(previous: pair.previous.timestamp, next: pair.current.timestamp,
+                                                  delay: pair.delay, steps: pair.steps)
+        return CACurrentMediaTime() + call.withLock { $0.value } <= target
     }
 
     private func start(_ pair: Pair, on rig: Rig, waited: Bool) {

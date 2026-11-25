@@ -121,6 +121,7 @@ final class GooseEngine: @unchecked Sendable {
     func endSession() {
         capture.reset()
         capture.resetTiming()
+        shared.gpu.clearResidencies()
     }
 
     /// The entry point for captured frames, from whichever thread they arrive on.
@@ -132,27 +133,27 @@ final class GooseEngine: @unchecked Sendable {
 
     /// Starts presenting into `layer`, which belongs to the overlay.
     @MainActor
-    func attach(to layer: CAMetalLayer, displayRate: DisplayRate) {
+    func attach(to layer: CAMetalLayer, displayRate: DisplayRate, colorSpace: CGColorSpace? = nil) {
         detach()
         shared.stats.withLock {
             $0.screenRefreshRate = displayRate.maximum
             $0.isProMotion = displayRate.isVariable
         }
         let pipeline = RenderPipeline(shared: shared)
-        let driver = RenderDriver(shared: shared, pipeline: pipeline, displayRate: displayRate)
+        let driver = RenderDriver(shared: shared, pipeline: pipeline, displayRate: displayRate, colorSpace: colorSpace)
         presentation = Presentation(pipeline: pipeline, driver: driver, layer: layer)
         driver.start(layer: layer)
     }
 
     @MainActor
-    func updateDisplayRate(_ displayRate: DisplayRate) {
+    func updateDisplayRate(_ displayRate: DisplayRate, colorSpace: CGColorSpace? = nil) {
         let changed = shared.stats.withLock { stats -> Bool in
             let changed = stats.screenRefreshRate != displayRate.maximum || stats.isProMotion != displayRate.isVariable
             stats.screenRefreshRate = displayRate.maximum
             stats.isProMotion = displayRate.isVariable
             return changed
         }
-        presentation?.driver.updateDisplayRate(displayRate)
+        presentation?.driver.updateDisplayRate(displayRate, colorSpace: colorSpace)
         if changed {
             shared.captureInterval.withLock { $0.reset() }
             shared.captureSpread.withLock { $0.reset() }

@@ -32,11 +32,14 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
         var renderScale: Float = 1
         var maxFPS = 0
         var pipelineDepth = 0
+        var colorSpaceName: String?
         /// The display, in CoreGraphics coordinates, whose part under the window is captured with the app's other windows
         /// on it (`follow`); nil while the window alone is.
         var appWindowsDisplay: CGRect?
         /// The latest of what `follow` was asked for, which the serialised update applies whatever order it runs in.
         var followed: (target: CaptureTarget, includesAppWindows: Bool)?
+        /// Latest-wins pending `reconfigure` parameters so rapid UI toggles never apply out of order.
+        var pendingReconfigure: (renderScale: Float?, maxFPS: Int?)?
         /// While the stream changes what it captures, the frames it delivers are of neither one nor the other.
         var isSwitching = false
         /// The first frame after a switch is not a neighbour of the one before it.
@@ -49,7 +52,9 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
 
     /// Touched only from `captureQueue`, which is where every frame arrives.
     private var lastSignature: UInt64?
-    private var lastLuma: [UInt8]?
+    private var currentLuma = [UInt8](repeating: 0, count: FrameSampler.lumaCount)
+    private var previousLuma = [UInt8](repeating: 0, count: FrameSampler.lumaCount)
+    private var hasPreviousLuma = false
     private var lastPixelBuffer: CVPixelBuffer?
     private var sceneCuts = SceneCutDetector()
     private var contentFrames = 0
@@ -141,6 +146,9 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
         config.captureResolution = .best
         config.shouldBeOpaque = false
         config.backgroundColor = .clear
+        if let colorSpaceName = snapshot.colorSpaceName {
+            config.colorSpaceName = colorSpaceName as CFString
+        }
         return config
     }
 
@@ -180,8 +188,10 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 state.renderScale = renderScale
                 state.maxFPS = maxFPS
                 state.pipelineDepth = pipelineDepth
+                state.colorSpaceName = target.colorSpaceName
                 state.appWindowsDisplay = nil
                 state.followed = nil
+                state.pendingReconfigure = nil
                 state.isSwitching = false
                 state.cutsNext = false
                 state.lastError = nil
@@ -193,7 +203,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
             // is running races the frames already being handled.
             captureQueue.async { [self] in
                 lastSignature = nil
-                lastLuma = nil
+                hasPreviousLuma = false
                 lastPixelBuffer = nil
                 sceneCuts.reset()
                 contentFrames = 0
@@ -220,6 +230,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
             defer {
                 state.stream = nil
                 state.followed = nil
+                state.pendingReconfigure = nil
                 state.isSwitching = false
             }
             return state.stream
@@ -240,17 +251,22 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
     /// stream. The frames arrive already reduced, so the GPU never encodes a downscale pass
     /// and every later stage works on proportionally fewer pixels.
     func reconfigure(renderScale: Float? = nil, maxFPS: Int? = nil) async {
+        state.withLockUnchecked { state in
+            let prev = state.pendingReconfigure
+            state.pendingReconfigure = (renderScale ?? prev?.renderScale, maxFPS ?? prev?.maxFPS)
+        }
         await configurationGate.perform { [self] in
-            await reconfigureSerially(renderScale: renderScale, maxFPS: maxFPS)
+            await reconfigureSerially()
         }
     }
 
-    private func reconfigureSerially(renderScale: Float?, maxFPS: Int?) async {
+    private func reconfigureSerially() async {
         let update = state.withLockUnchecked { state -> (SCStream, State, State)? in
-            guard let stream = state.stream else { return nil }
+            guard let stream = state.stream, let pending = state.pendingReconfigure else { return nil }
+            state.pendingReconfigure = nil
             var requested = state
-            requested.renderScale = renderScale ?? state.renderScale
-            requested.maxFPS = maxFPS.map { max(1, $0) } ?? state.maxFPS
+            requested.renderScale = pending.renderScale ?? state.renderScale
+            requested.maxFPS = pending.maxFPS.map { max(1, $0) } ?? state.maxFPS
             requested.capturePixelSize = Self.scaledSize(requested.windowPixelSize, by: requested.renderScale)
             guard requested.capturePixelSize != state.capturePixelSize || requested.maxFPS != state.maxFPS else {
                 state.renderScale = requested.renderScale
@@ -300,6 +316,16 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
         next.backingScale = wanted.target.backingScale
         next.windowPixelSize = wanted.target.pixelSize
         next.capturePixelSize = Self.scaledSize(wanted.target.pixelSize, by: current.renderScale)
+        if let colorSpaceName = wanted.target.colorSpaceName {
+            next.colorSpaceName = colorSpaceName
+        }
+
+        let resolutionChanged = next.backingScale != current.backingScale || next.windowPixelSize != current.windowPixelSize
+        if resolutionChanged {
+            next.magnification = nil
+            next.testsContent = next.backingScale == 2
+            captureQueue.async { [self] in contentFrames = 0 }
+        }
 
         // A new filter where the app's windows come or go, or the window has left the display they are captured on.
         var filter: SCContentFilter?
@@ -321,12 +347,17 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
 
         // A move alone changes nothing for the window's own capture, which follows it.
         let movesRectangle = next.appWindowsDisplay != nil && next.windowFrame != current.windowFrame
-        guard filter != nil || movesRectangle || next.capturePixelSize != current.capturePixelSize else {
+        let colorSpaceChanged = next.colorSpaceName != current.colorSpaceName
+        guard filter != nil || movesRectangle || next.capturePixelSize != current.capturePixelSize || colorSpaceChanged else {
             state.withLockUnchecked {
                 guard $0.stream === stream else { return }
                 $0.windowFrame = next.windowFrame
                 $0.backingScale = next.backingScale
                 $0.windowPixelSize = next.windowPixelSize
+                if resolutionChanged {
+                    $0.magnification = next.magnification
+                    $0.testsContent = next.testsContent
+                }
             }
             return
         }
@@ -341,7 +372,12 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 $0.backingScale = next.backingScale
                 $0.windowPixelSize = next.windowPixelSize
                 $0.capturePixelSize = next.capturePixelSize
+                $0.colorSpaceName = next.colorSpaceName
                 $0.appWindowsDisplay = next.appWindowsDisplay
+                if resolutionChanged {
+                    $0.magnification = next.magnification
+                    $0.testsContent = next.testsContent
+                }
                 if filter != nil { $0.cutsNext = true }
                 $0.lastError = nil
             }
@@ -379,6 +415,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
             $0.capturePixelSize = fallback.capturePixelSize
             $0.renderScale = fallback.renderScale
             $0.maxFPS = fallback.maxFPS
+            $0.colorSpaceName = fallback.colorSpaceName
             $0.appWindowsDisplay = fallback.appWindowsDisplay
             $0.lastError = .captureReconfigurationFailed(error)
         }
@@ -386,17 +423,15 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
 
     // MARK: - The content's resolution
 
-    /// Now and then, until it is known: whether the window's content is drawn at half its pixels, while the window alone is
-    /// captured at all of them (`ContentResolution`). Capture queue only.
-    private func testContent(_ surface: IOSurfaceRef, of stream: SCStream) {
-        contentFrames += 1
-        guard contentFrames % Self.contentTestInterval == 1, let count = ContentResolution.count(surface) else { return }
+    /// Records a single-lock `ContentResolution.Count` once a verdict is reached. Capture queue only.
+    private func applyContentCount(_ count: ContentResolution.Count, of stream: SCStream) -> ContentResolution.Magnification? {
         let verdict = ContentResolution.verdict(of: count)
-        guard verdict != .undecided else { return }
-        state.withLockUnchecked { state in
-            guard state.stream === stream, state.testsContent else { return }
+        guard verdict != .undecided else { return nil }
+        return state.withLockUnchecked { state -> ContentResolution.Magnification? in
+            guard state.stream === stream, state.testsContent else { return state.magnification }
             state.testsContent = false
             if case .half(let magnification) = verdict { state.magnification = magnification }
+            return state.magnification
         }
     }
 
@@ -453,7 +488,7 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
 
         let frameSize = CGSize(width: IOSurfaceGetWidth(surface), height: IOSurfaceGetHeight(surface))
         let snapshot = state.withLockUnchecked { state -> ((@Sendable (CapturedFrame) -> Void)?, CGSize, Int, Bool, Bool,
-                                                            ContentResolution.Magnification?)? in
+                                                            ContentResolution.Magnification?, CGSize)? in
             guard state.stream === stream, !state.isSwitching else { return nil }
             defer { state.cutsNext = false }
             let magnification = Self.magnification(of: state, frameSize: frameSize)
@@ -461,17 +496,36 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
             let testsContent = state.testsContent && state.appWindowsDisplay == nil && state.backingScale == 2
                 && Int(frameSize.width) == Int(state.windowPixelSize.width.rounded())
                 && Int(frameSize.height) == Int(state.windowPixelSize.height.rounded())
-            // A magnified frame stands for content of half its size.
-            let native = magnification == nil ? state.windowPixelSize
-                : CGSize(width: (state.windowPixelSize.width / 2).rounded(.down), height: (state.windowPixelSize.height / 2).rounded(.down))
-            return (state.onFrame, native, state.maxFPS, state.cutsNext, testsContent, magnification)
+            return (state.onFrame, state.windowPixelSize, state.maxFPS, state.cutsNext, testsContent, magnification, frameSize)
         }
-        guard let (callback, native, maxFPS, cutsHere, testsContent, magnification) = snapshot else { return }
+        guard let (callback, windowPixelSize, maxFPS, cutsHere, testsContent, initialMagnification, _) = snapshot else { return }
+
+        // Fast duplicate path via ScreenCaptureKit's `dirtyRects` when present and empty, avoiding IOSurfaceLock + 48 MB memcmp.
+        if !cutsHere, !testsContent, let previous = lastPixelBuffer,
+           let previousSurface = CVPixelBufferGetIOSurface(previous)?.takeUnretainedValue(),
+           CGSize(width: IOSurfaceGetWidth(previousSurface), height: IOSurfaceGetHeight(previousSurface)) == frameSize,
+           let dirtyRects = attachments[SCStreamFrameInfo.dirtyRects] as? [CFDictionary],
+           dirtyRects.allSatisfy({ dict in
+               guard let rect = CGRect(dictionaryRepresentation: dict) else { return false }
+               return rect.width <= 0 || rect.height <= 0
+           }) {
+            lastPixelBuffer = pixelBuffer
+            return
+        }
+
+        let shouldTestContent: Bool
+        if testsContent {
+            contentFrames += 1
+            shouldTestContent = contentFrames % Self.contentTestInterval == 1
+        } else {
+            shouldTestContent = false
+        }
 
         // A frame whose pixels match the previous one's carries nothing new. A surface that
         // cannot be sampled is passed through rather than guessed at.
         var isSceneCut = cutsHere
-        if let sample = FrameSampler.sample(surface) {
+        var resolvedMagnification = initialMagnification
+        if let sample = FrameSampler.sample(surface, luma: &currentLuma, testContent: shouldTestContent) {
             if !cutsHere, sample.signature == lastSignature, let previous = lastPixelBuffer,
                let previousSurface = CVPixelBufferGetIOSurface(previous)?.takeUnretainedValue(),
                FrameSampler.isIdentical(surface, to: previousSurface) {
@@ -479,19 +533,27 @@ final class WindowCaptureManager: NSObject, SCStreamDelegate, SCStreamOutput, @u
                 return
             }
             lastSignature = sample.signature
-            let detected = sceneCuts.isCut(previous: lastLuma, current: sample.luma,
-                                           alpha: SceneCutDetector.alpha(forFrameRate: maxFPS))
+            let detected = hasPreviousLuma
+                ? sceneCuts.isCut(previous: previousLuma, current: currentLuma, alpha: SceneCutDetector.alpha(forFrameRate: maxFPS))
+                : false
             isSceneCut = isSceneCut || detected
-            lastLuma = sample.luma
+            swap(&currentLuma, &previousLuma)
+            hasPreviousLuma = true
+            if let count = sample.contentCount, let updated = applyContentCount(count, of: stream) {
+                resolvedMagnification = updated
+            }
         } else {
             lastSignature = nil
-            lastLuma = nil
+            hasPreviousLuma = false
         }
         lastPixelBuffer = pixelBuffer
-        if testsContent { testContent(surface, of: stream) }
+
+        // A magnified frame stands for content of half its size.
+        let native = resolvedMagnification == nil ? windowPixelSize
+            : CGSize(width: (windowPixelSize.width / 2).rounded(.down), height: (windowPixelSize.height / 2).rounded(.down))
 
         callback?(CapturedFrame(pixelBuffer: pixelBuffer, surface: surface,
                                 captureTime: CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)),
-                                isSceneCut: isSceneCut, nativePixelSize: native, magnification: magnification))
+                                isSceneCut: isSceneCut, nativePixelSize: native, magnification: resolvedMagnification))
     }
 }

@@ -29,24 +29,59 @@ final class BackendApplication: NSObject, NSApplicationDelegate {
         }
         output.send(BackendResponse(event: "ready", status: session.status()))
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            while let line = readLine() {
-                guard line.utf8.count <= 65536 else {
+            while let result = Self.readBoundedLine(fd: STDIN_FILENO, maxBytes: 65536) {
+                switch result {
+                case .tooLong:
                     let response = BackendResponse.failure(MGError("HUB-MG-REQUEST", "A command may contain at most 64 KiB."))
                     DispatchQueue.main.async { MainActor.assumeIsolated { self?.output.send(response) } }
-                    continue
-                }
-                do {
-                    let command = try JSONDecoder().decode(BackendCommand.self, from: Data(line.utf8))
-                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.enqueue(command) } }
-                } catch {
-                    DispatchQueue.main.async { MainActor.assumeIsolated {
-                        self?.output.send(.failure(MGError("HUB-MG-JSON", error.localizedDescription)))
-                    }
+                case .line(let data):
+                    do {
+                        let command = try JSONDecoder().decode(BackendCommand.self, from: data)
+                        DispatchQueue.main.async { MainActor.assumeIsolated { self?.enqueue(command) } }
+                    } catch {
+                        DispatchQueue.main.async { MainActor.assumeIsolated {
+                            self?.output.send(.failure(MGError("HUB-MG-JSON", error.localizedDescription)))
+                        }
+                        }
                     }
                 }
             }
             // Closing the parent's control pipe must release the overlay and mouse constraint.
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.enqueueQuit() } }
+        }
+    }
+
+    private enum BoundedLine {
+        case line(Data)
+        case tooLong
+    }
+
+    private nonisolated static func readBoundedLine(fd: Int32, maxBytes: Int) -> BoundedLine? {
+        var line = Data()
+        line.reserveCapacity(512)
+        var byte: UInt8 = 0
+        var exceeded = false
+        while true {
+            let count = Darwin.read(fd, &byte, 1)
+            if count < 0 {
+                if errno == EINTR { continue }
+                return line.isEmpty && !exceeded ? nil : (exceeded ? .tooLong : .line(line))
+            }
+            if count == 0 {
+                return line.isEmpty && !exceeded ? nil : (exceeded ? .tooLong : .line(line))
+            }
+            if byte == 0x0a {
+                return exceeded ? .tooLong : .line(line)
+            }
+            if byte == 0x0d { continue }
+            if !exceeded {
+                if line.count < maxBytes {
+                    line.append(byte)
+                } else {
+                    exceeded = true
+                    line.removeAll(keepingCapacity: false)
+                }
+            }
         }
     }
 

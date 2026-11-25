@@ -55,9 +55,8 @@ final class GPULane: @unchecked Sendable {
     fileprivate let table: any MTL4ArgumentTable
     fileprivate let reports: GPUReports
     private let device: any MTLDevice
-    /// Where the command buffers' completions arrive. Metal does not keep it alive, so the lane does.
-    private let feedback: DispatchQueue
     private let idle = OSAllocatedUnfairLock<[Slot]>(uncheckedState: [])
+    private let residencyGeneration = OSAllocatedUnfairLock(initialState: 0)
 
     /// What one command buffer is encoded with, kept for the next once the GPU has finished with it.
     fileprivate final class Slot: @unchecked Sendable {
@@ -65,28 +64,44 @@ final class GPULane: @unchecked Sendable {
         let allocator: any MTL4CommandAllocator
         /// Everything the command buffer uses, made resident for it and held by the set until it has run.
         let residency: any MTLResidencySet
+        var committedAllocations: [ObjectIdentifier: any MTLAllocation] = [:]
+        var residencyGeneration = 0
         /// The values passed by `ComputePass.setBytes`, which Metal 4 binds as buffer addresses.
         let constants: any MTLBuffer
 
         static let constantsLength = 16 * 1024
 
         init?(device: any MTLDevice) {
+            let residencyDescriptor = MTLResidencySetDescriptor()
+            residencyDescriptor.initialCapacity = 16
             guard let commandBuffer = device.makeCommandBuffer(),
                   let allocator = device.makeCommandAllocator(),
-                  let residency = try? device.makeResidencySet(descriptor: MTLResidencySetDescriptor()),
+                  let residency = try? device.makeResidencySet(descriptor: residencyDescriptor),
                   let constants = device.makeBuffer(length: Self.constantsLength, options: .storageModeShared) else { return nil }
+            residency.addAllocation(constants)
+            residency.commit()
+            self.committedAllocations[ObjectIdentifier(constants as AnyObject)] = constants
             self.commandBuffer = commandBuffer
             self.allocator = allocator
             self.residency = residency
             self.constants = constants
         }
+
+        func resetResidencyToConstants() {
+            let constantsID = ObjectIdentifier(constants as AnyObject)
+            var removed = false
+            for (id, allocation) in committedAllocations where id != constantsID {
+                residency.removeAllocation(allocation)
+                committedAllocations.removeValue(forKey: id)
+                removed = true
+            }
+            if removed { residency.commit() }
+        }
     }
 
     init?(device: any MTLDevice, label: String, reports: GPUReports) {
-        let feedback = DispatchQueue(label: "com.metalgoose.gpu.\(label)", qos: .userInteractive)
         let descriptor = MTL4CommandQueueDescriptor()
         descriptor.label = "MetalGoose \(label)"
-        descriptor.feedbackQueue = feedback
         let tableDescriptor = MTL4ArgumentTableDescriptor()
         // The kernels bind at most five textures and two buffers.
         tableDescriptor.maxTextureBindCount = 8
@@ -99,16 +114,34 @@ final class GPULane: @unchecked Sendable {
         self.table = table
         self.reports = reports
         self.device = device
-        self.feedback = feedback
     }
 
     /// A command buffer to encode on this lane, labelled for the GPU's error reports and captures.
     func makeCommand(_ label: String) -> GPUCommand? {
+        let generation = residencyGeneration.withLock { $0 }
         guard let slot = idle.withLockUnchecked({ $0.popLast() }) ?? Slot(device: device) else { return nil }
+        if slot.residencyGeneration != generation {
+            slot.resetResidencyToConstants()
+            slot.residencyGeneration = generation
+        }
         slot.commandBuffer.beginCommandBuffer(allocator: slot.allocator)
         slot.commandBuffer.label = label
         slot.commandBuffer.useResidencySet(slot.residency)
         return GPUCommand(lane: self, slot: slot, label: label)
+    }
+
+    /// Drops cached texture allocations from every slot so a stopped session releases its resources cleanly.
+    func clearResidencies() {
+        let generation = residencyGeneration.withLock { state -> Int in
+            state &+= 1
+            return state
+        }
+        idle.withLockUnchecked { slots in
+            for slot in slots {
+                slot.resetResidencyToConstants()
+                slot.residencyGeneration = generation
+            }
+        }
     }
 
     fileprivate func committed() -> UInt64 {
@@ -119,8 +152,11 @@ final class GPULane: @unchecked Sendable {
 
     fileprivate func recycle(_ slot: Slot) {
         slot.allocator.reset()
-        slot.residency.removeAllAllocations()
-        slot.residency.commit()
+        let generation = residencyGeneration.withLock { $0 }
+        if slot.residencyGeneration != generation {
+            slot.resetResidencyToConstants()
+            slot.residencyGeneration = generation
+        }
         idle.withLockUnchecked { $0.append(slot) }
     }
 }
@@ -138,7 +174,9 @@ final class GPUCommand: @unchecked Sendable {
     private var handlers: [@Sendable (Bool) -> Void] = []
     private var waits: [(event: any MTLSharedEvent, value: UInt64)] = []
     private var constantsOffset = 0
-    private var usesConstants = false
+    private var usedAllocations: Set<ObjectIdentifier> = []
+    private var residencyDirty = false
+    private var openComputePass: ComputePass?
 
     fileprivate init(lane: GPULane, slot: GPULane.Slot, label: String) {
         self.lane = lane
@@ -148,7 +186,13 @@ final class GPUCommand: @unchecked Sendable {
 
     /// Makes `allocation` resident for this command buffer and holds it until the command buffer has run.
     func use(_ allocation: any MTLAllocation) {
-        slot.residency.addAllocation(allocation)
+        let id = ObjectIdentifier(allocation as AnyObject)
+        usedAllocations.insert(id)
+        if slot.committedAllocations[id] == nil {
+            slot.residency.addAllocation(allocation)
+            slot.committedAllocations[id] = allocation
+            residencyDirty = true
+        }
     }
 
     /// Holds `object` until the command buffer has run.
@@ -171,8 +215,27 @@ final class GPUCommand: @unchecked Sendable {
         }
     }
 
+    /// Returns the currently open compute pass or opens one, coalescing consecutive compute/copy stages into a single encoder.
+    func computePass() -> ComputePass? {
+        if let openComputePass { return openComputePass }
+        guard let encoder = slot.commandBuffer.makeComputeCommandEncoder() else { return nil }
+        encoder.barrier(afterQueueStages: .all, beforeStages: [.dispatch, .blit], visibilityOptions: .device)
+        encoder.setArgumentTable(lane.table)
+        let pass = ComputePass(encoder: encoder, command: self)
+        openComputePass = pass
+        return pass
+    }
+
+    /// Ends the shared compute pass if one is currently open (required before MetalFX or render passes).
+    func endComputePassIfOpen() {
+        guard let pass = openComputePass else { return }
+        pass.endEncoding()
+        openComputePass = nil
+    }
+
     /// A compute pass, in which copies run too. It starts once everything committed to the lane before it has finished.
     func makeComputePass() -> ComputePass? {
+        endComputePassIfOpen()
         guard let encoder = slot.commandBuffer.makeComputeCommandEncoder() else { return nil }
         encoder.barrier(afterQueueStages: .all, beforeStages: [.dispatch, .blit], visibilityOptions: .device)
         encoder.setArgumentTable(lane.table)
@@ -181,7 +244,9 @@ final class GPUCommand: @unchecked Sendable {
 
     /// A render pass into `target`: cleared to `clearColor`, or with every pixel drawn by the pass where there is none. It
     /// starts once everything committed to the lane before it has finished.
-    func makeRenderPass(target: any MTLTexture, clearColor: MTLClearColor? = nil) -> RenderPass? {
+    func makeRenderPass(target: any MTLTexture, clearColor: MTLClearColor? = nil, isDrawable: Bool = false) -> RenderPass? {
+        endComputePassIfOpen()
+        if !isDrawable { use(target) }
         let descriptor = MTL4RenderPassDescriptor()
         descriptor.colorAttachments[0].texture = target
         descriptor.colorAttachments[0].loadAction = clearColor == nil ? .dontCare : .clear
@@ -204,10 +269,6 @@ final class GPUCommand: @unchecked Sendable {
         precondition(offset + length <= GPULane.Slot.constantsLength, "\(label): more constants than a command buffer holds")
         slot.constants.contents().advanced(by: offset).copyMemory(from: bytes, byteCount: length)
         constantsOffset = offset + length
-        if !usesConstants {
-            usesConstants = true
-            use(slot.constants)
-        }
         return slot.constants.gpuAddress + UInt64(offset)
     }
 
@@ -216,7 +277,16 @@ final class GPUCommand: @unchecked Sendable {
     /// it can be.
     @discardableResult
     func commit(presenting drawable: (any CAMetalDrawable)? = nil, at time: CFTimeInterval? = nil) -> UInt64 {
-        slot.residency.commit()
+        endComputePassIfOpen()
+        let constantsID = ObjectIdentifier(slot.constants as AnyObject)
+        if slot.committedAllocations.count > usedAllocations.count + 8 {
+            for (id, allocation) in slot.committedAllocations where id != constantsID && !usedAllocations.contains(id) {
+                slot.residency.removeAllocation(allocation)
+                slot.committedAllocations.removeValue(forKey: id)
+                residencyDirty = true
+            }
+        }
+        if residencyDirty { slot.residency.commit() }
         slot.commandBuffer.endCommandBuffer()
         for wait in waits { lane.queue.waitForEvent(wait.event, value: wait.value) }
         if let drawable { lane.queue.waitForDrawable(drawable) }

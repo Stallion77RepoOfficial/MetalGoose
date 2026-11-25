@@ -247,6 +247,11 @@ private final class MediaEngineEstimator {
                                                analysis: analysis, since: now, expected: expected, interval: interval))
     }
 
+    func cancel(_ pending: PendingPair) {
+        let id = pending.id
+        measuring.withLock { $0.removeAll { $0.id == id } }
+    }
+
     /// Submits the pair and returns. The vectors arrive on VideoToolbox's own callback thread and
     /// are picked up by a later frame, so a slow or silent media engine costs a missing update
     /// rather than a stalled capture queue.
@@ -342,20 +347,18 @@ final class MotionPipeline: @unchecked Sendable {
         mediaEngine.reset()
     }
 
-    /// Starts measuring the motion that brought the capture to where it is. The field lands later, from the media
-    /// engine's own thread, and is handed to `onField`.
-    ///
-    /// Converts the frame to luma, hands it to the media engine, and copies the resulting vectors
-    /// into a slot we own — VideoToolbox recycles its own buffers, and a field is read long after
-    /// its frame left the estimator.
-    ///
-    /// - Parameter interval: the time between captures, which decides how finely the media engine can
-    ///   afford to search the frame. 0 while it is not known yet.
-    func submit(frame: FrameHistory, interval: CFTimeInterval) {
-        let texture = frame.texture
-        guard let prepared = mediaEngine.prepare(width: texture.width, height: texture.height, interval: interval),
-              let command = gpu.capture.makeCommand("MetalGoose motion luma"),
-              let encoder = command.makeComputePass() else { return }
+    /// Encodes the luma conversion onto `command`'s shared compute pass and schedules `VTMotionEstimationSession`
+    /// once `command` completes.
+    func encode(texture: any MTLTexture, lease: BufferLease, timestamp: CFTimeInterval, validity: WorkValidity,
+                interval: CFTimeInterval, command: GPUCommand) -> Bool {
+        guard let prepared = mediaEngine.prepare(width: texture.width, height: texture.height, interval: interval) else {
+            return false
+        }
+        guard let encoder = command.computePass() else {
+            if let pending = prepared.pending { mediaEngine.cancel(pending) }
+            else { mediaEngine.breakSequence() }
+            return false
+        }
 
         var divisor = UInt32(prepared.analysis.divisor)
         encoder.setComputePipelineState(gpu.pipelines.luma)
@@ -363,22 +366,20 @@ final class MotionPipeline: @unchecked Sendable {
         encoder.setTexture(prepared.texture, index: 1)
         encoder.setBytes(&divisor, length: MemoryLayout<UInt32>.size, index: 0)
         gpu.dispatch(gpu.pipelines.luma, on: encoder, width: prepared.texture.width, height: prepared.texture.height)
-        encoder.endEncoding()
-        command.retain(frame.lease)
+        command.retain(lease)
 
-        // VideoToolbox reads the IOSurface outside Metal's ordering, so the estimate has to follow
-        // the write — but nothing waits for it. It is submitted from the completion handler and the
-        // vectors are picked up by a later frame, so a slow or silent media engine costs a missing
-        // update rather than a stalled capture queue.
         if let pending = prepared.pending {
             nonisolated(unsafe) let pending = pending
-            let (width, timestamp, validity) = (texture.width, frame.timestamp, frame.validity)
+            let width = texture.width
             command.onCompleted { [self] succeeded in
-                guard succeeded, validity.isValid else { return }
+                guard succeeded, validity.isValid else {
+                    mediaEngine.cancel(pending)
+                    return
+                }
                 estimate(pending, frameWidth: width, timestamp: timestamp)
             }
         }
-        command.commit()
+        return true
     }
 
     /// Estimator state belongs to the processing queue; the completion handler that gets here runs

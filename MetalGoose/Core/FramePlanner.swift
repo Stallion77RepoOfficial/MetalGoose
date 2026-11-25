@@ -115,6 +115,14 @@ enum FramePlanner {
         previous + firstImageStart(steps: steps) * (next - previous) + delay
     }
 
+    /// When the last generated image of a pair reaches its own phase (`(steps - 1) / steps`):
+    /// past that point, even the last generated image would arrive too late to be worth making.
+    static func lastImageTarget(previous: CFTimeInterval, next: CFTimeInterval, delay: CFTimeInterval, steps: Int) -> CFTimeInterval {
+        let clampedSteps = max(2, steps)
+        let phase = Double(clampedSteps - 1) / Double(clampedSteps)
+        return previous + phase * (next - previous) + delay
+    }
+
     private static func interpolate<F: TimedFrame>(_ frames: [F], _ input: PlanningInput) -> PresentationPlan {
         let steps = InterpolationSteps.steps(for: input.multiplier)
         let targetTime = input.sampleTime - input.delay

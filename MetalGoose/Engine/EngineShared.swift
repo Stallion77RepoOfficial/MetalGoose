@@ -46,6 +46,12 @@ final class EngineShared: @unchecked Sendable {
     let neuralLatency = GenerationLatency()
     let metalFXLatency = GenerationLatency()
 
+    /// Active arrival-relative schedule delay maintained by `RenderPipeline` for `NeuralInterpolator`.
+    let scheduleDelay = OSAllocatedUnfairLock(initialState: CFTimeInterval(0))
+
+    /// Timestamp (`CACurrentMediaTime()`) of the most recent captured frame entering the pipeline.
+    let lastCaptureArrival = OSAllocatedUnfairLock(initialState: CFTimeInterval(0))
+
     /// The engine's only tuned number. Capture rate, frame schedule and rate preference are all
     /// first-order filters, and each derives its own coefficient from this window and the rate it
     /// is actually running at — so none of them carries a constant that assumes a particular
